@@ -4,3 +4,8 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Orchestrator
+node_modules/
+dist/
+data/
