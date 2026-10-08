@@ -1,0 +1,192 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers ticket "Web UI screens" (ysz-harness-h4u.6).
+  Three structurally different variants of the Orchestrator web UI, switchable via #variant=A|B|C
+  and the floating bar (or ← / →).
+  Sub-shape B forced: greenfield repo, no host page. Plain HTML + vanilla JS on purpose:
+  the stack is decided in "Per-Project configuration, sandbox image, and Orchestrator stack", not here.
+  Mock data only; every action is a stub that mutates in-memory state (shown in the State drawer).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrator UI prototype</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --mute:#6b7385; --line:#e3e6ec; --acc:#2f6fed;
+          --ok:#1f9d55; --warn:#d98a00; --bad:#d64545; --idle:#8a8fa0; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); padding-bottom:70px; }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; background:var(--ink); color:#fff; }
+  header b { font-size:15px; } header span { color:#b9c0d0; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); margin:0 0 8px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .grow { flex:1; min-width:0; }
+  .mute { color:var(--mute); font-size:12px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; font-weight:600; color:#fff; background:var(--idle); white-space:nowrap; }
+  .s-claimed{background:var(--idle)} .s-agent{background:var(--acc)} .s-host{background:#7a4fd6}
+  .s-needs-attention{background:var(--warn)} .s-in-review{background:var(--ok)} .s-failed{background:var(--bad)}
+  .s-killed{background:#444} .s-interrupted{background:#999}
+  button { font:inherit; font-size:12px; padding:3px 9px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover { border-color:var(--acc); } button.danger { color:var(--bad); } button.primary { background:var(--acc); color:#fff; border-color:var(--acc); }
+  pre.log { background:#11151d; color:#cfe3c8; font:12px/1.45 ui-monospace, monospace; padding:8px; border-radius:6px; margin:6px 0 0; overflow:auto; white-space:pre-wrap; }
+  table { width:100%; border-collapse:collapse; } td, th { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  a { color:var(--acc); }
+  .tag { font-size:11px; border:1px solid var(--line); border-radius:4px; padding:0 4px; color:var(--mute); }
+  .paused { color:var(--warn); font-weight:600; font-size:12px; }
+  /* switcher + state drawer: deliberately not part of the design */
+  #switcher { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); background:#ff2d78; color:#fff; border-radius:24px;
+              padding:6px 10px; display:flex; gap:10px; align-items:center; box-shadow:0 4px 16px rgba(0,0,0,.25); z-index:10; font-weight:600; }
+  #switcher button { background:transparent; border:0; color:#fff; font-size:16px; }
+  #stateBtn { position:fixed; bottom:16px; right:16px; z-index:10; }
+  #state { position:fixed; right:16px; bottom:56px; width:min(460px, calc(100vw - 32px)); max-height:60vh; overflow:auto; display:none; z-index:10;
+           background:#11151d; color:#ffd479; font:11px ui-monospace, monospace; padding:10px; border-radius:8px; white-space:pre-wrap; }
+  #toast { position:fixed; top:56px; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:6px 12px; border-radius:6px; display:none; z-index:11; }
+  /* variant layouts */
+  .A { display:grid; grid-template-columns:1fr 1.4fr 1fr; gap:12px; padding:12px 16px; }
+  .B { display:grid; grid-template-columns:300px 1fr; gap:0; height:calc(100vh - 44px - 70px); }
+  .B .side { border-right:1px solid var(--line); overflow:auto; padding:12px; background:#fff; }
+  .B .main { overflow:auto; padding:12px 16px; }
+  .B .runItem { padding:6px 8px; border-radius:6px; cursor:pointer; } .B .runItem.sel { background:#e8efff; }
+  .B .strip { display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; }
+  .C { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; padding:12px 16px; }
+  .C .lane { display:flex; flex-direction:column; gap:10px; }
+  .C .lane.isPaused { opacity:.85; background:repeating-linear-gradient(45deg,transparent 0 10px,#fff4dc 10px 20px); border-radius:8px; }
+  .stack > * + * { margin-top:8px; }
+  @media (max-width:900px){ .A,.C { grid-template-columns:1fr; } .B { grid-template-columns:1fr; height:auto; } }
+</style>
+</head>
+<body>
+<header><b>Orchestrator</b><span id="cap"></span><span class="grow"></span><span>localhost:4000</span></header>
+<div id="toast"></div>
+<main id="app"></main>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+<button id="stateBtn">State</button><pre id="state"></pre>
+
+<script>
+// ---------- mock state (follows decided policy: cap 2 total / 1 per Project) ----------
+const S = {
+  capacity: { total: 2, perProject: 1 },
+  projects: { fazwaz: { paused: false }, PopDeal: { paused: false }, thaivis: { paused: true } },
+  ready: [ // Ready Tickets, already in pick order: priority → round-robin → oldest
+    { id: 'pd-7k2', project: 'PopDeal', title: 'Fix duplicate deal cards on search refresh', p: 2, age: '3d', runNow: false },
+    { id: 'fz-a19', project: 'fazwaz', title: 'Add index on listings.updated_at', p: 2, age: '5d', runNow: false },
+    { id: 'tv-0c3', project: 'thaivis', title: 'Translate onboarding screens to Thai', p: 2, age: '1d', runNow: false },
+    { id: 'pd-x88', project: 'PopDeal', title: 'Remove unused coupon GraphQL fields', p: 3, age: '9d', runNow: false },
+    { id: 'fz-b02', project: 'fazwaz', title: 'Normalize phone numbers in agent profile', p: 3, age: '12d', runNow: false },
+  ],
+  runs: [ // live + history, one row per Run
+    { id: 'r14', ticket: 'fz-9d1', project: 'fazwaz', title: 'Paginate admin audit log', state: 'agent', attempt: 2, started: '18m ago',
+      note: 'Attempt 1 failed: no commits after idle timeout', log: ['[attempt 1] idle timeout 600s, no commits', '[attempt 2] fresh sandbox, branch agent/fz-9d1 reset to base', '[agent] reading AuditLogController.php'] },
+    { id: 'r13', ticket: 'tv-77a', project: 'thaivis', title: 'Dark mode for settings screen', state: 'host', attempt: 1, started: '25m ago',
+      note: 'push → PR body (claude -p + pr skill) → gh pr create', log: ['[agent] COMPLETE', '[host] git push agent/tv-77a', '[host] writing PR body…'] },
+    { id: 'r12', ticket: 'pd-3f0', project: 'PopDeal', title: 'Upgrade Expo SDK minor', state: 'needs-attention', attempt: 1, started: '1h ago',
+      note: 'gh pr create failed twice (HTTP 502). Claim kept.', log: ['[agent] COMPLETE', '[host] git push ok', '[host] gh pr create → 502', '[host] retry → 502'] },
+    { id: 'r11', ticket: 'fz-55c', project: 'fazwaz', title: 'Fix currency rounding in invoice PDF', state: 'in-review', attempt: 1, ended: '2h ago', pr: 'https://github.com/fazwaz/fazwaz/pull/4812' },
+    { id: 'r10', ticket: 'pd-1aa', project: 'PopDeal', title: 'Deep link to deal detail', state: 'failed', attempt: 2, ended: '4h ago', note: 'NEEDS_INFO: which URL scheme — popdeal:// or universal links?' },
+    { id: 'r9',  ticket: 'tv-2b4', project: 'thaivis', title: 'Cache map tiles offline', state: 'killed', attempt: 1, ended: 'yesterday', note: 'killed by user — worktree kept, +orchestrator:skip' },
+    { id: 'r8',  ticket: 'fz-31e', project: 'fazwaz', title: 'Remove legacy SMS provider', state: 'interrupted', attempt: 1, ended: 'yesterday', note: 'Orchestrator restarted in agent phase; released, not counted as Attempt' },
+  ],
+};
+const LIVE = ['claimed', 'agent', 'host', 'needs-attention'];
+const live = () => S.runs.filter(r => LIVE.includes(r.state));
+const hist = () => S.runs.filter(r => !LIVE.includes(r.state));
+const slotRuns = () => S.runs.filter(r => ['claimed', 'agent', 'host'].includes(r.state)); // OPEN QUESTION: does needs-attention hold a slot?
+let selRun = 'r14';
+
+// ---------- stub actions ----------
+function toast(m) { const t = document.getElementById('toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2500); }
+function togglePause(p) { S.projects[p].paused = !S.projects[p].paused; toast(`${p} ${S.projects[p].paused ? 'paused — in-flight Run continues, no new Runs' : 'resumed'}`); render(); }
+function kill(id) { const r = S.runs.find(x => x.id === id); r.state = 'killed'; r.ended = 'just now'; r.note = 'killed by user — worktree kept, +orchestrator:skip'; toast(`Run ${id} killed; Ticket ${r.ticket} released + orchestrator:skip`); render(); }
+function runNow(tid) { const i = S.ready.findIndex(t => t.id === tid); const [t] = S.ready.splice(i, 1); t.runNow = true; S.ready.unshift(t);
+  toast(`${tid} queued at head — waits for a free slot${S.projects[t.project].paused ? ' (allowed while paused)' : ''}`); render(); }
+function attention(id, what) { toast(`UNDECIDED: what should "${what}" do for Run ${id}?`); }
+function waitReason(t) {
+  if (t.runNow) return 'run-now · waiting for slot';
+  if (S.projects[t.project].paused) return 'Project paused';
+  if (slotRuns().some(r => r.project === t.project)) return `waiting: ${t.project} already has a Run`;
+  if (slotRuns().length >= S.capacity.total) return 'waiting for slot (2/2 busy)';
+  return 'next up';
+}
+
+// ---------- shared bits (small; layouts are NOT shared) ----------
+const pill = s => `<span class="pill s-${s}">${s}</span>`;
+const attemptTxt = r => r.state === 'agent' ? ` · Attempt ${r.attempt}/2` : '';
+const runActions = r => r.state === 'needs-attention'
+  ? `<button onclick="attention('${r.id}','Retry host step')">Retry host step</button> <button onclick="attention('${r.id}','Release Ticket')">Release Ticket</button> <button class="danger" onclick="kill('${r.id}')">Kill</button>`
+  : `<button class="danger" onclick="kill('${r.id}')">Kill</button>`;
+const outcome = r => r.pr ? `<a href="${r.pr}" target="_blank">PR #${r.pr.split('/').pop()}</a>` : `<span class="mute">${r.note || ''}</span>`;
+
+// ---------- Variant A: single dashboard, three columns ----------
+function VariantA() {
+  return `<div class="A">
+    <section><h2>Ready queue (all Projects)</h2><div class="stack">${S.ready.map(t => `
+      <div class="card"><div class="row"><span class="tag">${t.project}</span><span class="tag">P${t.p}</span><span class="mute">${t.id} · ${t.age}</span></div>
+      <div>${t.title}</div><div class="row"><span class="mute grow">${waitReason(t)}</span>${t.runNow ? '' : `<button onclick="runNow('${t.id}')">Run now</button>`}</div></div>`).join('')}
+    </div></section>
+    <section><h2>Live Runs</h2><div class="stack">${live().map(r => `
+      <div class="card"><div class="row">${pill(r.state)}<b class="grow">${r.ticket} ${r.title}</b><span class="mute">${r.started}</span></div>
+      <div class="mute">${r.project}${attemptTxt(r)} · ${r.note || ''}</div><pre class="log" style="max-height:110px">${r.log.join('\n')}</pre>
+      <div style="margin-top:6px">${runActions(r)}</div></div>`).join('')}
+    </div>
+    <h2 style="margin-top:14px">Projects</h2><div class="card">${Object.entries(S.projects).map(([p, v]) => `
+      <div class="row" style="padding:3px 0"><b class="grow">${p}</b>${v.paused ? '<span class="paused">paused</span>' : ''}<button onclick="togglePause('${p}')">${v.paused ? 'Resume' : 'Pause'}</button></div>`).join('')}</div>
+    </section>
+    <section><h2>Run history</h2><table>${hist().map(r => `<tr><td>${pill(r.state)}</td><td><b>${r.ticket}</b> ${r.title}<br><span class="mute">${r.project} · ${r.ended} · ${r.attempt} Attempt(s)</span><br>${outcome(r)}</td></tr>`).join('')}</table></section>
+  </div>`;
+}
+
+// ---------- Variant B: Run-centric, selected Run's log is the main pane ----------
+function VariantB() {
+  const groups = [['Needs you', ['needs-attention', 'failed']], ['Running', ['claimed', 'agent', 'host']], ['Done', ['in-review', 'killed', 'interrupted']]];
+  const r = S.runs.find(x => x.id === selRun) || S.runs[0];
+  return `<div class="B"><aside class="side">${groups.map(([g, sts]) => `<h2 style="margin-top:10px">${g}</h2>${S.runs.filter(x => sts.includes(x.state)).map(x => `
+      <div class="runItem ${x.id === r.id ? 'sel' : ''}" onclick="selRun='${x.id}';render()"><div class="row">${pill(x.state)}<span class="mute">${x.project}</span></div><div>${x.ticket} ${x.title}</div></div>`).join('')}`).join('')}
+    <h2 style="margin-top:14px">Projects</h2>${Object.entries(S.projects).map(([p, v]) => `<div class="row" style="padding:2px 0"><span class="grow">${p}</span>${v.paused ? '<span class="paused">paused</span>' : ''}<button onclick="togglePause('${p}')">${v.paused ? 'Resume' : 'Pause'}</button></div>`).join('')}
+    </aside>
+    <section class="main">
+      <h2>Up next (${S.ready.length} Ready Tickets)</h2><div class="strip">${S.ready.map(t => `<div class="card" style="min-width:220px"><span class="tag">${t.project}</span> <span class="tag">P${t.p}</span><div>${t.title}</div><div class="row"><span class="mute grow">${waitReason(t)}</span>${t.runNow ? '' : `<button onclick="runNow('${t.id}')">Run now</button>`}</div></div>`).join('')}</div>
+      <div class="card" style="margin-top:12px"><div class="row">${pill(r.state)}<b class="grow" style="font-size:16px">${r.ticket} — ${r.title}</b>${LIVE.includes(r.state) ? runActions(r) : ''}</div>
+        <div class="mute" style="margin:6px 0">${r.project} · branch agent/${r.ticket}${attemptTxt(r)} · ${r.started || r.ended}</div>
+        <div>${outcome(r)}${r.pr ? '' : ''}</div>
+        ${r.log ? `<pre class="log" style="min-height:300px">${r.log.join('\n')}</pre>` : '<p class="mute">Run ended; full log kept in Orchestrator store.</p>'}
+      </div>
+    </section></div>`;
+}
+
+// ---------- Variant C: one lane per Project ----------
+function VariantC() {
+  return `<div class="C">${Object.entries(S.projects).map(([p, v]) => {
+    const lr = live().filter(r => r.project === p), q = S.ready.filter(t => t.project === p), h = hist().filter(r => r.project === p);
+    return `<section class="lane ${v.paused ? 'isPaused' : ''}">
+      <div class="card row"><b class="grow" style="font-size:16px">${p}</b>${v.paused ? '<span class="paused">paused · no new Runs</span>' : `<span class="mute">${lr.length}/1 Run</span>`}<button onclick="togglePause('${p}')">${v.paused ? 'Resume' : 'Pause'}</button></div>
+      ${lr.length ? lr.map(r => `<div class="card"><div class="row">${pill(r.state)}<b class="grow">${r.ticket}</b></div><div>${r.title}</div><div class="mute">${attemptTxt(r).slice(3)} ${r.note || ''}</div><pre class="log" style="max-height:140px">${r.log.join('\n')}</pre><div style="margin-top:6px">${runActions(r)}</div></div>`).join('') : '<div class="card mute">No live Run</div>'}
+      <div class="card"><h2>Queue</h2>${q.length ? q.map(t => `<div class="row" style="padding:3px 0"><span class="tag">P${t.p}</span><span class="grow">${t.title}<br><span class="mute">${waitReason(t)}</span></span>${t.runNow ? '' : `<button onclick="runNow('${t.id}')">Run now</button>`}</div>`).join('') : '<span class="mute">empty</span>'}</div>
+      <div class="card"><h2>History</h2>${h.map(r => `<div style="padding:3px 0">${pill(r.state)} ${r.title}<br>${outcome(r)}</div>`).join('') || '<span class="mute">none</span>'}</div>
+    </section>`; }).join('')}</div>`;
+}
+
+// ---------- switcher (hash, so it works on file://) ----------
+const V = { A: ['Dashboard columns', VariantA], B: ['Run-centric', VariantB], C: ['Project lanes', VariantC] }, K = Object.keys(V);
+const cur = () => { const m = location.hash.match(/variant=([A-Z])/); return m && V[m[1]] ? m[1] : 'A'; };
+const go = d => { location.hash = 'variant=' + K[(K.indexOf(cur()) + d + K.length) % K.length]; };
+function render() {
+  const v = cur();
+  document.getElementById('app').innerHTML = V[v][1]();
+  document.getElementById('vlabel').textContent = `${v} (${V[v][0]})`;
+  document.getElementById('cap').textContent = `slots ${slotRuns().length}/${S.capacity.total} · max ${S.capacity.perProject} per Project`;
+  document.getElementById('state').textContent = JSON.stringify(S, null, 1);
+}
+document.getElementById('prev').onclick = () => go(-1);
+document.getElementById('next').onclick = () => go(1);
+document.getElementById('stateBtn').onclick = () => { const s = document.getElementById('state'); s.style.display = s.style.display === 'block' ? 'none' : 'block'; };
+addEventListener('keydown', e => { if (e.target.closest('input,textarea,[contenteditable]')) return; if (e.key === 'ArrowLeft') go(-1); if (e.key === 'ArrowRight') go(1); });
+addEventListener('hashchange', render);
+// fake log stream for in-flight Runs
+const FAKE = ['[agent] running unit tests…', '[agent] tests: 41 passed', '[agent] editing file', '[agent] lint ok', '[agent] committing'];
+setInterval(() => { S.runs.filter(r => r.state === 'agent').forEach(r => r.log.push(FAKE[r.log.length % FAKE.length])); render(); }, 3000);
+render();
+</script>
+</body>
+</html>
