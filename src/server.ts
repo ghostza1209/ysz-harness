@@ -13,6 +13,14 @@ const TYPES: Record<string, string> = {
 /** JSON state at /api/state; everything else is the built SPA from `staticDir`. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string): Server {
   return createServer(async (req, res) => {
+    // Block DNS rebinding: a page on evil.com resolved to 127.0.0.1 still sends Host: evil.com.
+    const host = (req.headers.host ?? '').replace(/:\d+$/, '');
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      res.statusCode = 403;
+      res.end();
+      return;
+    }
+
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
 
     if (path === '/api/state') {
