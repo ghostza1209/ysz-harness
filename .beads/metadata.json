@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ysz_harness",
+  "project_id": "bb756409-32b3-47ee-aead-5cbc4f59fb38"
+}
