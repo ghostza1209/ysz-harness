@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import type { Orchestrator } from './core';
 import type { RunLogs } from './logs';
@@ -14,6 +15,8 @@ const TYPES: Record<string, string> = {
 
 /** The most of a Run's log a live tail sends at once, on connect and per poll. Agent output is untrusted and unbounded. */
 const TAIL_BYTES = 16 * 1024;
+/** The most of a Run's log the full-log route holds in memory at once. */
+const FULL_CHUNK_BYTES = 1024 * 1024;
 
 /**
  * Server-sent events for one Run's log: a `tail` event with the log's last TAIL_BYTES, then `log` events with
@@ -91,13 +94,19 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       const runId = Number(logRoute[1]);
       if (logRoute[2]) return streamLog(res, orchestrator, logs, runId, pollMs);
       try {
-        const body = await logs.slice(runId, 0, await logs.size(runId));
+        const total = await logs.size(runId);
         // Agent output: plain text that the browser must not sniff into HTML.
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'x-content-type-options': 'nosniff' });
-        res.end(body);
+        // Unbounded, so streamed in chunks rather than held in memory whole.
+        await pipeline(async function* () {
+          for (let at = 0; at < total; at += FULL_CHUNK_BYTES) yield await logs.slice(runId, at, Math.min(total, at + FULL_CHUNK_BYTES));
+        }, res);
       } catch {
-        res.statusCode = 500;
-        res.end();
+        if (res.headersSent) res.destroy();
+        else {
+          res.statusCode = 500;
+          res.end();
+        }
       }
       return;
     }

@@ -33,6 +33,7 @@ after(() => server.close());
 const get = (path: string, host = `localhost:${port}`) =>
   new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
     request({ port, path, headers: { host } }, (res) => {
+      res.setEncoding('utf8');
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body }));
@@ -90,6 +91,16 @@ it("serves a finished Run's complete log as non-sniffable plain text", async () 
   assert.equal(res.headers['content-type'], 'text/plain; charset=utf-8');
   assert.equal(res.headers['x-content-type-options'], 'nosniff');
   assert.equal(res.body, 'plan <script>alert(1)</script>\nreviewed ✓\n');
+});
+
+it('serves a full log larger than one read chunk intact, across files', async () => {
+  const first = `${'a'.repeat(1024 * 1024 - 1)}é${'b'.repeat(500_000)}`; // é straddles the 1 MiB chunk boundary
+  writeFileSync(join(logDir, '4-attempt1-implement.log'), first);
+  writeFileSync(join(logDir, '4-attempt2-implement.log'), 'tail\n');
+  const res = await get('/api/runs/4/log');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.length, first.length + 5);
+  assert.ok(res.body === `${first}tail\n`);
 });
 
 it('streams a live Run: the tail first, then each append, then end when the Run ends, and closes', async () => {
