@@ -3,11 +3,11 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 export type RunState =
-  | 'claimed' | 'agent' | 'host' | 'needs-attention'
+  | 'claimed' | 'agent' | 'agent-review' | 'host' | 'needs-attention'
   | 'in-review' | 'failed' | 'killed' | 'interrupted';
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
-const SLOT_STATES = ['claimed', 'agent', 'host'];
+const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];
 /** Runs the user can still act on: the slot holders and the ones waiting on a Retry or Kill. */
 const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 

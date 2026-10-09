@@ -547,6 +547,17 @@ describe('a happy-path Run', () => {
     );
   });
 
+  it('collects the implement commits under agent, and reviews under agent-review', async () => {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const seen: string[] = [];
+    collected = () => (seen.push(`collect ${store.liveRuns()[0].state}`), { tip: 'a'.repeat(40), commits: 1 });
+    reviewer = async () => (seen.push(`review ${store.liveRuns()[0].state}`), complete);
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(seen, ['collect agent', 'review agent-review']);
+  });
+
   it('does not claim the in-review Ticket again before the next poll', async () => {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -906,16 +917,18 @@ describe('Kill', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
-  it('from the review agent: does not go on to publish', async () => {
+  it('from agent-review: stops the sandbox container and does not go on to publish', async () => {
     const never = new Promise<void>(() => {});
     reviewer = (_attempt, signal) => gated(never, complete, signal);
     const o = await started();
+    const [{ id, state }] = o.runs().live;
+    assert.equal(state, 'agent-review');
 
-    await o.kill(o.runs().live[0].id);
+    await o.kill(id);
     await o.whenIdle();
 
     assert.deepEqual(stops, ['/clones/tv1-1']);
-    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent-review.']);
     assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1']);
   });
 
@@ -1267,13 +1280,22 @@ describe('restart recovery', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
-  it('treats a claimed Run, and a host Run still collecting the agent\'s commits, as agent-phase', async () => {
-    leftBehind('claimed');
-    store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'host', startedAt: now });
+  it('ends an agent-review Run as interrupted without spending an Attempt', async () => {
+    leftBehind('agent-review', { cloneDir: '/clones/tv1-9' });
     const o = await polled();
     await o.recover();
-    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted', 'interrupted']);
-    assert.deepEqual(writes.map((w) => w.split(':')[0]).sort(), ['interrupt fazwaz/fz1', 'interrupt thaivis/tv1']);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by an Orchestrator restart while agent-review; not counted as an Attempt.']);
+  });
+
+  it('treats a claimed Run, an agent-review Run, and a host Run with no host job yet, as agent-phase', async () => {
+    leftBehind('claimed');
+    store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'host', startedAt: now });
+    store.insertRun({ project: 'PopDeal', ticketId: 'pd1', title: 't', state: 'agent-review', startedAt: now });
+    const o = await polled();
+    await o.recover();
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted', 'interrupted', 'interrupted']);
+    assert.deepEqual(writes.map((w) => w.split(':')[0]).sort(), ['interrupt PopDeal/pd1', 'interrupt fazwaz/fz1', 'interrupt thaivis/tv1']);
   });
 
   it('still ends the Run, and says so, when the bead cannot be released', async () => {

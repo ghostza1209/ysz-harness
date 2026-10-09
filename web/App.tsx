@@ -113,12 +113,13 @@ const ago = (ms: number) => {
   const h = Math.floor(m / 60);
   return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 };
-const label = (state: string) => state.replace('-', ' ');
+/** A stage's name for the states on the stage bar, so pills and bar agree. */
+const label = (state: string) => STAGE_NAMES[state as keyof typeof STAGE_NAMES] ?? state.replace('-', ' ');
 const prNumber = (url: string) => url.match(/\/pull\/(\d+)/)?.[1];
 
 /** A live Run's path to a PR. needs-attention is a stuck host step. */
-const STAGES = ['claimed', 'agent', 'host', 'pr'] as const;
-const STAGE_NAMES = { claimed: 'Claimed', agent: 'Agent', host: 'Push & PR', pr: 'In review' };
+const STAGES = ['claimed', 'agent', 'agent-review', 'host', 'pr'] as const;
+const STAGE_NAMES = { claimed: 'Claimed', agent: 'Implement', 'agent-review': 'Agent review', host: 'Push & PR', pr: 'In review' };
 function Stages({ state }: { state: RunRow['state'] }) {
   const at = STAGES.indexOf(state === 'needs-attention' ? 'host' : (state as (typeof STAGES)[number]));
   return (

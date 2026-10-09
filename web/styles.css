@@ -308,7 +308,8 @@ a:focus-visible {
   border-left: 4px solid var(--mute);
 }
 
-.card.live.agent {
+.card.live.agent,
+.card.live.agent-review {
   border-left-color: var(--accent);
 }
 
@@ -356,7 +357,8 @@ a:focus-visible {
   white-space: nowrap;
 }
 
-.pill.agent {
+.pill.agent,
+.pill.agent-review {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
@@ -892,11 +894,13 @@ button {
 .conn.up::before,
 .dot.ok,
 .pill.agent::before,
+.pill.agent-review::before,
 .pill.host::before {
   animation: pulse 2s ease-in-out infinite;
 }
 
 .pill.agent::before,
+.pill.agent-review::before,
 .pill.host::before {
   content: '';
   display: inline-block;

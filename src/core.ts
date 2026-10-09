@@ -43,7 +43,7 @@ export interface Orchestrator {
   slots(): { used: number; total: number };
   projectStatuses(): ProjectStatus[];
   /**
-   * Stop a live Run (claimed, agent, host or needs-attention): abort its agent and host processes, remove its sandbox
+   * Stop a live Run (claimed, agent, agent-review, host or needs-attention): abort its agent and host processes, remove its sandbox
    * container, then release the Ticket with orchestrator:skip and a comment. The Run ends killed and keeps its clone.
    * Rejects, leaving the Run live, if the container could not be removed.
    */
@@ -202,7 +202,6 @@ export function createOrchestrator(deps: {
           return { kind: 'failed', prepared, reason: `the implement agent stopped without signalling COMPLETE${implemented.tail && `: ${implemented.tail}`}` };
         }
 
-        store.updateRun(runId, { state: 'host' });
         let collected: { tip: string; commits: number };
         try {
           collected = await host.collect(project, prepared, signal);
@@ -213,7 +212,7 @@ export function createOrchestrator(deps: {
         signal.throwIfAborted();
         if (collected.commits === 0) return { kind: 'failed', prepared, reason: 'the agent made no commits' };
 
-        store.updateRun(runId, { state: 'agent' });
+        store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
           const reviewed = await sandbox.review(req);
@@ -380,7 +379,7 @@ export function createOrchestrator(deps: {
         const control = controls.get(runId);
         control?.ctl.abort();
         // sandcastle removes its container on abort but ignores docker's errors, so check it ourselves.
-        if (run.state === 'agent' && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
+        if ((run.state === 'agent' || run.state === 'agent-review') && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
         await control?.running;
 
         const reason = `Killed from the dashboard while ${run.state}.`;
