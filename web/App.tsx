@@ -1,7 +1,8 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import { parseLog, type LogBlock } from './logView';
-import type { RunRow } from '../src/store';
+import { muted, play, setMuted, stageCue } from './sound';
+import type { RunRow, RunState } from '../src/store';
 
 interface State {
   slots: { used: number; total: number };
@@ -28,6 +29,20 @@ function ThemeToggle() {
   return (
     <button className="ghost theme" onClick={flip} aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title={dark ? 'Light mode' : 'Dark mode'}>
       {dark ? '☀' : '☾'}
+    </button>
+  );
+}
+
+/** Turns the click and stage sounds on or off. */
+function SoundToggle() {
+  const [off, setOff] = useState(muted);
+  const flip = () => {
+    setMuted(!off);
+    setOff(!off);
+  };
+  return (
+    <button className="ghost theme" onClick={flip} aria-pressed={off} aria-label={off ? 'Turn sound on' : 'Mute sound'} title={off ? 'Sound on' : 'Silent mode'}>
+      {off ? '🔇' : '🔊'}
     </button>
   );
 }
@@ -269,11 +284,17 @@ export function App() {
   const [project, setProject] = useState('');
   const [query, setQuery] = useState('');
   const [logRun, setLogRun] = useState<RunRow | null>(null);
+  // Each Run's state at the last poll; null until the first one, so opening the page stays quiet.
+  const seen = useRef<Map<number, RunState> | null>(null);
 
   const load = () =>
     fetch('/api/state')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(res.status === 401 ? SIGNED_OUT : `HTTP ${res.status}`))))
       .then((s: State) => {
+        const runs = [...s.runs.live, ...s.runs.history];
+        const cue = seen.current && stageCue(seen.current, runs);
+        if (cue) play(cue);
+        seen.current = new Map(runs.map((r) => [r.id, r.state]));
         setState(s);
         setError(null);
       })
@@ -284,9 +305,12 @@ export function App() {
     const poll = setInterval(load, REFRESH_MS);
     // Drives the elapsed timers on live Runs.
     const tick = setInterval(() => setNow(Date.now()), 1000);
+    const click = (e: MouseEvent) => (e.target as Element).closest('button') && play('click');
+    document.addEventListener('click', click);
     return () => {
       clearInterval(poll);
       clearInterval(tick);
+      document.removeEventListener('click', click);
     };
   }, []);
 
@@ -349,6 +373,7 @@ export function App() {
           </b>
         </div>
         <span className="grow" />
+        <SoundToggle />
         <ThemeToggle />
         <span className={`conn ${error ? 'down' : state ? 'up' : ''}`}>{error === SIGNED_OUT ? 'Signed out' : error ? 'Server unreachable' : state ? 'Live' : 'Connecting…'}</span>
       </header>
