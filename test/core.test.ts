@@ -1305,11 +1305,11 @@ describe('restart recovery', () => {
     assert.deepEqual(await o.recover(), []);
 
     assert.equal(leftoverSweeps, 1);
-    assert.deepEqual(writes, ['interrupt thaivis/tv1: Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.deepEqual(writes, ['interrupt thaivis/tv1: Interrupted by a ysz restart while agent; not counted as an Attempt.']);
     assert.deepEqual(hostSteps, ['removeClone /clones/tv1-9']);
     assert.deepEqual(o.runs().live, []);
     const [run] = o.runs().history;
-    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by a ysz restart while agent; not counted as an Attempt.']);
     assert.notEqual(run.endedAt, null);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
@@ -1319,7 +1319,7 @@ describe('restart recovery', () => {
     const o = await polled();
     await o.recover();
     const [run] = o.runs().history;
-    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by an Orchestrator restart while agent-review; not counted as an Attempt.']);
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by a ysz restart while agent-review; not counted as an Attempt.']);
   });
 
   it('treats a claimed Run, an agent-review Run, and a host Run with no host job yet, as agent-phase', async () => {
@@ -1408,7 +1408,7 @@ describe('restart recovery', () => {
     claimed = ['thaivis/tv-killed'];
     const o = await polled();
     await o.recover();
-    assert.deepEqual(writes, ['kill thaivis/tv-killed: Killed from the dashboard; released after an Orchestrator restart.']);
+    assert.deepEqual(writes, ['kill thaivis/tv-killed: Killed from the dashboard; released after a ysz restart.']);
   });
 
   it('releases the other orphan claims when one release fails', async () => {

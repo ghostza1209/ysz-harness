@@ -61,5 +61,5 @@ try {
 }
 
 createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`), token).listen(port, '127.0.0.1', () => {
-  console.log(`Orchestrator on http://localhost:${port}/?token=${token}`);
+  console.log(`ysz on http://localhost:${port}/?token=${token}`);
 });

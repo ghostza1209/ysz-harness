@@ -6,12 +6,12 @@
 
 <p align="center"><a href="README.md">English</a> · <b>ไทย</b></p>
 
-**Orchestrator** ที่หยิบ Ready Ticket จากคิว Beads ของแต่ละ Project มาให้ Claude agent ทำใน Docker sandbox แยกกัน ให้ agent ตัวที่สองรีวิวและแก้งาน แล้วเปิด pull request รอคุณรีวิว ไม่ merge เองเด็ดขาด ความหมายของศัพท์ดูได้ที่ [GLOSSARY.md](GLOSSARY.md)
+**ysz** หยิบ Ready Ticket จากคิว Beads ของแต่ละ Project มาให้ Claude agent ทำใน Docker sandbox แยกกัน ให้ agent ตัวที่สองรีวิวและแก้งาน แล้วเปิด pull request รอคุณรีวิว ไม่ merge เองเด็ดขาด ความหมายของศัพท์ดูได้ที่ [GLOSSARY.md](GLOSSARY.md)
 
 ## Run ทำงานอย่างไร
 
 1. ติด label `ready-for-agent` ให้ bead ที่เปิดอยู่ใน repo ของ Project
-2. เมื่อมี slot ว่าง (สูงสุด 1 Run ต่อ Project) Orchestrator จะ claim Ticket และ clone repo ไว้บน branch `agent/<ticket-id>`
+2. เมื่อมี slot ว่าง (สูงสุด 1 Run ต่อ Project) ysz จะ claim Ticket และ clone repo ไว้บน branch `agent/<ticket-id>`
 3. **Implement agent** ทำ Ticket ใน sandbox จากนั้น **Review agent** รีวิวและแก้งาน ถ้า Attempt แรกล้มจะลองใหม่อีกครั้งเดียว
 4. ฝั่ง host push branch แล้วเปิด PR เข้า `baseBranch` ของ Project ตัว bead จะได้คอมเมนต์ลิงก์ PR และ label `in-review`
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
@@ -38,7 +38,7 @@ echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' > .env
 ## เริ่มใช้งาน
 
 ```bash
-npm start          # build Dashboard แล้วเริ่ม Orchestrator (PORT ค่าเริ่มต้น 4000)
+npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค่าเริ่มต้น 4000)
 ```
 
 เปิด URL ที่แสดงใน terminal (`http://localhost:4000/?token=…`) token เก็บอยู่ที่ `data/dashboard-token` ลบไฟล์นี้ทิ้งเพื่อสร้าง token ใหม่
@@ -48,7 +48,7 @@ npm start          # build Dashboard แล้วเริ่ม Orchestrator (P
 | ต้องการ | ทำแบบนี้ |
 | --- | --- |
 | ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
-| กัน Ticket ไม่ให้ Orchestrator หยิบ | `bd update <id> --add-label orchestrator:skip` |
+| กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |
@@ -63,4 +63,4 @@ npm test           # unit tests
 npm run typecheck
 ```
 
-โค้ดอยู่ใน `src/` (server, แกน Orchestrator, sandbox, host steps) และ `web/` (Dashboard) การตัดสินใจด้านดีไซน์อยู่ใน [`docs/adr`](docs/adr)
+โค้ดอยู่ใน `src/` (server, แกน ysz, sandbox, host steps) และ `web/` (Dashboard) การตัดสินใจด้านดีไซน์อยู่ใน [`docs/adr`](docs/adr)

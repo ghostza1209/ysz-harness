@@ -368,7 +368,7 @@ export function App() {
       <header className="topbar">
         <div className="brand">
           <img className={`logo ${state?.runs.live.length ? 'spin' : ''}`} src="/logo.svg" alt="" width={20} height={20} />
-          Orchestrator
+          ysz
         </div>
         <div className="slots" title="Concurrent Runs: max 1 per Project">
           <span className="mute">Slots</span>
@@ -416,7 +416,7 @@ export function App() {
 
       {error && (
         <div className="banner bad-banner" role="alert">
-          {error === SIGNED_OUT ? 'Not signed in: open the URL the Orchestrator printed in its terminal.' : `Can't reach the server: ${error}. Retrying every ${REFRESH_MS / 1000}s.`}
+          {error === SIGNED_OUT ? 'Not signed in: open the URL ysz printed in its terminal.' : `Can't reach the server: ${error}. Retrying every ${REFRESH_MS / 1000}s.`}
         </div>
       )}
       {allPaused && (

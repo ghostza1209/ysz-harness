@@ -17,7 +17,7 @@ The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first. I
 ## Rules
 
 - This sandbox has no `bd` and no access to the issue tracker. Do not try to install or run it. Do not create issues: follow-ups go in the commit message.
-- Do not push, and do not run `gh`. The Orchestrator pushes the branch and opens the pull request.
+- Do not push, and do not run `gh`. ysz pushes the branch and opens the pull request.
 - Do not edit, delete or commit anything under `.orchestrator/`. It is excluded from git; keep it that way.
 - Work only on this Ticket.
 - If a human must decide or supply something before the Ticket can be finished (an ambiguous requirement, a missing credential, a choice between designs), do not guess: output your question inside `<question>` tags, then the NEEDS_INFO signal below, and stop.

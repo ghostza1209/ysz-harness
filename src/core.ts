@@ -438,7 +438,7 @@ export function createOrchestrator(deps: {
         }
         // An agent was cut off (or the Run had not got that far). Its work is gone, and no Attempt is spent.
         await attempt(`Run ${run.id}`, async () => {
-          let note = `Interrupted by an Orchestrator restart while ${run.state}; not counted as an Attempt.`;
+          let note = `Interrupted by a ysz restart while ${run.state}; not counted as an Attempt.`;
           await beads.interrupt(project, run.ticketId, note).catch((err) => void (note += `; releasing the Ticket failed: ${message(err)}`));
           if (run.cloneDir) await host.removeClone({ dir: run.cloneDir }).then(() => store.updateRun(run.id, { cloneDir: null }), () => {});
           end(run.id, { state: 'interrupted', note });
@@ -454,7 +454,7 @@ export function createOrchestrator(deps: {
               // A kill whose release failed still means skip: a plain release would make the Ticket Ready and re-run it.
               const killed = store.lastRunState(p.name, id) === 'killed';
               await attempt(`releasing orphan claim ${key(p.name, id)}`, () =>
-                killed ? beads.kill(p, id, 'Killed from the dashboard; released after an Orchestrator restart.') : beads.release(p, id),
+                killed ? beads.kill(p, id, 'Killed from the dashboard; released after a ysz restart.') : beads.release(p, id),
               );
             }
           }),
