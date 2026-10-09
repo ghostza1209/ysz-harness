@@ -117,6 +117,70 @@ function LogTail({ runId, now }: { runId: number; now: number }) {
   );
 }
 
+/** A Run's whole log in a modal: formatted like the live tail, or raw to read and copy as is. */
+function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [raw, setRaw] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const ref = useRef<HTMLDialogElement>(null);
+  // ponytail: fetches and renders the whole log at once; virtualize or page it if multi-MB logs get slow.
+  const blocks = useMemo(() => (text === null ? [] : parseLog(text)), [text]);
+  useEffect(() => {
+    ref.current?.showModal();
+    const ctl = new AbortController();
+    fetch(`/api/runs/${run.id}/log`, { signal: ctl.signal })
+      .then((res) => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then(setText)
+      .catch((e: Error) => e.name !== 'AbortError' && setError(e.message));
+    return () => ctl.abort();
+  }, [run.id]);
+  const copy = () =>
+    void navigator.clipboard.writeText(text ?? '').then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  return (
+    <dialog className="log-dialog" ref={ref} onClose={onClose} onClick={(e) => e.target === e.currentTarget && ref.current?.close()}>
+      <div className="row">
+        <b>Log</b>
+        <code>{run.ticketId}</code>
+        <span className="grow" />
+        <div className="chips" role="group" aria-label="Log view">
+          <button className={`chip ${raw ? '' : 'on'}`} aria-pressed={!raw} onClick={() => setRaw(false)}>
+            Formatted
+          </button>
+          <button className={`chip ${raw ? 'on' : ''}`} aria-pressed={raw} onClick={() => setRaw(true)}>
+            Raw
+          </button>
+        </div>
+        <button className="small" onClick={copy} disabled={!text}>
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+        <a href={`/api/runs/${run.id}/log`} target="_blank" rel="noreferrer">
+          Open ↗
+        </a>
+        <button className="ghost small" aria-label="Close" onClick={() => ref.current?.close()}>
+          ✕
+        </button>
+      </div>
+      <div className="log">
+        {error ? (
+          <span className="log-step bad">Couldn’t load the log: {error}</span>
+        ) : text === null ? (
+          <span className="waiting">Loading…</span>
+        ) : raw ? (
+          text
+        ) : blocks.length ? (
+          blocks.map((b, i) => <Block b={b} now={0} key={i} />)
+        ) : (
+          <span className="waiting">Empty log</span>
+        )}
+      </div>
+    </dialog>
+  );
+}
+
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const span = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -204,6 +268,7 @@ export function App() {
   const [filter, setFilter] = useState<keyof typeof FILTERS>('all');
   const [project, setProject] = useState('');
   const [query, setQuery] = useState('');
+  const [logRun, setLogRun] = useState<RunRow | null>(null);
 
   const load = () =>
     fetch('/api/state')
@@ -375,9 +440,9 @@ export function App() {
                       )}
                       <div className="actions">
                         {r.attempt > 0 && (
-                          <a href={`/api/runs/${r.id}/log`} target="_blank" rel="noreferrer">
-                            Full log ↗
-                          </a>
+                          <button className="link" onClick={() => setLogRun(r)}>
+                            Full log
+                          </button>
                         )}
                         <span className="grow" />
                         {r.state === 'needs-attention' && (
@@ -483,9 +548,9 @@ export function App() {
                           </a>
                         )}
                         {r.attempt > 0 && (
-                          <a href={`/api/runs/${r.id}/log`} target="_blank" rel="noreferrer">
-                            Log ↗
-                          </a>
+                          <button className="link" onClick={() => setLogRun(r)}>
+                            Log
+                          </button>
                         )}
                         {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
                           <button className="small" onClick={() => void act(r, 'cleanup', 'Cleaned up')}>
@@ -501,6 +566,8 @@ export function App() {
           </>
         )}
       </div>
+
+      {logRun && <LogDialog run={logRun} onClose={() => setLogRun(null)} />}
 
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (

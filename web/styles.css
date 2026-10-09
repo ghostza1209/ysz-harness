@@ -204,7 +204,17 @@ code {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
   gap: 24px;
-  align-items: start;
+}
+
+/* Side by side, an empty state fills its column so both boxes end at the same line. */
+.columns > section {
+  display: flex;
+  flex-direction: column;
+}
+
+.columns > section > .empty {
+  flex: 1;
+  align-content: center;
 }
 
 h2 {
@@ -473,8 +483,17 @@ a {
   text-decoration: none;
 }
 
-a:hover {
+a:hover,
+button.link:hover {
   text-decoration: underline;
+}
+
+/* A button that opens something in place, styled as the links beside it. */
+button.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
 }
 
 /* Empty states */
@@ -625,6 +644,34 @@ div.log {
   word-break: normal;
   overflow-wrap: anywhere;
   margin: 6px 0;
+}
+
+/* The full log of a Run, over the page. */
+.log-dialog {
+  width: min(1100px, calc(100vw - 32px));
+  max-width: none;
+  height: calc(100dvh - 64px);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+.log-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.log-dialog div.log {
+  flex: 1;
+  height: auto;
+  margin: 0;
 }
 
 @media (max-width: 900px) {
