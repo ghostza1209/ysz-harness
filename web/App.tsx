@@ -15,12 +15,14 @@ const REFRESH_MS = 5_000;
 const TAIL_CHARS = 32_000;
 
 /** The live tail of one Run's log. React renders the text as text, so agent output can't inject markup. */
-function LogTail({ runId, tall }: { runId: number; tall: boolean }) {
+function LogTail({ runId }: { runId: number }) {
   const [text, setText] = useState('');
   const box = useRef<HTMLPreElement>(null);
+  // Follow the tail only while the reader sits at the bottom; scrolling up to read stops it.
+  const follow = useRef(true);
   useEffect(() => {
-    box.current?.scrollTo({ top: box.current.scrollHeight });
-  }, [text, tall]);
+    if (follow.current) box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [text]);
   useEffect(() => {
     const source = new EventSource(`/api/runs/${runId}/log/stream`);
     const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data) as string;
@@ -32,7 +34,14 @@ function LogTail({ runId, tall }: { runId: number; tall: boolean }) {
     return () => source.close();
   }, [runId]);
   return (
-    <pre className={`log ${tall ? 'tall' : ''}`} ref={box}>
+    <pre
+      className="log"
+      ref={box}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      }}
+    >
       {text || <span className="waiting">Waiting for the agent’s first output</span>}
     </pre>
   );
@@ -118,7 +127,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [now, setNow] = useState(Date.now());
-  const [tall, setTall] = useState<Set<number>>(new Set());
   const [filter, setFilter] = useState<keyof typeof FILTERS>('all');
   const [project, setProject] = useState('');
   const [query, setQuery] = useState('');
@@ -165,12 +173,6 @@ export function App() {
     if (window.confirm(`Run ${t.id} now? It claims the Ticket, and a finished Run pushes a branch and opens a PR on ${t.project}.`))
       void post(`/api/projects/${encodeURIComponent(t.project)}/run-now/${encodeURIComponent(t.id)}`, `${t.id} runs at the next free slot`);
   };
-  const toggleTall = (id: number) =>
-    setTall((s) => {
-      const next = new Set(s);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
 
   const slots = state?.slots ?? { used: 0, total: 2 };
   const history = state?.runs.history ?? [];
@@ -213,6 +215,35 @@ export function App() {
         <span className={`conn ${error ? 'down' : state ? 'up' : ''}`}>{error ? 'Server unreachable' : state ? 'Live' : 'Connecting…'}</span>
       </header>
 
+      {state && (
+        <div className="summary">
+          {stats!.map((s) => (
+            <span key={s.key} className={`stat ${s.key} ${s.n ? 'has' : ''}`}>
+              <b key={s.n} className="num">
+                {s.n}
+              </b>{' '}
+              {s.label}
+            </span>
+          ))}
+          <span className="grow" />
+          {state.projects.map((p) => (
+            <button
+              key={p.name}
+              className={`project ${p.paused ? 'paused' : ''} ${p.error ? 'error' : ''}`}
+              role="switch"
+              aria-checked={!p.paused}
+              aria-label={`${p.paused ? 'Resume' : 'Pause'} ${p.name}`}
+              title={`${p.error ? `${p.error}\n` : ''}${p.paused ? 'Paused' : 'Picking'} · ${p.ready} ready: click to ${p.paused ? 'resume' : 'pause'}`}
+              onClick={() => void post(`/api/projects/${encodeURIComponent(p.name)}/${p.paused ? 'resume' : 'pause'}`, `${p.paused ? 'Resumed' : 'Paused'} ${p.name}`)}
+            >
+              <span className={`dot ${p.error ? 'bad' : p.paused ? 'idle' : 'ok'}`} />
+              {p.name}
+              <span className="mute">{p.ready}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {error && (
         <div className="banner bad-banner" role="alert">
           Can't reach the server: {error}. Retrying every {REFRESH_MS / 1000}s.
@@ -236,42 +267,6 @@ export function App() {
           </div>
         ) : (
           <>
-            <section className="stats">
-              {stats!.map((s, i) => (
-                <div key={s.key} className={`stat ${s.key} ${s.n ? 'has' : ''}`} style={{ animationDelay: `${i * 50}ms` }}>
-                  <b key={s.n} className="num">
-                    {s.n}
-                  </b>
-                  <span>{s.label}</span>
-                </div>
-              ))}
-            </section>
-
-            <section className="projects">
-              {state.projects.map((p) => (
-                <div className={`project ${p.paused ? 'paused' : ''} ${p.error ? 'error' : ''}`} key={p.name}>
-                  <div className="row">
-                    <span className={`dot ${p.error ? 'bad' : p.paused ? 'idle' : 'ok'}`} />
-                    <b className="grow">{p.name}</b>
-                    <button
-                      className={`toggle ${p.paused ? '' : 'on'}`}
-                      role="switch"
-                      aria-checked={!p.paused}
-                      aria-label={`${p.paused ? 'Resume' : 'Pause'} ${p.name}`}
-                      title={p.paused ? 'Paused: click to resume' : 'Active: click to pause'}
-                      onClick={() => void post(`/api/projects/${encodeURIComponent(p.name)}/${p.paused ? 'resume' : 'pause'}`, `${p.paused ? 'Resumed' : 'Paused'} ${p.name}`)}
-                    >
-                      <span />
-                    </button>
-                  </div>
-                  <div className="mute">
-                    {p.paused ? 'Paused' : 'Picking'} · {p.ready} ready
-                  </div>
-                  {p.error && <div className="bad">{p.error}</div>}
-                </div>
-              ))}
-            </section>
-
             <div className="columns">
               <section>
                 <h2>
@@ -303,14 +298,9 @@ export function App() {
                       {r.state === 'needs-attention' ? (
                         <div className="note">{r.note}</div>
                       ) : (
-                        <LogTail runId={r.id} tall={tall.has(r.id)} />
+                        <LogTail runId={r.id} />
                       )}
                       <div className="actions">
-                        {r.state !== 'needs-attention' && (
-                          <button className="ghost small" onClick={() => toggleTall(r.id)}>
-                            {tall.has(r.id) ? 'Shrink log' : 'Expand log'}
-                          </button>
-                        )}
                         {r.attempt > 0 && (
                           <a href={`/api/runs/${r.id}/log`} target="_blank" rel="noreferrer">
                             Full log ↗

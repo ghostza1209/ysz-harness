@@ -216,27 +216,53 @@ h2 {
   gap: 12px;
 }
 
-/* Projects strip */
+/* Summary strip: Run counts and per-Project pause switches */
 
-.projects {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.project {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
-  box-shadow: var(--shadow);
-}
-
-.project.paused b {
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 12px max(24px, calc((100% - 1232px) / 2)) 0;
+  font-size: 13px;
   color: var(--mute);
 }
 
+.stat .num {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  animation: pop 0.35s ease-out;
+}
+
+.stat.live.has .num {
+  color: var(--accent);
+}
+
+.stat.review.has .num {
+  color: var(--ok);
+}
+
+.stat.failed.has .num {
+  color: var(--bad);
+}
+
+.project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.project.paused {
+  color: var(--mute);
+  opacity: 0.7;
+}
+
 .project.error {
+  color: var(--bad);
   border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
 }
 
@@ -258,39 +284,6 @@ h2 {
   background: var(--bad);
 }
 
-.toggle {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  padding: 0;
-  border-radius: 10px;
-  border: none;
-  background: var(--line);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.toggle span {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
-  transition: transform 0.15s;
-}
-
-.toggle.on {
-  background: var(--ok);
-}
-
-.toggle.on span {
-  transform: translateX(16px);
-}
-
-.toggle:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--accent);
@@ -525,7 +518,8 @@ pre.log {
   padding: 10px 12px;
   border-radius: 8px;
   margin: 4px 0 0;
-  height: 220px;
+  /* Fills the viewport under the topbar, summary and Run card header, so watching a Run needs no page scroll. */
+  height: max(220px, calc(100dvh - 400px));
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
@@ -563,59 +557,9 @@ pre.log {
   }
 }
 
-pre.log {
-  transition: height 0.25s ease;
-}
-
-pre.log.tall {
-  height: 520px;
-}
-
 .waiting::after {
   content: '';
   animation: dots 1.2s steps(4) infinite;
-}
-
-/* Stats */
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-}
-
-.stat {
-  display: grid;
-  gap: 2px;
-  padding: 14px 16px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
-  color: var(--mute);
-  font-size: 13px;
-  animation: enter 0.35s ease-out both;
-}
-
-.stat .num {
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-  animation: pop 0.35s ease-out;
-}
-
-.stat.live.has .num {
-  color: var(--accent);
-}
-
-.stat.review.has .num {
-  color: var(--ok);
-}
-
-.stat.failed.has .num {
-  color: var(--bad);
 }
 
 /* Live Run stages */
@@ -991,10 +935,6 @@ button {
 }
 
 @media (max-width: 900px) {
-  .stats {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
   .history-head input {
     width: 100%;
   }
