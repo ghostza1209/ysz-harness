@@ -16,3 +16,10 @@ _Avoid_: job, session.
 _Avoid_: retry run, try.
 
 **Run log**: Everything a Run recorded, in order: each Attempt's agent output, then the host steps that follow.
+
+**Implement agent**: The agent that works the Ticket at the start of an Attempt.
+
+**Review agent**: The agent that reviews and corrects the Implement agent's work later in the same Attempt, before any pull request exists.
+_Avoid_: code review, review (alone).
+
+**In review**: A Run's end once its pull request is open and waiting for the human. Always the human's review, never the Review agent's.
