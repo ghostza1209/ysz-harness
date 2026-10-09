@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
+const execFileAsync = promisify(execFile);
 
 it('reads COMPLETE as complete', () => {
   assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete' });
@@ -123,4 +126,37 @@ describe('imageExists', () => {
   it('is false, not a throw, when docker cannot be run', async () => {
     assert.equal(await imageExists('ysz-harness/app', join(root, 'no-such-docker')), false);
   });
+});
+
+/**
+ * sandcastle (patches/) against a fake `claude` that prints a line after the Run is aborted. Unpatched, that line restarts
+ * the idle warnings in a fiber nobody stops: they append "Agent idle for N minutes" to the killed Run's log for good, and
+ * their timers keep the process from exiting.
+ */
+it('stops writing to the log of an aborted agent, even when the agent prints after the abort', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'abort-late-line-'));
+  try {
+    mkdirSync(join(root, 'bin'));
+    writeFileSync(join(root, 'bin/claude'), `#!/bin/sh\ncat >/dev/null\necho '{"type":"system","subtype":"init","session_id":"s"}'\nsleep 1\necho '{"type":"system","subtype":"init","session_id":"s"}'\n`);
+    chmodSync(join(root, 'bin/claude'), 0o755);
+    execFileSync('git', ['init', '--quiet', join(root, 'repo')]);
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '--allow-empty', '-m', 't'], { cwd: join(root, 'repo') });
+    writeFileSync(join(root, 'prompt.md'), 'go');
+    const script = `
+      import { claudeCode, run } from '@ai-hero/sandcastle';
+      import { noSandbox } from '@ai-hero/sandcastle/sandboxes/no-sandbox';
+      const ctl = new AbortController();
+      setTimeout(() => ctl.abort(new Error('killed')), 500);
+      await run({ cwd: ${JSON.stringify(join(root, 'repo'))}, agent: claudeCode('m'), sandbox: noSandbox(), branchStrategy: { type: 'head' },
+        promptFile: ${JSON.stringify(join(root, 'prompt.md'))}, signal: ctl.signal, logging: { type: 'file', path: ${JSON.stringify(join(root, 'agent.log'))} } })
+        .catch(() => {});`;
+    // Exits by itself in ~1s once nothing is left running; a leaked warning fiber holds it until the timeout kills it.
+    await execFileAsync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}` },
+      timeout: 10_000,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
