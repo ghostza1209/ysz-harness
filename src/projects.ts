@@ -26,10 +26,11 @@ export interface Project {
 
 const projectsDir = join(homedir(), 'Desktop/projects');
 
-// No host pnpm store mount: mounted read-write, the agent could poison packages that host installs then run.
+// No Project mounts the host pnpm store: read-write, the agent could poison packages that host installs then run.
 const STORE_IN_SANDBOX = '/home/agent/.pnpm-store';
 
 const appRepo = join(projectsDir, 'personal/app');
+const popdealRepo = join(projectsDir, 'work/PopDeal');
 
 // Edit and restart to add or change a Project.
 export const projects: readonly Project[] = [
@@ -56,7 +57,18 @@ export const projects: readonly Project[] = [
       'e.g. `vendor/bin/phpcs --standard=phpcs.xml <changed files>` and `php artisan test --filter=<TestClass>`. ' +
       'Never run docker commands that touch other containers, volumes or the host checkout. Best-effort: CI covers the rest.',
   },
-  { name: 'PopDeal', repoPath: join(projectsDir, 'work/PopDeal'), baseBranch: 'develop' },
+  {
+    name: 'PopDeal',
+    repoPath: popdealRepo,
+    baseBranch: 'develop',
+    image: 'ysz-harness/popdeal',
+    // No host pnpm store mount (see STORE_IN_SANDBOX). Read-only does not work either: pnpm 12 writes its index.db
+    // and fails with EROFS, then downloads everything anyway. A cold install takes about 1m20s.
+    // Explicit, not a glob: copyToWorktree is the list of secret files publish refuses to commit.
+    copyToWorktree: ['apps/web/.env', 'apps/web/.env.local', 'apps/mobile/.env', 'apps/mobile/.env.local'],
+    installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX}`,
+    checkHint: 'Run `pnpm web:check` for changes under apps/web and `pnpm mobile:check` for changes under apps/mobile (both run type-check, lint and tests).',
+  },
   {
     name: 'thaivis',
     repoPath: appRepo,
