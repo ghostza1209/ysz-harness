@@ -329,7 +329,7 @@ export function App() {
                 {state.runs.live.length === 0 && (
                   <Empty icon="◇" title="Nothing running" hint={allPaused ? 'Resume a Project to let Runs start.' : 'A Run starts when a Ready Ticket fits a free slot.'} />
                 )}
-                <div className="stack">
+                <div className="stack runs">
                   {state.runs.live.map((r) => (
                     <article className={`card live ${r.state}`} key={r.id}>
                       <div className="row">

@@ -159,7 +159,7 @@ code {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 16px max(24px, calc((100% - 1232px) / 2)) 0;
+  margin: 16px 24px 0;
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 14px;
@@ -181,8 +181,6 @@ code {
 /* Layout */
 
 .page {
-  max-width: 1280px;
-  margin: 0 auto;
   padding: 20px 24px 48px;
   display: grid;
   gap: 28px;
@@ -190,7 +188,7 @@ code {
 
 .columns {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 24px;
   align-items: start;
 }
@@ -218,6 +216,10 @@ h2 {
   gap: 12px;
 }
 
+.stack.runs {
+  grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr));
+}
+
 /* Summary strip: Run counts and per-Project pause switches */
 
 .summary {
@@ -225,7 +227,7 @@ h2 {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
-  margin: 12px max(24px, calc((100% - 1232px) / 2)) 0;
+  margin: 12px 24px 0;
   font-size: 13px;
   color: var(--mute);
 }
