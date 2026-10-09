@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
-import { createRunLogs } from '../src/logs';
+import { appendRunLog, createRunLogs } from '../src/logs';
 
 it("reads one Run's log files as a single stream, oldest Attempt first, ignoring other Runs", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
@@ -27,4 +27,16 @@ it('treats a Run with no log yet, or no log directory, as empty', async () => {
   assert.equal(await createRunLogs(dir).size(3), 0);
   assert.equal(await createRunLogs(join(dir, 'missing')).size(3), 0);
   assert.equal((await createRunLogs(dir).slice(3, 0, 10)).length, 0);
+});
+
+it("appends host lines to the Run's host log, read after every Attempt's agent logs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
+  writeFileSync(join(dir, '7-attempt2-review.log'), 'R\n');
+  appendRunLog(dir, 7, 'Pushing');
+  appendRunLog(dir, 7, 'Opening the PR');
+  writeFileSync(join(dir, '7-attempt1-implement.log'), 'I\n');
+  appendRunLog(dir, 8, 'other run');
+  const logs = createRunLogs(dir);
+
+  assert.equal((await logs.slice(7, 0, await logs.size(7))).toString(), 'I\nR\nPushing\nOpening the PR\n');
 });

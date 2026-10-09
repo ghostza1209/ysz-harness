@@ -12,12 +12,15 @@
   --violet: #7a4fd6;
   --log-bg: #0f131b;
   --log-ink: #cfe3c8;
+  --log-mute: #8b93a7;
+  --log-text: #e6e9ef;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 4%);
   color-scheme: light;
 }
 
+/* Dark follows the OS unless the topbar toggle pinned a theme. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #0e1117;
     --card: #161b24;
     --ink: #e6e9ef;
@@ -33,6 +36,23 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+
+:root[data-theme='dark'] {
+  --bg: #0e1117;
+  --card: #161b24;
+  --ink: #e6e9ef;
+  --mute: #8b93a7;
+  --line: #262d3a;
+  --soft: #1d2430;
+  --accent: #6d93ff;
+  --ok: #3ccf8e;
+  --warn: #f0a33a;
+  --bad: #ff6b66;
+  --violet: #a586ff;
+  --log-bg: #0a0d12;
+  --shadow: none;
+  color-scheme: dark;
 }
 
 * {
@@ -97,10 +117,6 @@ code {
   font-size: 16px;
 }
 
-.logo {
-  color: var(--accent);
-}
-
 .slots {
   display: flex;
   align-items: center;
@@ -157,7 +173,7 @@ code {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 16px max(24px, calc((100% - 1232px) / 2)) 0;
+  margin: 16px 24px 0;
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 14px;
@@ -179,8 +195,6 @@ code {
 /* Layout */
 
 .page {
-  max-width: 1280px;
-  margin: 0 auto;
   padding: 20px 24px 48px;
   display: grid;
   gap: 28px;
@@ -188,9 +202,19 @@ code {
 
 .columns {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 24px;
-  align-items: start;
+}
+
+/* Side by side, an empty state fills its column so both boxes end at the same line. */
+.columns > section {
+  display: flex;
+  flex-direction: column;
+}
+
+.columns > section > .empty {
+  flex: 1;
+  align-content: center;
 }
 
 h2 {
@@ -216,27 +240,57 @@ h2 {
   gap: 12px;
 }
 
-/* Projects strip */
-
-.projects {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
+.stack.runs {
+  grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr));
 }
 
-.project {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
-  box-shadow: var(--shadow);
-}
+/* Summary strip: Run counts and per-Project pause switches */
 
-.project.paused b {
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 12px 24px 0;
+  font-size: 13px;
   color: var(--mute);
 }
 
+.stat .num {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  animation: pop 0.35s ease-out;
+}
+
+.stat.live.has .num {
+  color: var(--accent);
+}
+
+.stat.review.has .num {
+  color: var(--ok);
+}
+
+.stat.failed.has .num {
+  color: var(--bad);
+}
+
+.project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.project.paused {
+  color: var(--mute);
+  opacity: 0.7;
+}
+
 .project.error {
+  color: var(--bad);
   border-color: color-mix(in srgb, var(--bad) 40%, var(--line));
 }
 
@@ -258,39 +312,6 @@ h2 {
   background: var(--bad);
 }
 
-.toggle {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  padding: 0;
-  border-radius: 10px;
-  border: none;
-  background: var(--line);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.toggle span {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
-  transition: transform 0.15s;
-}
-
-.toggle.on {
-  background: var(--ok);
-}
-
-.toggle.on span {
-  transform: translateX(16px);
-}
-
-.toggle:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 2px solid var(--accent);
@@ -313,7 +334,8 @@ a:focus-visible {
   border-left: 4px solid var(--mute);
 }
 
-.card.live.agent {
+.card.live.agent,
+.card.live.agent-review {
   border-left-color: var(--accent);
 }
 
@@ -361,7 +383,8 @@ a:focus-visible {
   white-space: nowrap;
 }
 
-.pill.agent {
+.pill.agent,
+.pill.agent-review {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
@@ -374,6 +397,16 @@ a:focus-visible {
 .pill.in-review {
   color: var(--ok);
   background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.pill.merged {
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.pill.pr-closed {
+  color: var(--mute);
+  background: color-mix(in srgb, var(--mute) 14%, transparent);
 }
 
 .pill.failed,
@@ -447,6 +480,12 @@ button.ghost {
   color: inherit;
 }
 
+.theme {
+  padding: 4px 8px;
+  font-size: 15px;
+  line-height: 1;
+}
+
 a {
   color: var(--accent);
   font-size: 13px;
@@ -454,8 +493,17 @@ a {
   text-decoration: none;
 }
 
-a:hover {
+a:hover,
+button.link:hover {
   text-decoration: underline;
+}
+
+/* A button that opens something in place, styled as the links beside it. */
+button.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
 }
 
 /* Empty states */
@@ -493,7 +541,7 @@ a:hover {
 
 .tr {
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr) 150px 170px;
+  grid-template-columns: 130px minmax(0, 1fr) auto 200px;
   gap: 16px;
   align-items: start;
   padding: 12px 16px;
@@ -508,9 +556,26 @@ a:hover {
   gap: 4px;
 }
 
+.when {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  font-size: 13px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.when time {
+  font-weight: 500;
+}
+
+.when .retried {
+  color: var(--warn);
+}
+
 .links {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
@@ -518,17 +583,105 @@ a:hover {
 
 /* Log */
 
-pre.log {
+div.log {
   background: var(--log-bg);
   color: var(--log-ink);
   font: 12px/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
   padding: 10px 12px;
   border-radius: 8px;
   margin: 4px 0 0;
-  height: 220px;
+  /* Fills the viewport under the topbar, summary and Run card header, so watching a Run needs no page scroll. */
+  height: max(220px, calc(100dvh - 400px));
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* Log blocks: steps are dim, tool calls are code, the agent's own words read as prose. */
+.log-rule {
+  color: var(--log-mute);
+  font-size: 11px;
+  border-top: 1px solid #ffffff22;
+  margin: 10px 0 4px;
+  padding-top: 4px;
+}
+
+.log-rule:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
+.log-step {
+  color: var(--log-mute);
+  font-size: 11px;
+}
+
+.log-step.bad {
+  color: var(--bad);
+}
+
+.log-step .elapsed {
+  color: inherit;
+}
+
+.log-sub {
+  padding-left: 14px;
+}
+
+.log-tool {
+  margin: 2px 0;
+}
+
+.log-tool summary {
+  cursor: pointer;
+}
+
+.log-tool pre {
+  margin: 2px 0 6px 14px;
+  font: inherit;
+  white-space: pre-wrap;
+}
+
+.log-tool-name {
+  background: #ffffff1a;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.log-msg {
+  color: var(--log-text);
+  font: 13px/1.55 system-ui, -apple-system, sans-serif;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  margin: 6px 0;
+}
+
+/* The full log of a Run, over the page. */
+.log-dialog {
+  width: min(1100px, calc(100vw - 32px));
+  max-width: none;
+  height: calc(100dvh - 64px);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+.log-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+.log-dialog div.log {
+  flex: 1;
+  height: auto;
+  margin: 0;
 }
 
 @media (max-width: 900px) {
@@ -539,6 +692,11 @@ pre.log {
 
   .slots .mute {
     display: none;
+  }
+
+  /* Just the dot: the topbar has no room for the words. */
+  .conn {
+    font-size: 0;
   }
 
   .banner {
@@ -558,64 +716,18 @@ pre.log {
     gap: 8px;
   }
 
+  .when {
+    justify-items: start;
+  }
+
   .links {
     justify-content: flex-start;
   }
 }
 
-pre.log {
-  transition: height 0.25s ease;
-}
-
-pre.log.tall {
-  height: 520px;
-}
-
 .waiting::after {
   content: '';
   animation: dots 1.2s steps(4) infinite;
-}
-
-/* Stats */
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-}
-
-.stat {
-  display: grid;
-  gap: 2px;
-  padding: 14px 16px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
-  color: var(--mute);
-  font-size: 13px;
-  animation: enter 0.35s ease-out both;
-}
-
-.stat .num {
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
-  animation: pop 0.35s ease-out;
-}
-
-.stat.live.has .num {
-  color: var(--accent);
-}
-
-.stat.review.has .num {
-  color: var(--ok);
-}
-
-.stat.failed.has .num {
-  color: var(--bad);
 }
 
 /* Live Run stages */
@@ -699,6 +811,15 @@ pre.log.tall {
   background: var(--soft);
 }
 
+.where {
+  flex-wrap: wrap;
+}
+
+.where code {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 .copied {
   font-size: 11px;
   color: var(--mute);
@@ -780,8 +901,61 @@ input:focus-visible {
   outline-offset: 1px;
 }
 
-a.pr {
-  color: var(--ok);
+/* History row actions: chamfered chips that light up on hover. */
+.act {
+  --c: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--c) 40%, transparent);
+  border-radius: 0;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+  background: color-mix(in srgb, var(--c) 8%, transparent);
+  color: var(--c);
+  font: 600 12px/1 ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  text-shadow: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, color 0.15s;
+}
+
+.act.pr {
+  --c: var(--ok);
+}
+
+.act svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.act .arrow {
+  opacity: 0.6;
+  transition: transform 0.15s, opacity 0.15s;
+}
+
+.act:hover {
+  text-decoration: none;
+  background: color-mix(in srgb, var(--c) 16%, transparent);
+  border-color: var(--c);
+  box-shadow: inset 0 0 12px color-mix(in srgb, var(--c) 30%, transparent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--c) 60%, transparent);
+}
+
+.act:hover .arrow {
+  opacity: 1;
+  transform: translate(2px, -2px);
+}
+
+.act:focus-visible {
+  outline: 2px solid var(--c);
+  outline-offset: 2px;
 }
 
 .empty-icon {
@@ -846,6 +1020,556 @@ a.pr {
   opacity: 0.7;
 }
 
+/* Ambient: a slow-drifting aurora over a faint neural grid, so the board feels alive even when idle. */
+
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+body::before {
+  background:
+    radial-gradient(40vw 40vw at 15% 10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
+    radial-gradient(35vw 35vw at 85% 30%, color-mix(in srgb, var(--violet) 12%, transparent), transparent 70%),
+    radial-gradient(45vw 30vw at 50% 100%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%);
+  filter: blur(20px);
+  animation: aurora 30s ease-in-out infinite;
+}
+
+body::after {
+  background-image:
+    radial-gradient(1.5px 1.5px at 20% 30%, color-mix(in srgb, var(--accent) 60%, transparent), transparent),
+    radial-gradient(1px 1px at 70% 80%, color-mix(in srgb, var(--violet) 60%, transparent), transparent),
+    radial-gradient(1px 1px at 45% 60%, color-mix(in srgb, var(--ink) 30%, transparent), transparent),
+    linear-gradient(color-mix(in srgb, var(--ink) 5%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--ink) 5%, transparent) 1px, transparent 1px);
+  background-size: 260px 260px, 190px 190px, 330px 330px, 48px 48px, 48px 48px;
+  mask-image: radial-gradient(ellipse at 50% 0%, #000 10%, transparent 75%);
+  animation: grid-drift 60s linear infinite;
+}
+
+/* A light pulse runs along the top bar's edge: the system is always listening. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--violet), transparent) 0 0 / 30% 100% no-repeat;
+  animation: sweep 6s ease-in-out infinite;
+}
+
+.brand {
+  background: linear-gradient(90deg, var(--ink) 40%, var(--accent) 50%, var(--violet) 55%, var(--ink) 65%) 0 0 / 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shine 8s linear infinite;
+}
+
+.logo {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 70%, transparent));
+  animation: breathe 3s ease-in-out infinite, tick 6s cubic-bezier(0.5, 0, 0.2, 1.4) infinite;
+}
+
+.slot.on {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* A Run being worked on wears a rotating light ring, like a mind thinking. */
+@property --spin {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.card.live {
+  position: relative;
+}
+
+.card.live.agent::before,
+.card.live.agent-review::before,
+.card.live.host::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(from var(--spin), transparent 70%, var(--accent), var(--violet), transparent);
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+  animation: ring 4s linear infinite;
+}
+
+.card.live.agent,
+.card.live.agent-review,
+.card.live.host {
+  box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* A working Run's HUD brackets light up, the stage bar runs as a glowing comet, and the timer glows. */
+.card.live:is(.agent, .agent-review, .host) {
+  --hud: var(--accent);
+}
+
+.card.live:is(.agent, .agent-review, .host) .stages li.now span::after {
+  background: linear-gradient(90deg, transparent, var(--accent) 80%, #fff);
+  box-shadow: 0 0 8px var(--accent), 0 0 16px var(--violet);
+}
+
+.card.live:is(.agent, .agent-review, .host) .elapsed {
+  color: var(--accent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* While anything is being worked on, the Live Runs count beats like a heart monitor. */
+section:has(.card.live:is(.agent, .agent-review, .host)) h2 .count {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: beat 1.6s ease-out infinite;
+}
+
+/* Empty states sonar-ping, waiting for work. */
+.empty-icon {
+  position: relative;
+}
+
+.empty-icon::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  animation: ping 2.8s ease-out infinite;
+}
+
+.tr:nth-child(2) { animation-delay: 0.04s; }
+.tr:nth-child(3) { animation-delay: 0.08s; }
+.tr:nth-child(4) { animation-delay: 0.12s; }
+.tr:nth-child(5) { animation-delay: 0.16s; }
+.tr:nth-child(n + 6) { animation-delay: 0.2s; }
+
+.tr {
+  transition: background 0.2s;
+}
+
+.tr:hover {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 60%);
+}
+
+@keyframes aurora {
+  33% {
+    transform: translate(6vw, 4vh) scale(1.15) rotate(8deg);
+  }
+  66% {
+    transform: translate(-5vw, 6vh) scale(1.05) rotate(-6deg);
+  }
+}
+
+/* Dust rises at different speeds over a grid drifting the other way, for depth. */
+@keyframes grid-drift {
+  to {
+    background-position: 0 -520px, 0 -380px, 0 -330px, 96px 96px, 96px 96px;
+  }
+}
+
+@keyframes sweep {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+@keyframes shine {
+  to {
+    background-position: -300% 0;
+  }
+}
+
+@keyframes breathe {
+  50% {
+    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--violet) 80%, transparent));
+  }
+}
+
+/* The logo is 90°-symmetric, so a quarter turn loops back seamlessly. */
+@keyframes tick {
+  0%,
+  85% {
+    transform: rotate(0);
+  }
+  100% {
+    transform: rotate(90deg);
+  }
+}
+
+@keyframes ring {
+  to {
+    --spin: 360deg;
+  }
+}
+
+@keyframes beat {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+
+@keyframes ping {
+  from {
+    transform: scale(0.6);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+/* Future skin: HUD type, glass panels with corner brackets, neon edges. */
+
+:root {
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --glass: color-mix(in srgb, var(--card) 72%, transparent);
+  --hud: color-mix(in srgb, var(--accent) 70%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+:root[data-theme='dark'] {
+  --bg: #070a12;
+  --card: #0e1420;
+  --line: #1b2436;
+  --soft: #141c2b;
+  --accent: #4fb4ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #070a12;
+    --card: #0e1420;
+    --line: #1b2436;
+    --soft: #141c2b;
+    --accent: #4fb4ff;
+  }
+}
+
+body {
+  font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+code,
+.count,
+.stat .num,
+.elapsed,
+.slots b {
+  font-family: var(--mono);
+}
+
+.brand {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 14px;
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+/* Tracking pulls Thai tone marks apart from their consonants. */
+:lang(th) h2 {
+  letter-spacing: normal;
+}
+
+h2::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  transform: rotate(45deg);
+}
+
+.stat.has .num {
+  text-shadow: 0 0 12px currentColor;
+}
+
+/* Scanlines on the glass top bar. */
+.topbar {
+  background:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 3%, transparent) 0 1px, transparent 1px 3px),
+    color-mix(in srgb, var(--card) 70%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+/* Glass panels with HUD corner brackets drawn as background layers, so ::before/::after stay free. */
+.card,
+.table,
+.empty {
+  --b: linear-gradient(var(--hud), var(--hud));
+  background:
+    var(--b) top left / 12px 1px no-repeat,
+    var(--b) top left / 1px 12px no-repeat,
+    var(--b) top right / 12px 1px no-repeat,
+    var(--b) top right / 1px 12px no-repeat,
+    var(--b) bottom left / 12px 1px no-repeat,
+    var(--b) bottom left / 1px 12px no-repeat,
+    var(--b) bottom right / 12px 1px no-repeat,
+    var(--b) bottom right / 1px 12px no-repeat,
+    var(--glass);
+  backdrop-filter: blur(10px);
+  border-color: color-mix(in srgb, var(--accent) 14%, var(--line));
+}
+
+.empty {
+  --hud: color-mix(in srgb, var(--accent) 40%, transparent);
+  border-style: solid;
+  border-width: 1px;
+}
+
+.card:hover,
+.table:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent), 0 8px 30px var(--glow);
+}
+
+.pill,
+.tag {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.pill.in-review,
+.pill.merged,
+.pill.agent,
+.pill.agent-review,
+.pill.host,
+.pill.failed,
+.pill.needs-attention {
+  box-shadow: 0 0 10px color-mix(in srgb, currentColor 25%, transparent);
+}
+
+.project {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--glass);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  backdrop-filter: blur(8px);
+}
+
+.dot.ok {
+  box-shadow: 0 0 8px var(--ok);
+}
+
+button.primary {
+  box-shadow: 0 0 16px var(--glow);
+}
+
+.chips {
+  background: var(--glass);
+  border: 1px solid var(--line);
+}
+
+.chip.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+select,
+input[type='search'] {
+  background: var(--glass);
+}
+
+select:focus-visible,
+input:focus-visible {
+  box-shadow: 0 0 0 4px var(--glow);
+}
+
+/* Cyber layer: neon cyan/magenta, glitching brand, perspective floor grid, CRT scanlines, chamfered controls. */
+
+:root[data-theme='dark'] {
+  --bg: #05060d;
+  --card: #0b0f1c;
+  --ink: #e8f7ff;
+  --line: #17203a;
+  --soft: #10172a;
+  --accent: #00e5ff;
+  --violet: #ff2bd6;
+  --ok: #00ff9c;
+  --warn: #fcee0a;
+  --bad: #ff3864;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #05060d;
+    --card: #0b0f1c;
+    --ink: #e8f7ff;
+    --line: #17203a;
+    --soft: #10172a;
+    --accent: #00e5ff;
+    --violet: #ff2bd6;
+    --ok: #00ff9c;
+    --warn: #fcee0a;
+    --bad: #ff3864;
+  }
+}
+
+/* Neon floor grid in perspective, rolling toward the viewer. */
+#root::before {
+  content: '';
+  position: fixed;
+  left: -50%;
+  right: -50%;
+  bottom: 0;
+  height: 50vh;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--accent) 60%, transparent), transparent 2px),
+    linear-gradient(90deg, color-mix(in srgb, var(--violet) 55%, transparent), transparent 2px);
+  background-size: 64px 64px;
+  transform: perspective(420px) rotateX(58deg);
+  transform-origin: bottom;
+  mask-image: linear-gradient(to top, #000 25%, transparent 95%);
+  opacity: 0.7;
+  animation: floor 2.4s linear infinite;
+}
+
+/* CRT scanlines with a scan band rolling down the screen. */
+#root::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background:
+    linear-gradient(transparent, color-mix(in srgb, var(--accent) 6%, transparent), transparent) 0 -20% / 100% 140px no-repeat,
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 4%, transparent) 0 1px, transparent 1px 3px);
+  animation: scan 9s linear infinite;
+}
+
+.brand {
+  font-family: 'Orbitron', var(--mono);
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  background: none;
+  color: var(--ink);
+  -webkit-text-fill-color: currentColor;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: glitch 7s steps(1) infinite;
+}
+
+h2 {
+  font-family: 'Orbitron', var(--mono);
+  letter-spacing: 0.18em;
+}
+
+h2::before {
+  content: '//';
+  width: auto;
+  height: auto;
+  background: none;
+  transform: none;
+  box-shadow: none;
+  color: var(--violet);
+  text-shadow: 0 0 8px var(--violet);
+}
+
+.topbar {
+  border-bottom-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: 0 1px 18px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.title {
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Chamfered corners, the cyber silhouette. */
+button:not(.ghost, .copy, .chip),
+.pill,
+.tag,
+.project,
+select,
+input[type='search'] {
+  border-radius: 0;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+}
+
+.pill {
+  text-transform: uppercase;
+  text-shadow: 0 0 8px currentColor;
+}
+
+button.primary {
+  color: var(--bg);
+}
+
+a {
+  text-shadow: 0 0 8px color-mix(in srgb, currentColor 45%, transparent);
+}
+
+@keyframes floor {
+  to {
+    background-position: 0 64px;
+  }
+}
+
+@keyframes scan {
+  to {
+    background-position: 0 120%, 0 0;
+  }
+}
+
+@keyframes glitch {
+  0% {
+    transform: none;
+  }
+  92% {
+    transform: translateX(-2px) skewX(-8deg);
+    text-shadow: -2px 0 var(--violet), 2px 0 var(--accent);
+  }
+  93% {
+    transform: translateX(2px);
+    text-shadow: 2px 0 var(--violet), -2px 0 var(--accent);
+    clip-path: inset(20% 0 35% 0);
+  }
+  94% {
+    transform: none;
+    clip-path: none;
+  }
+  96% {
+    transform: translateX(1px);
+    text-shadow: -1px 0 var(--violet), 1px 0 var(--accent);
+  }
+  97% {
+    transform: none;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+}
+
 /* Motion */
 
 .card,
@@ -878,11 +1602,13 @@ button {
 .conn.up::before,
 .dot.ok,
 .pill.agent::before,
+.pill.agent-review::before,
 .pill.host::before {
   animation: pulse 2s ease-in-out infinite;
 }
 
 .pill.agent::before,
+.pill.agent-review::before,
 .pill.host::before {
   content: '';
   display: inline-block;
@@ -982,13 +1708,73 @@ button {
 }
 
 @media (max-width: 900px) {
-  .stats {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
   .history-head input {
     width: 100%;
   }
+}
+
+.prefs {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+}
+
+@media (max-width: 900px) {
+  .prefs {
+    gap: 0;
+  }
+
+  /* Thai filter names run wider than a phone. */
+  .chips {
+    flex-wrap: wrap;
+  }
+}
+
+/* The driver.js tour popover, in the Dashboard's colours for either theme. */
+.driver-popover.ysz-tour {
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-family: inherit;
+}
+
+.ysz-tour .driver-popover-title {
+  font-size: 16px;
+}
+
+.ysz-tour .driver-popover-progress-text,
+.ysz-tour .driver-popover-close-btn {
+  color: var(--mute);
+}
+
+.ysz-tour .driver-popover-footer-btn {
+  color: var(--ink);
+  background: var(--soft);
+  border-color: var(--line);
+  text-shadow: none;
+}
+
+.ysz-tour .driver-popover-next-btn {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.ysz-tour .driver-popover-arrow-side-left {
+  border-left-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-right {
+  border-right-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-top {
+  border-top-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-bottom {
+  border-bottom-color: var(--card);
 }
 
 @media (prefers-reduced-motion: reduce) {

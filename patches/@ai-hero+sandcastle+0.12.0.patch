@@ -1,0 +1,28 @@
+diff --git a/node_modules/@ai-hero/sandcastle/dist/index.js b/node_modules/@ai-hero/sandcastle/dist/index.js
+index 2a1d6d7..7569f15 100644
+--- a/node_modules/@ai-hero/sandcastle/dist/index.js
++++ b/node_modules/@ai-hero/sandcastle/dist/index.js
+@@ -189,6 +189,7 @@ var invokeAgent = (sandbox, sandboxRepoDir, prompt, provider, idleTimeoutMs, com
+   let completionDetected = false;
+   let warningFiber = null;
+   let idleMinuteCounter = 0;
++  let settled = false;
+   const interruptFiber = (fiber) => {
+     if (fiber !== null) Effect_exports.runFork(Fiber_exports.interrupt(fiber));
+   };
+@@ -206,6 +207,7 @@ var invokeAgent = (sandbox, sandboxRepoDir, prompt, provider, idleTimeoutMs, com
+     );
+   };
+   const resetTimer = () => {
++    if (settled) return;
+     interruptFiber(timeoutFiber);
+     if (completionDetected) {
+       timeoutFiber = Effect_exports.runFork(
+@@ -324,6 +326,7 @@ ${errorDetail}`
+   return yield* raced.pipe(
+     Effect_exports.ensuring(
+       Effect_exports.sync(() => {
++        settled = true;
+         abortCleanup?.();
+         interruptFiber(timeoutFiber);
+         timeoutFiber = null;

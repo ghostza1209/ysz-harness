@@ -18,7 +18,7 @@ The implementation is every commit since `{{BASE}}`: see it with `git log {{BASE
 ## Rules
 
 - This sandbox has no `bd` and no access to the issue tracker. Do not try to install or run it. Do not create issues.
-- Do not push, and do not run `gh`. The Orchestrator pushes the branch and opens the pull request.
+- Do not push, and do not run `gh`. ysz pushes the branch and opens the pull request.
 - Do not edit, delete or commit anything under `.orchestrator/`. It is excluded from git; keep it that way.
 - Review only this Ticket's change. Do not restyle code it did not touch.
 - If a human must decide or supply something before the work can be judged or finished, do not guess: output your question inside `<question>` tags, then the NEEDS_INFO signal below, and stop.

@@ -1,9 +1,10 @@
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv, promisify } from 'node:util';
 import { claudeCode, createBindMountSandboxProvider, createWorktree } from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
+import { startCheckServer } from './checks';
 import type { Prepared } from './host';
 import type { Project } from './projects';
 
@@ -72,6 +73,25 @@ export function agentResult({ completionSignal, stdout }: { completionSignal?: s
 }
 
 type CreateSandbox = Parameters<typeof createBindMountSandboxProvider>[0]['create'];
+type SandboxHandle = Awaited<ReturnType<CreateSandbox>>;
+
+/**
+ * Append `command`'s output to `logPath` as it runs, each line indented so the Run log shows it under the setup step.
+ * sandcastle's file log holds a hook's output back until the hook ends, so a long install looks hung.
+ */
+export function teeCommand(handle: SandboxHandle, command: string, logPath: string): SandboxHandle {
+  const write = (line: string) => appendFileSync(logPath, `  ${line}\n`);
+  return {
+    ...handle,
+    exec: async (cmd, opts) => {
+      if (cmd !== command) return handle.exec(cmd, opts);
+      const result = await handle.exec(cmd, { ...opts, onLine: write });
+      // onLine gets stdout only: stderr comes back once the command ends.
+      for (const line of result.stderr.split('\n').filter(Boolean)) write(line);
+      return result;
+    },
+  };
+}
 
 /** `root` is the ysz-harness checkout: it holds the central .env and prompts/; logs go to `<root>/data/logs/<runId>-attempt<n>-<role>.log`. */
 export function createSandboxRunner(root: string): SandboxRunner {
@@ -85,6 +105,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
     const token = parseEnv(readFileSync(join(root, '.env'), 'utf8')).CLAUDE_CODE_OAUTH_TOKEN;
     if (!token) throw new Error('CLAUDE_CODE_OAUTH_TOKEN is missing from the ysz-harness .env');
     mkdirSync(join(root, 'data/logs'), { recursive: true });
+    const logPath = join(root, 'data/logs', `${runId}-attempt${attempt}-${role}.log`);
 
     // sandcastle runs host git in its cwd and worktree, also after the agent has run. Give it an empty repo the
     // sandbox never sees; the sandbox mounts only the clone. Its commit count is then always 0: publish counts instead.
@@ -93,33 +114,43 @@ export function createSandboxRunner(root: string): SandboxRunner {
     execFileSync('git', ['-c', 'user.name=ysz-harness', '-c', 'user.email=ysz-harness@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'decoy'], { cwd: decoy });
     const worktree = await createWorktree({ cwd: decoy, branchStrategy: { type: 'branch', branch } });
 
-    const inner = docker({ imageName: project.image, mounts: project.mounts, containerUid: project.containerUid, containerGid: project.containerGid, groups: project.groups });
+    const inner = docker({ imageName: project.image, containerUid: project.containerUid, containerGid: project.containerGid });
     // docker's provider has create() at runtime; its public type hides it.
     const create = (inner as unknown as { create: CreateSandbox }).create;
     const sandbox = createBindMountSandboxProvider({
       ...inner,
-      // Project.mounts are added by docker itself, after these.
-      create: (opts) => create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] }),
+      create: async (opts) => {
+        const handle = await create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] });
+        return project.installCommand ? teeCommand(handle, project.installCommand, logPath) : handle;
+      },
     });
 
-    const result = await worktree.run({
-      // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
-      agent: claudeCode(MODEL, { effort: 'high', env: { CLAUDE_CODE_OAUTH_TOKEN: token }, captureSessions: false }),
-      // No .beads, no ssh, no push credentials, and no host git dir: the clone's .git is its own.
-      sandbox,
-      // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
-      promptFile: join(root, `prompts/${role}.md`),
-      promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
-      completionSignal: [COMPLETE, NEEDS_INFO],
-      idleTimeoutSeconds: 600,
-      signal,
-      name: `run-${runId}-attempt${attempt}-${role}`,
-      logging: { type: 'file', path: join(root, 'data/logs', `${runId}-attempt${attempt}-${role}.log`) },
-      hooks: project.installCommand
-        ? { sandbox: { onSandboxReady: [{ command: project.installCommand, timeoutMs: 600_000 }] } }
-        : undefined,
-    });
-    return agentResult(result);
+    // ADR 0002: the agent's only way to run PHP checks; it ends with the agent.
+    const checks = project.checkContainer && (await startCheckServer({ ...project.checkContainer, clone: join(dir, 'repo') }));
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: token, ...(checks && { PHP_CHECK_URL: checks.url, PHP_CHECK_TOKEN: checks.token }) };
+
+    try {
+      const result = await worktree.run({
+        // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
+        agent: claudeCode(MODEL, { effort: 'high', env, captureSessions: false }),
+        // No .beads, no ssh, no push credentials, and no host git dir: the clone's .git is its own.
+        sandbox,
+        // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
+        promptFile: join(root, `prompts/${role}.md`),
+        promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
+        completionSignal: [COMPLETE, NEEDS_INFO],
+        idleTimeoutSeconds: 600,
+        signal,
+        name: `run-${runId}-attempt${attempt}-${role}`,
+        logging: { type: 'file', path: logPath },
+        hooks: project.installCommand
+          ? { sandbox: { onSandboxReady: [{ command: project.installCommand, timeoutMs: 600_000 }] } }
+          : undefined,
+      });
+      return agentResult(result);
+    } finally {
+      await checks?.close();
+    }
   }
 
   return {

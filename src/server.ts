@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { extname, join, normalize } from 'node:path';
@@ -63,8 +64,15 @@ async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: 
   }
 }
 
-/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. */
-export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, pollMs = 1000): Server {
+/** A year: the token lives in data/ across restarts, so the cookie can too. */
+const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
+
+/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
+  // An empty token would match a missing cookie.
+  if (!token) throw new Error('the Dashboard needs a token');
+  const expected = Buffer.from(token);
+  const isToken = (got = '') => Buffer.byteLength(got) === expected.length && timingSafeEqual(Buffer.from(got), expected);
   return createServer(async (req, res) => {
     // Block DNS rebinding: a page on evil.com resolved to 127.0.0.1 still sends Host: evil.com.
     const host = (req.headers.host ?? '').replace(/:\d+$/, '');
@@ -74,7 +82,29 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       return;
     }
 
-    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const path = url.pathname;
+
+    const given = url.searchParams.get('token');
+    if (path === '/' && given !== null) {
+      if (!isToken(given)) {
+        res.statusCode = 403;
+        res.end('wrong token\n');
+        return;
+      }
+      // Redirect so the token leaves the address bar and history.
+      res.writeHead(302, { location: '/', 'set-cookie': `dashboard=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE}` });
+      res.end();
+      return;
+    }
+
+    // Sandboxes reach this 127.0.0.1 listener through host.docker.internal and can forge Host and Origin, but never see
+    // the token: only the human's browser holds the cookie.
+    if (path.startsWith('/api/') && !isToken(/(?:^|;\s*)dashboard=([^;]*)/.exec(req.headers.cookie ?? '')?.[1])) {
+      res.statusCode = 401;
+      res.end();
+      return;
+    }
 
     if (path === '/api/state') {
       res.setHeader('content-type', 'application/json');

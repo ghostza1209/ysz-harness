@@ -43,7 +43,7 @@ export interface Orchestrator {
   slots(): { used: number; total: number };
   projectStatuses(): ProjectStatus[];
   /**
-   * Stop a live Run (claimed, agent, host or needs-attention): abort its agent and host processes, remove its sandbox
+   * Stop a live Run (claimed, agent, agent-review, host or needs-attention): abort its agent and host processes, remove its sandbox
    * container, then release the Ticket with orchestrator:skip and a comment. The Run ends killed and keeps its clone.
    * Rejects, leaving the Run live, if the container could not be removed.
    */
@@ -66,6 +66,12 @@ export interface Orchestrator {
   retryHostStep(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
   cleanUp(runId: number): Promise<void>;
+  /**
+   * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
+   * one closed unmerged ends it pr-closed and hands the bead back. A bead the human changed is left alone. endedAt keeps the
+   * time the Run reached in-review. Never rejects: a Run whose check failed stays in-review for the next call.
+   */
+  watchReviews(): Promise<string[]>;
 }
 
 export interface Clock {
@@ -106,8 +112,10 @@ export function createOrchestrator(deps: {
   host: HostSteps;
   store: Store;
   clock: Clock;
+  /** Appends a line to a Run's log. */
+  log?: (runId: number, line: string) => void;
 }): Orchestrator {
-  const { projects, beads, sandbox, host, store, clock } = deps;
+  const { projects, beads, sandbox, host, store, clock, log: logRun = () => {} } = deps;
   const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
@@ -148,14 +156,17 @@ export function createOrchestrator(deps: {
    */
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
+    const log = (line: string) => logRun(runId, line);
     store.updateRun(runId, { state: 'host', note: null });
+    log(`--- Push & PR started: ${new Date(clock.now()).toISOString()} ---`);
     // What recover() needs to pick the job up again; the PR url is already on the row.
     store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped }));
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal });
+        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
         store.updateRun(runId, { prUrl: job.prUrl });
+        log(`PR opened: ${job.prUrl}`);
       }
       signal.throwIfAborted();
       await beads.markInReview(job.project, job.ticket.id, job.prUrl);
@@ -166,6 +177,7 @@ export function createOrchestrator(deps: {
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       control.parked = job;
+      log(`Failed: ${message(err)}`);
       store.updateRun(runId, { state: 'needs-attention', note: message(err) });
     }
   }
@@ -179,10 +191,11 @@ export function createOrchestrator(deps: {
       /** One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch. A kill throws out of it. */
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
+        store.updateRun(runId, { state: 'claimed', attempt: n });
         const prepared = await host.prepare(project, ticket.id, context, signal);
         store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
-        store.updateRun(runId, { state: 'agent', attempt: n });
+        store.updateRun(runId, { state: 'agent' });
         let implemented: AgentResult;
         try {
           implemented = await sandbox.implement({ ...req, previousAttemptSummary });
@@ -196,7 +209,6 @@ export function createOrchestrator(deps: {
           return { kind: 'failed', prepared, reason: `the implement agent stopped without signalling COMPLETE${implemented.tail && `: ${implemented.tail}`}` };
         }
 
-        store.updateRun(runId, { state: 'host' });
         let collected: { tip: string; commits: number };
         try {
           collected = await host.collect(project, prepared, signal);
@@ -207,7 +219,7 @@ export function createOrchestrator(deps: {
         signal.throwIfAborted();
         if (collected.commits === 0) return { kind: 'failed', prepared, reason: 'the agent made no commits' };
 
-        store.updateRun(runId, { state: 'agent' });
+        store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
           const reviewed = await sandbox.review(req);
@@ -374,7 +386,7 @@ export function createOrchestrator(deps: {
         const control = controls.get(runId);
         control?.ctl.abort();
         // sandcastle removes its container on abort but ignores docker's errors, so check it ourselves.
-        if (run.state === 'agent' && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
+        if ((run.state === 'agent' || run.state === 'agent-review') && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
         await control?.running;
 
         const reason = `Killed from the dashboard while ${run.state}.`;
@@ -426,7 +438,7 @@ export function createOrchestrator(deps: {
         }
         // An agent was cut off (or the Run had not got that far). Its work is gone, and no Attempt is spent.
         await attempt(`Run ${run.id}`, async () => {
-          let note = `Interrupted by an Orchestrator restart while ${run.state}; not counted as an Attempt.`;
+          let note = `Interrupted by a ysz restart while ${run.state}; not counted as an Attempt.`;
           await beads.interrupt(project, run.ticketId, note).catch((err) => void (note += `; releasing the Ticket failed: ${message(err)}`));
           if (run.cloneDir) await host.removeClone({ dir: run.cloneDir }).then(() => store.updateRun(run.id, { cloneDir: null }), () => {});
           end(run.id, { state: 'interrupted', note });
@@ -442,7 +454,7 @@ export function createOrchestrator(deps: {
               // A kill whose release failed still means skip: a plain release would make the Ticket Ready and re-run it.
               const killed = store.lastRunState(p.name, id) === 'killed';
               await attempt(`releasing orphan claim ${key(p.name, id)}`, () =>
-                killed ? beads.kill(p, id, 'Killed from the dashboard; released after an Orchestrator restart.') : beads.release(p, id),
+                killed ? beads.kill(p, id, 'Killed from the dashboard; released after a ysz restart.') : beads.release(p, id),
               );
             }
           }),
@@ -467,6 +479,31 @@ export function createOrchestrator(deps: {
       if ((run?.state !== 'failed' && run?.state !== 'killed') || !run.cloneDir) throw new Error(`Run ${runId} has no clone to clean up`);
       await host.removeClone({ dir: run.cloneDir });
       store.updateRun(runId, { cloneDir: null });
+    },
+
+    async watchReviews() {
+      const problems: string[] = [];
+      for (const run of store.inReview()) {
+        const project = byName.get(run.project);
+        if (!run.prUrl) continue; // an in-review Run always has its PR
+        if (!project) {
+          problems.push(`checking ${run.prUrl}: ${run.project} is not a registered Project`);
+          continue;
+        }
+        try {
+          const state = await host.prState(project, run.prUrl);
+          if (state !== 'MERGED' && state !== 'CLOSED') continue;
+          const merged = state === 'MERGED';
+          // Bead first: if its write fails the Run stays in-review, so the next call tries again.
+          const written = merged ? await beads.merged(project, run.ticketId, run.prUrl) : await beads.prClosed(project, run.ticketId, run.prUrl);
+          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed' });
+          logRun(run.id, `PR ${merged ? 'merged' : 'closed unmerged'}: ${run.prUrl}`);
+          if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
+        } catch (err) {
+          problems.push(`checking ${run.prUrl}: ${message(err)}`);
+        }
+      }
+      return problems;
     },
 
     async poll() {

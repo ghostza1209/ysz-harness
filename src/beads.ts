@@ -46,6 +46,16 @@ export interface BeadsGateway {
   showContext(project: Project, id: string): Promise<TicketContext>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
+  /**
+   * The in-review Ticket's PR merged: drop in-review, then close it with the PR link as the reason.
+   * false, writing nothing, when the human changed the bead since (no longer in_progress and the Orchestrator's).
+   */
+  merged(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
+   * The in-review Ticket's PR closed unmerged: comment why, then label needs-info, drop ready-for-agent and in-review,
+   * and release the claim. false, writing nothing, when the human changed the bead since.
+   */
+  prClosed(project: Project, id: string, prUrl: string): Promise<boolean>;
 }
 
 export interface BeadsOptions {
@@ -72,6 +82,11 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
   const write = (project: Project, args: string[]) => bd(['-C', project.repoPath, '--actor', ORCHESTRATOR, ...args]);
   const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
     JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
+  /** The bead is still in_progress and the Orchestrator's, as a Run left it: the human has not changed it since. */
+  const held = async (project: Project, id: string) => {
+    const issue = await show(project, [id]);
+    return issue.status === 'in_progress' && issue.assignee === ORCHESTRATOR;
+  };
 
   return {
     async listReady(project) {
@@ -144,6 +159,23 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       // bd batch cannot comment or label, so these are two writes; the label goes last because it is what marks the Ticket done.
       await write(project, ['comment', id, `PR opened: ${prUrl}`]);
       await write(project, ['update', id, '--add-label', 'in-review']);
+    },
+
+    async merged(project, id, prUrl) {
+      if (!(await held(project, id))) return false;
+      // The label goes first: if the close then fails, the next call still finds the bead held and closes it.
+      await write(project, ['update', id, '--remove-label', 'in-review']);
+      // --force: the human merged, so open children or blockers must not leave the bead in progress forever.
+      await write(project, ['close', id, '--reason', `PR merged: ${prUrl}`, '--force']);
+      return true;
+    },
+
+    async prClosed(project, id, prUrl) {
+      if (!(await held(project, id))) return false;
+      // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket held.
+      await write(project, ['comment', id, `PR closed unmerged: ${prUrl}`]);
+      await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--remove-label', 'in-review', '--assignee', '', '--status', 'open']);
+      return true;
     },
   };
 }

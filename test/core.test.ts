@@ -27,6 +27,12 @@ let claimErrors: Record<string, Error>;
 let failError: Error | undefined;
 /** The error the next prepare fails with. */
 let prepareError: Error | undefined;
+/** What gh reports for each PR url, or the error it fails with; beads the human changed by hand ("project/id"), and the error the next PR-outcome bead write fails with. */
+let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
+let touchedByHand: Set<string>;
+let outcomeError: Error | undefined;
+/** Each live Run's "<state> <attempt>" as every prepare starts. */
+let preparedWhile: string[];
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
 let killError: Error | undefined;
 let markError: Error | undefined;
@@ -47,7 +53,10 @@ let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
 /** What the last publish was given, bar its signal. */
 let publishOpts: unknown;
+/** Lines the orchestrator wrote to each Run's host log. */
+let runLog: string[];
 let _signal: unknown;
+let _log: unknown;
 /** What the host finds in a clone after its agent: commits ahead of base, or an error. */
 let collected: (dir: string) => { tip: string; commits: number } | Error;
 let clones: number;
@@ -96,6 +105,18 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (markError) throw markError;
     writes.push(`markInReview ${project.name}/${id} ${prUrl}`);
   },
+  async merged(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`merged ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async prClosed(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`prClosed ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
 });
 
 const complete: AgentResult = { outcome: 'complete' };
@@ -129,6 +150,7 @@ const fakeHost: HostSteps = {
   },
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
+    preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40) };
   },
@@ -140,11 +162,17 @@ const fakeHost: HostSteps = {
   },
   async publish(_project, _ticket, { branch }, opts) {
     hostSteps.push(`publish ${branch}`);
-    if (opts) ({ signal: _signal, ...publishOpts } = opts);
+    if (opts) ({ signal: _signal, log: _log, ...publishOpts } = opts);
+    opts?.log?.(`pushing ${branch}`);
     return publish(opts?.signal);
   },
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
+  },
+  async prState(_project, prUrl) {
+    const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
+    if (state instanceof Error) throw state;
+    return state;
   },
 };
 
@@ -162,6 +190,10 @@ beforeEach(() => {
   claimErrors = {};
   failError = undefined;
   prepareError = undefined;
+  preparedWhile = [];
+  prStates = {};
+  touchedByHand = new Set();
+  outcomeError = undefined;
   killError = undefined;
   markError = undefined;
   contextGate = undefined;
@@ -176,6 +208,7 @@ beforeEach(() => {
   reviewer = async () => complete;
   publish = async () => PR_URL;
   publishOpts = undefined;
+  runLog = [];
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
   clones = 0;
   missingImages = new Set();
@@ -191,6 +224,7 @@ async function polled(registry: readonly Project[] = projects) {
     host: fakeHost,
     store,
     clock: { now: () => now },
+    log: (runId, line) => runLog.push(`${runId}: ${line}`),
   });
   await orchestrator.poll();
   return orchestrator;
@@ -541,6 +575,17 @@ describe('a happy-path Run', () => {
     );
   });
 
+  it('collects the implement commits under agent, and reviews under agent-review', async () => {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const seen: string[] = [];
+    collected = () => (seen.push(`collect ${store.liveRuns()[0].state}`), { tip: 'a'.repeat(40), commits: 1 });
+    reviewer = async () => (seen.push(`review ${store.liveRuns()[0].state}`), complete);
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(seen, ['collect agent', 'review agent-review']);
+  });
+
   it('does not claim the in-review Ticket again before the next poll', async () => {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -669,6 +714,12 @@ describe('the Attempt policy', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
+  it("shows Attempt 2's clone as claimed in Attempt 2, not the failed Attempt's agent stage", async () => {
+    collected = (dir) => ({ tip: 'a'.repeat(40), commits: dirAttempt(dir) === 1 ? 0 : 1 });
+    await run();
+    assert.deepEqual(preparedWhile, ['claimed 1', 'claimed 2']);
+  });
+
   it('forgets the removed Attempt 1 clone when Attempt 2 makes none, so Clean up is not offered for it', async () => {
     agent = async () => {
       prepareError = new Error('git fetch failed: network down');
@@ -792,6 +843,18 @@ describe('a host step that fails', () => {
     assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
   });
 
+  it("writes each Push & PR try to the Run's log: the host step's lines, then the PR or why it failed", async () => {
+    const o = await parkedRun();
+    const [{ id }] = o.runs().live;
+    await o.retryHostStep(id);
+    await o.whenIdle();
+    const started = `${id}: --- Push & PR started: 2026-10-08T12:00:00.000Z ---`;
+    assert.deepEqual(runLog, [
+      started, `${id}: pushing agent/tv1`, `${id}: Failed: git push failed: rejected`,
+      started, `${id}: pushing agent/tv1`, `${id}: PR opened: ${PR_URL}`,
+    ]);
+  });
+
   it('parks the Run again, with the new reason, when the retry fails too', async () => {
     const o = await parkedRun([new Error('git push failed: rejected'), new Error('gh pr create failed: 502')]);
     await o.retryHostStep(o.runs().live[0].id);
@@ -888,16 +951,18 @@ describe('Kill', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
-  it('from the review agent: does not go on to publish', async () => {
+  it('from agent-review: stops the sandbox container and does not go on to publish', async () => {
     const never = new Promise<void>(() => {});
     reviewer = (_attempt, signal) => gated(never, complete, signal);
     const o = await started();
+    const [{ id, state }] = o.runs().live;
+    assert.equal(state, 'agent-review');
 
-    await o.kill(o.runs().live[0].id);
+    await o.kill(id);
     await o.whenIdle();
 
     assert.deepEqual(stops, ['/clones/tv1-1']);
-    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent-review.']);
     assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1']);
   });
 
@@ -1240,22 +1305,31 @@ describe('restart recovery', () => {
     assert.deepEqual(await o.recover(), []);
 
     assert.equal(leftoverSweeps, 1);
-    assert.deepEqual(writes, ['interrupt thaivis/tv1: Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.deepEqual(writes, ['interrupt thaivis/tv1: Interrupted by a ysz restart while agent; not counted as an Attempt.']);
     assert.deepEqual(hostSteps, ['removeClone /clones/tv1-9']);
     assert.deepEqual(o.runs().live, []);
     const [run] = o.runs().history;
-    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by a ysz restart while agent; not counted as an Attempt.']);
     assert.notEqual(run.endedAt, null);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
-  it('treats a claimed Run, and a host Run still collecting the agent\'s commits, as agent-phase', async () => {
-    leftBehind('claimed');
-    store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'host', startedAt: now });
+  it('ends an agent-review Run as interrupted without spending an Attempt', async () => {
+    leftBehind('agent-review', { cloneDir: '/clones/tv1-9' });
     const o = await polled();
     await o.recover();
-    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted', 'interrupted']);
-    assert.deepEqual(writes.map((w) => w.split(':')[0]).sort(), ['interrupt fazwaz/fz1', 'interrupt thaivis/tv1']);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by a ysz restart while agent-review; not counted as an Attempt.']);
+  });
+
+  it('treats a claimed Run, an agent-review Run, and a host Run with no host job yet, as agent-phase', async () => {
+    leftBehind('claimed');
+    store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'host', startedAt: now });
+    store.insertRun({ project: 'PopDeal', ticketId: 'pd1', title: 't', state: 'agent-review', startedAt: now });
+    const o = await polled();
+    await o.recover();
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted', 'interrupted', 'interrupted']);
+    assert.deepEqual(writes.map((w) => w.split(':')[0]).sort(), ['interrupt PopDeal/pd1', 'interrupt fazwaz/fz1', 'interrupt thaivis/tv1']);
   });
 
   it('still ends the Run, and says so, when the bead cannot be released', async () => {
@@ -1334,7 +1408,7 @@ describe('restart recovery', () => {
     claimed = ['thaivis/tv-killed'];
     const o = await polled();
     await o.recover();
-    assert.deepEqual(writes, ['kill thaivis/tv-killed: Killed from the dashboard; released after an Orchestrator restart.']);
+    assert.deepEqual(writes, ['kill thaivis/tv-killed: Killed from the dashboard; released after a ysz restart.']);
   });
 
   it('releases the other orphan claims when one release fails', async () => {
@@ -1363,5 +1437,76 @@ describe('restart recovery', () => {
     assert.equal(problems.length, 1);
     assert.match(problems[0], /gone is not a registered Project/);
     assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted']);
+  });
+});
+
+describe('watching in-review PRs', () => {
+  const inReview = (ticketId: string, prUrl: string) => {
+    const id = store.insertRun({ project: 'thaivis', ticketId, title: 't', state: 'in-review', startedAt: now });
+    store.updateRun(id, { prUrl, endedAt: now + 1000 });
+    return id;
+  };
+  const states = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.ticketId, r.state, r.endedAt]);
+
+  it('ends a Run Merged and closes its bead once the PR merges, keeping the time the Orchestrator finished', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, [`merged thaivis/tv1 ${PR_URL}`]);
+    assert.deepEqual(states(o), [['tv1', 'merged', now + 1000]]);
+    assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`]);
+  });
+
+  it('ends a Run PR closed and hands its bead back once the PR closes unmerged', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'CLOSED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, [`prClosed thaivis/tv1 ${PR_URL}`]);
+    assert.deepEqual(states(o), [['tv1', 'pr-closed', now + 1000]]);
+  });
+
+  it('leaves a Run in review while its PR is open', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'OPEN';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(states(o), [['tv1', 'in-review', now + 1000]]);
+  });
+
+  it('still ends the Run but leaves alone a bead the human already changed', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'MERGED';
+    touchedByHand.add('thaivis/tv1');
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(states(o), [['tv1', 'merged', now + 1000]]);
+    assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`, '1: Ticket left alone: changed by hand since the PR opened']);
+  });
+
+  it('keeps a Run in review when gh fails, and still checks the other Runs', async () => {
+    const other = 'https://github.com/thaivis/app/pull/8';
+    inReview('tv1', PR_URL);
+    inReview('tv2', other);
+    prStates[PR_URL] = new Error('gh pr failed: HTTP 502');
+    prStates[other] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), [`checking ${PR_URL}: gh pr failed: HTTP 502`]);
+    assert.deepEqual(states(o), [['tv2', 'merged', now + 1000], ['tv1', 'in-review', now + 1000]]);
+  });
+
+  it('keeps a Run in review when the bead write fails, so the next tick tries again', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'CLOSED';
+    outcomeError = new Error('bd timed out');
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), [`checking ${PR_URL}: bd timed out`]);
+    assert.deepEqual(states(o), [['tv1', 'in-review', now + 1000]]);
+    outcomeError = undefined;
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(states(o), [['tv1', 'pr-closed', now + 1000]]);
   });
 });

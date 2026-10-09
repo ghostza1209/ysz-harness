@@ -111,6 +111,46 @@ describe('Beads gateway against real bd', () => {
     ]);
   });
 
+  /** A Ticket the Orchestrator claimed and marked in review, as a Run leaves it once its PR is open. */
+  async function inReview(key: string, ...flags: string[]) {
+    await create(key, key, ...flags);
+    await createBeadsGateway().claim(project, ids[key]);
+    await createBeadsGateway().markInReview(project, ids[key], 'https://github.com/o/r/pull/3');
+  }
+
+  it('closes an in-review Ticket whose PR merged, with the PR as the reason and in-review dropped, even with an open blocker', async () => {
+    await inReview('merging', '-l', 'ready-for-agent');
+    await create('lateBlocker', 'blocker added after the PR opened');
+    await bd('dep', 'add', ids.merging, ids.lateBlocker);
+    assert.equal(await createBeadsGateway().merged(project, ids.merging, 'https://github.com/o/r/pull/3'), true);
+    const [issue] = JSON.parse((await bd('show', ids.merging, '--json')).stdout);
+    assert.deepEqual([issue.status, issue.close_reason, issue.labels], ['closed', 'PR merged: https://github.com/o/r/pull/3', ['ready-for-agent']]);
+  });
+
+  it('hands back an in-review Ticket whose PR closed unmerged: commented, needs-info, not Ready', async () => {
+    await inReview('rejected', '-l', 'ready-for-agent,keep-me');
+    assert.equal(await createBeadsGateway().prClosed(project, ids.rejected, 'https://github.com/o/r/pull/3'), true);
+    const { labels, ...rest } = await state(ids.rejected);
+    assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'needs-info'] });
+    const [issue] = JSON.parse((await bd('show', ids.rejected, '--json', '--include-comments')).stdout);
+    assert.deepEqual(issue.comments.at(-1).text, 'PR closed unmerged: https://github.com/o/r/pull/3');
+    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.rejected));
+  });
+
+  it('writes nothing to an in-review Ticket the human already closed or took over', async () => {
+    await inReview('closedByHand');
+    await bd('close', ids.closedByHand, '-r', 'by hand', '--force');
+    await inReview('takenOver', '-l', 'ready-for-agent');
+    await bd('update', ids.takenOver, '--assignee', 'someone', '--force');
+
+    assert.equal(await createBeadsGateway().merged(project, ids.closedByHand, 'https://github.com/o/r/pull/3'), false);
+    assert.equal(await createBeadsGateway().prClosed(project, ids.takenOver, 'https://github.com/o/r/pull/3'), false);
+
+    const [closed] = JSON.parse((await bd('show', ids.closedByHand, '--json')).stdout);
+    assert.deepEqual([closed.status, closed.close_reason, closed.labels], ['closed', 'by hand', ['in-review']]);
+    assert.deepEqual(await state(ids.takenOver), { status: 'in_progress', assignee: 'someone', labels: ['in-review', 'ready-for-agent'] });
+  });
+
   it('hands a claimed Ticket back as failed: reason commented, needs-info added, ready-for-agent dropped, open and unassigned', async () => {
     await create('failing', 'will fail', '-l', 'ready-for-agent,keep-me');
     await createBeadsGateway().claim(project, ids.failing);
