@@ -87,6 +87,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listClaimed(project) {
     return claimed.filter((c) => c.startsWith(`${project.name}/`)).map((c) => c.split('/')[1]);
   },
+  async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
     return { ticket: { id }, parent: null, closedBlockers: [] };

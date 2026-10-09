@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -179,6 +179,53 @@ describe('Beads gateway against real bd', () => {
     const [issue] = JSON.parse((await bd('show', ids.interrupted, '--json', '--include-comments')).stdout);
     assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', 'Interrupted by an Orchestrator restart while agent.']]);
     assert.ok((await createBeadsGateway().listReady(project)).some((t) => t.id === ids.interrupted));
+  });
+
+  /** bd leases last 5 minutes and no setting shortens them, so age every lease straight in its Dolt table, as if that long had passed. */
+  const expireLeases = () =>
+    run('dolt', ['sql', '-q', "update leases set lease_expires_at = '2020-01-01 00:00:00'"], { cwd: join(dir, '.beads', 'embeddeddolt', 'lab') });
+
+  it('keeps in-flight and in-review Tickets in_progress through bd reclaim after their leases lapse, unlike another actor\'s claim', async () => {
+    await create('inFlight', 'being worked');
+    await create('inReview', 'awaiting merge');
+    await create('rivals', 'someone else\'s claim');
+    for (const key of ['inFlight', 'inReview']) await createBeadsGateway().claim(project, ids[key]);
+    await createBeadsGateway().markInReview(project, ids.inReview, 'https://github.com/o/r/pull/2');
+    await bd('--actor', 'rival', 'update', ids.rivals, '--claim');
+    await expireLeases();
+
+    await createBeadsGateway().heartbeat(project);
+    await bd('reclaim', '--older-than', '0s');
+
+    assert.deepEqual(await state(ids.inFlight), { status: 'in_progress', assignee: 'orchestrator', labels: [] });
+    assert.deepEqual(await state(ids.inReview), { status: 'in_progress', assignee: 'orchestrator', labels: ['in-review'] });
+    assert.deepEqual(await state(ids.rivals), { status: 'open', assignee: '', labels: [] });
+  });
+
+  it('reclaims a lapsed Orchestrator claim when nothing heartbeats it', async () => {
+    await create('unbeaten', 'no heartbeat');
+    await createBeadsGateway().claim(project, ids.unbeaten);
+    await expireLeases();
+
+    await bd('reclaim', '--older-than', '0s');
+
+    assert.equal((await state(ids.unbeaten)).status, 'open');
+  });
+
+  it('heartbeats the rest of the held Tickets when one heartbeat fails, then reports the failure', async () => {
+    const fake = join(dir, 'fake-bd');
+    const log = join(dir, 'fake-bd.log');
+    await writeFile(fake, `#!/bin/sh
+case " $* " in
+  *" list "*) echo '[{"id":"x-1"},{"id":"x-2"}]' ;;
+  *" heartbeat x-1 "*) echo "lease gone" >&2; exit 1 ;;
+  *" heartbeat x-2 "*) echo beat x-2 >> '${log}' ;;
+esac
+`);
+    await chmod(fake, 0o755);
+
+    await assert.rejects(createBeadsGateway({ bin: fake }).heartbeat(project), /heartbeat failed for x-1: [^]*lease gone/);
+    assert.equal(await readFile(log, 'utf8'), 'beat x-2\n');
   });
 
   it('shows a Ticket with its comments, parent epic and closed blockers only', async () => {

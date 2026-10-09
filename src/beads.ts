@@ -38,6 +38,11 @@ export interface BeadsGateway {
   interrupt(project: Project, id: string, reason: string): Promise<void>;
   /** Ids of the Tickets the Orchestrator holds in_progress without an in-review label. */
   listClaimed(project: Project): Promise<string[]>;
+  /**
+   * Refresh the 5-minute bd lease of every Ticket the Orchestrator holds in_progress, in-review ones included, so
+   * `bd reclaim` leaves them alone. Call more often than the lease lasts. Beats every Ticket, then throws if any failed.
+   */
+  heartbeat(project: Project): Promise<void>;
   showContext(project: Project, id: string): Promise<TicketContext>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
@@ -115,6 +120,15 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
     async listClaimed(project) {
       const out = await bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'in_progress', '-a', ORCHESTRATOR, '--exclude-label', 'in-review', '-n', '0', '--json']);
       return (JSON.parse(out) as { id: string }[]).map((i) => i.id);
+    },
+
+    async heartbeat(project) {
+      const out = await bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'in_progress', '-a', ORCHESTRATOR, '-n', '0', '--json']);
+      const failures: string[] = [];
+      for (const { id } of JSON.parse(out) as { id: string }[]) {
+        await write(project, ['heartbeat', id]).catch((err) => void failures.push(`${id}: ${(err as Error).message}`));
+      }
+      if (failures.length) throw new Error(`heartbeat failed for ${failures.join('; ')}`);
     },
 
     async showContext(project, id) {
