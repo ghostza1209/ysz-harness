@@ -251,9 +251,7 @@ export function App() {
     <>
       <header className="topbar">
         <div className="brand">
-          <span className={`logo ${state?.runs.live.length ? 'spin' : ''}`} aria-hidden>
-            ◆
-          </span>
+          <img className={`logo ${state?.runs.live.length ? 'spin' : ''}`} src="/logo.svg" alt="" width={20} height={20} />
           Orchestrator
         </div>
         <div className="slots" title="Concurrent Runs: max 1 per Project">
