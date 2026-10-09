@@ -694,6 +694,11 @@ div.log {
     display: none;
   }
 
+  /* Just the dot: the topbar has no room for the words. */
+  .conn {
+    font-size: 0;
+  }
+
   .banner {
     margin: 12px 16px 0;
   }
@@ -1290,6 +1295,11 @@ h2 {
   letter-spacing: 0.14em;
 }
 
+/* Tracking pulls Thai tone marks apart from their consonants. */
+:lang(th) h2 {
+  letter-spacing: normal;
+}
+
 h2::before {
   content: '';
   width: 6px;
@@ -1701,6 +1711,70 @@ button {
   .history-head input {
     width: 100%;
   }
+}
+
+.prefs {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+}
+
+@media (max-width: 900px) {
+  .prefs {
+    gap: 0;
+  }
+
+  /* Thai filter names run wider than a phone. */
+  .chips {
+    flex-wrap: wrap;
+  }
+}
+
+/* The driver.js tour popover, in the Dashboard's colours for either theme. */
+.driver-popover.ysz-tour {
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-family: inherit;
+}
+
+.ysz-tour .driver-popover-title {
+  font-size: 16px;
+}
+
+.ysz-tour .driver-popover-progress-text,
+.ysz-tour .driver-popover-close-btn {
+  color: var(--mute);
+}
+
+.ysz-tour .driver-popover-footer-btn {
+  color: var(--ink);
+  background: var(--soft);
+  border-color: var(--line);
+  text-shadow: none;
+}
+
+.ysz-tour .driver-popover-next-btn {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.ysz-tour .driver-popover-arrow-side-left {
+  border-left-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-right {
+  border-right-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-top {
+  border-top-color: var(--card);
+}
+
+.ysz-tour .driver-popover-arrow-side-bottom {
+  border-bottom-color: var(--card);
 }
 
 @media (prefers-reduced-motion: reduce) {

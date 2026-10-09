@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "0.12.0",
+    "driver.js": "1.8.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
