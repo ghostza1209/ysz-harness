@@ -95,6 +95,36 @@ h2.gap {
   color: var(--mute);
 }
 
+.pill {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 1px 7px;
+  color: #fff;
+  background: var(--mute);
+}
+
+.pill.agent {
+  background: #2f6fed;
+}
+
+.pill.host {
+  background: #7a4fd6;
+}
+
+.pill.in-review {
+  background: #2e8b57;
+}
+
+.pill.failed {
+  background: var(--bad);
+}
+
+a {
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .project + .project {
   margin-top: 6px;
 }

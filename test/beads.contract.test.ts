@@ -63,4 +63,72 @@ describe('Beads gateway against real bd', () => {
     await assert.rejects(createBeadsGateway({ bin: hung, timeoutMs: 300 }).listReady(project), /timed out after 300ms/);
     assert.ok(Date.now() - started < 5_000);
   });
+
+  const state = async (id: string) => {
+    const [issue] = JSON.parse((await bd('show', id, '--json')).stdout);
+    return { status: issue.status, assignee: issue.assignee ?? '', labels: issue.labels ?? [] };
+  };
+
+  it('claims a Ticket as orchestrator', async () => {
+    await create('toClaim', 'to claim');
+    assert.equal(await createBeadsGateway().claim(project, ids.toClaim), true);
+    assert.deepEqual(await state(ids.toClaim), { status: 'in_progress', assignee: 'orchestrator', labels: [] });
+  });
+
+  it('reports a lost claim as false, leaving the other actor in place', async () => {
+    await create('taken', 'taken by hand', '-a', 'someone');
+    assert.equal(await createBeadsGateway().claim(project, ids.taken), false);
+    assert.equal((await state(ids.taken)).assignee, 'someone');
+  });
+
+  it('lets exactly one of two simultaneous claimers win', async () => {
+    await create('raced', 'raced');
+    const [mine, rival] = await Promise.all([
+      createBeadsGateway().claim(project, ids.raced),
+      bd('--actor', 'rival', 'update', ids.raced, '--claim').then(() => true, () => false),
+    ]);
+    assert.equal(Number(mine) + Number(rival), 1);
+    assert.equal((await state(ids.raced)).assignee, mine ? 'orchestrator' : 'rival');
+  });
+
+  it('throws instead of reporting a lost race when the claim fails for another reason', async () => {
+    await assert.rejects(createBeadsGateway().claim(project, 'lab-nope'));
+    await assert.rejects(createBeadsGateway().claim({ ...project, repoPath: join(dir, 'missing') }, ids.toClaim));
+  });
+
+  it('releases a claimed Ticket back to open and unassigned', async () => {
+    await createBeadsGateway().release(project, ids.toClaim);
+    assert.deepEqual(await state(ids.toClaim), { status: 'open', assignee: '', labels: [] });
+  });
+
+  it('marks a claimed Ticket in review with a PR comment, leaving it in_progress for the orchestrator', async () => {
+    await createBeadsGateway().claim(project, ids.toClaim);
+    await createBeadsGateway().markInReview(project, ids.toClaim, 'https://github.com/o/r/pull/9');
+    assert.deepEqual(await state(ids.toClaim), { status: 'in_progress', assignee: 'orchestrator', labels: ['in-review'] });
+    const [issue] = JSON.parse((await bd('show', ids.toClaim, '--json', '--include-comments')).stdout);
+    assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [
+      ['orchestrator', 'PR opened: https://github.com/o/r/pull/9'],
+    ]);
+  });
+
+  it('shows a Ticket with its comments, parent epic and closed blockers only', async () => {
+    await create('epic', 'the epic', '-t', 'epic', '-d', 'epic body');
+    await create('child', 'the child', '--parent', ids.epic);
+    await create('doneBlocker', 'finished first');
+    await create('openBlocker', 'still open');
+    await bd('dep', 'add', ids.child, ids.doneBlocker);
+    await bd('dep', 'add', ids.child, ids.openBlocker);
+    await bd('close', ids.doneBlocker, '-r', 'shipped in abc123');
+    await bd('comment', ids.child, 'remember the edge case');
+
+    const context = await createBeadsGateway().showContext(project, ids.child);
+    assert.equal(context.ticket.title, 'the child');
+    assert.deepEqual((context.ticket.comments as { text: string }[]).map((c) => c.text), ['remember the edge case']);
+    assert.deepEqual([context.parent?.title, context.parent?.description], ['the epic', 'epic body']);
+    assert.deepEqual(context.closedBlockers, [{ id: ids.doneBlocker, title: 'finished first', closeReason: 'shipped in abc123' }]);
+  });
+
+  it('shows a Ticket without a parent as parent null', async () => {
+    assert.equal((await createBeadsGateway().showContext(project, ids.ready)).parent, null);
+  });
 });

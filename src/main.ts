@@ -1,7 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
 import { createOrchestrator } from './core';
+import { createHostSteps } from './host';
 import { projects } from './projects';
+import { createSandboxRunner, MODEL } from './sandbox';
 import { createHttpServer } from './server';
 import { openStore } from './store';
 
@@ -13,14 +15,17 @@ const POLL_INTERVAL_MS = 30_000;
 const orchestrator = createOrchestrator({
   projects,
   beads: createBeadsGateway(),
+  sandbox: createSandboxRunner(root),
+  host: createHostSteps(MODEL),
   store: openStore(`${root}data/orchestrator.db`),
   clock: Date,
 });
 
-// Sequential, so a slow poll can never overlap the next one.
+// Sequential, so a slow poll can never overlap the next one. A tick only starts Runs; they finish in the background.
 void (async () => {
   for (;;) {
     await orchestrator.poll();
+    await orchestrator.tick();
     for (const p of orchestrator.projectStatuses()) if (p.error) console.error(`[poll] ${p.name}: ${p.error}`);
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }

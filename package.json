@@ -5,9 +5,11 @@
   "scripts": {
     "start": "vite build && tsx src/main.ts",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "images": "for f in images/*.Dockerfile; do docker build -f \"$f\" -t \"ysz-harness/$(basename \"$f\" .Dockerfile)\" images || exit 1; done"
   },
   "dependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

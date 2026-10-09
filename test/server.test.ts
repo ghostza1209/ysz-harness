@@ -5,7 +5,7 @@ import { after, before, it } from 'node:test';
 import type { Orchestrator } from '../src/core';
 import { createHttpServer } from '../src/server';
 
-const orchestrator = { slots: () => ({}), readyQueue: () => [], projectStatuses: () => [] } as unknown as Orchestrator;
+const orchestrator = { slots: () => ({}), readyQueue: () => [], runs: () => ({ live: [], history: [] }), projectStatuses: () => [] } as unknown as Orchestrator;
 const server = createHttpServer(orchestrator, '/nonexistent');
 let port: number;
 

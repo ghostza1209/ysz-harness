@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
+import type { RunRow } from '../src/store';
 
 interface State {
   slots: { used: number; total: number };
   ready: QueueItem[];
+  runs: { live: RunRow[]; history: RunRow[] };
   projects: ProjectStatus[];
 }
 
@@ -15,6 +17,8 @@ function age(ms: number): string {
   const hours = Math.floor(minutes / 60);
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }
+
+const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 export function App() {
   const [state, setState] = useState<State | null>(null);
@@ -64,7 +68,22 @@ export function App() {
         </section>
         <section>
           <h2>Live Runs</h2>
-          <p className="mute">No live Runs.</p>
+          {state?.runs.live.length === 0 && <p className="mute">No live Runs.</p>}
+          <div className="stack">
+            {state?.runs.live.map((r) => (
+              <div className="card" key={r.id}>
+                <div className="row">
+                  <span className={`pill ${r.state}`}>{r.state}</span>
+                  <b className="grow">{r.ticketId}</b>
+                  <span className="mute">{r.attempt > 0 ? `Attempt ${r.attempt}/2` : 'starting'}</span>
+                </div>
+                <div>{r.title}</div>
+                <div className="mute">
+                  {r.project} · started {time(r.startedAt)}
+                </div>
+              </div>
+            ))}
+          </div>
           <h2 className="gap">Projects</h2>
           <div className="card">
             {state?.projects.map((p) => (
@@ -80,7 +99,28 @@ export function App() {
         </section>
         <section>
           <h2>Run history</h2>
-          <p className="mute">No Runs yet.</p>
+          {state?.runs.history.length === 0 && <p className="mute">No Runs yet.</p>}
+          <div className="stack">
+            {state?.runs.history.map((r) => (
+              <div className="card" key={r.id}>
+                <div className="row">
+                  <span className={`pill ${r.state}`}>{r.state}</span>
+                  <span className="tag">{r.project}</span>
+                  <b className="grow">{r.ticketId}</b>
+                </div>
+                <div>{r.title}</div>
+                <div className="mute">
+                  {r.attempt} Attempt{r.attempt === 1 ? '' : 's'} used · {time(r.startedAt)} to {r.endedAt ? time(r.endedAt) : '?'}
+                </div>
+                {r.prUrl && (
+                  <a href={r.prUrl} target="_blank" rel="noreferrer">
+                    {r.prUrl}
+                  </a>
+                )}
+                {r.note && <div className="bad">{r.note}</div>}
+              </div>
+            ))}
+          </div>
         </section>
       </main>
     </>

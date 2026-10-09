@@ -29,6 +29,7 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string):
         JSON.stringify({
           slots: orchestrator.slots(),
           ready: orchestrator.readyQueue(),
+          runs: orchestrator.runs(),
           projects: orchestrator.projectStatuses(),
         }),
       );
