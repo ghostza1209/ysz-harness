@@ -79,7 +79,7 @@ function Copy({ text }: { text: string }) {
   return (
     <button
       className="copy"
-      title="Copy Ticket id"
+      title={`Copy ${text}`}
       onClick={() =>
         void navigator.clipboard.writeText(text).then(() => {
           setDone(true);
@@ -292,6 +292,11 @@ export function App() {
                       </div>
                       <div className="title">{r.title}</div>
                       <Stages state={r.state} />
+                      <div className="row where">
+                        {/* Branch name as HostSteps.prepare in host.ts makes it. */}
+                        <Copy text={`agent/${r.ticketId}`} />
+                        {r.cloneDir ? <Copy text={r.cloneDir} /> : <span className="mute">cloning…</span>}
+                      </div>
                       <div className="mute">
                         Started {time(r.startedAt)} · <span className="elapsed">{span(now - r.startedAt)}</span>
                       </div>

@@ -699,6 +699,15 @@ pre.log.tall {
   background: var(--soft);
 }
 
+.where {
+  flex-wrap: wrap;
+}
+
+.where code {
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 .copied {
   font-size: 11px;
   color: var(--mute);
