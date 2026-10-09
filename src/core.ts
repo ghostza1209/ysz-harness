@@ -306,12 +306,14 @@ export function createOrchestrator(deps: {
 
   return {
     async tick() {
-      // Infrastructure gates, before anything is claimed: a failure never burns an Attempt. Busy Projects claim nothing, so they are not checked.
+      // Infrastructure gates, before anything is claimed: a failure never burns an Attempt. Busy or paused Projects claim nothing, so they are not checked.
       const busyNow = store.slotProjects();
       if (busyNow.length >= SLOTS_TOTAL) return;
+      const paused = new Set(store.pausedProjects());
+      const claimable = new Set(pickOrder().filter((e) => !paused.has(e.project) || runNowKeys.has(key(e.project, e.ticket.id))).map((e) => e.project));
       await Promise.all(
         projects
-          .filter((p) => p.image && !busyNow.includes(p.name) && snapshots.get(p.name)!.tickets.length)
+          .filter((p) => p.image && !busyNow.includes(p.name) && claimable.has(p.name))
           .map(async (p) => {
             const down = !(await sandbox.hasImage(p))
               ? 'image missing'

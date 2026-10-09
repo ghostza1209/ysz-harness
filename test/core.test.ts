@@ -484,6 +484,20 @@ describe('infrastructure gates', () => {
     assert.ok(!preflights.includes('fazwaz'));
     assert.equal(reasons(o)[0], 'fz1: Project already has a Run');
   });
+
+  it('does not check a paused Project unless one of its Tickets is run-now', async () => {
+    const o = await polled();
+    o.setPaused('fazwaz', true);
+    await o.tick();
+    assert.ok(!preflights.includes('fazwaz'));
+
+    await o.whenIdle();
+    o.runNow('fazwaz', 'fz1');
+    failingPreflights.add('fazwaz');
+    await o.tick();
+    assert.ok(preflights.includes('fazwaz'));
+    assert.equal(reasons(o)[0], 'fz1: preflight failed');
+  });
 });
 
 describe('a happy-path Run', () => {
