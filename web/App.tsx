@@ -173,6 +173,9 @@ interface Toast {
 
 const FILTERS = { all: () => true, 'in-review': (s: string) => s === 'in-review', failed: (s: string) => s === 'failed' || s === 'interrupted', killed: (s: string) => s === 'killed' };
 
+/** The error a 401 from /api/state stands for: this browser has no Dashboard cookie. */
+const SIGNED_OUT = 'signed out';
+
 export function App() {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +187,7 @@ export function App() {
 
   const load = () =>
     fetch('/api/state')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(res.status === 401 ? SIGNED_OUT : `HTTP ${res.status}`))))
       .then((s: State) => {
         setState(s);
         setError(null);
@@ -263,7 +266,7 @@ export function App() {
           </b>
         </div>
         <span className="grow" />
-        <span className={`conn ${error ? 'down' : state ? 'up' : ''}`}>{error ? 'Server unreachable' : state ? 'Live' : 'Connecting…'}</span>
+        <span className={`conn ${error ? 'down' : state ? 'up' : ''}`}>{error === SIGNED_OUT ? 'Signed out' : error ? 'Server unreachable' : state ? 'Live' : 'Connecting…'}</span>
       </header>
 
       {state && (
@@ -297,7 +300,7 @@ export function App() {
 
       {error && (
         <div className="banner bad-banner" role="alert">
-          Can't reach the server: {error}. Retrying every {REFRESH_MS / 1000}s.
+          {error === SIGNED_OUT ? 'Not signed in: open the URL the Orchestrator printed in its terminal.' : `Can't reach the server: ${error}. Retrying every ${REFRESH_MS / 1000}s.`}
         </div>
       )}
       {allPaused && (

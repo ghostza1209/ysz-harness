@@ -33,7 +33,8 @@ const actions: string[] = [];
 const realLogs = createRunLogs(logDir);
 let sizeCalls = 0;
 const logs: RunLogs = { ...realLogs, size: (id) => (sizeCalls++, realLogs.size(id)) };
-const server = createHttpServer(orchestrator, '/nonexistent', logs, POLL_MS);
+const TOKEN = 'a'.repeat(64);
+const server = createHttpServer(orchestrator, '/nonexistent', logs, TOKEN, POLL_MS);
 let port: number;
 
 before(() => new Promise<void>((done) => server.listen(0, '127.0.0.1', () => {
@@ -42,9 +43,10 @@ before(() => new Promise<void>((done) => server.listen(0, '127.0.0.1', () => {
 })));
 after(() => server.close());
 
+/** Sends the Dashboard's cookie unless `headers` overrides it. */
 const send = (path: string, headers: Record<string, string> = {}, method = 'GET', host = `localhost:${port}`) =>
   new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
-    request({ port, path, method, headers: { host, ...headers } }, (res) => {
+    request({ port, path, method, headers: { host, cookie: `dashboard=${TOKEN}`, ...headers } }, (res) => {
       res.setEncoding('utf8');
       let body = '';
       res.on('data', (c) => (body += c));
@@ -71,7 +73,7 @@ function openStream(runId: number) {
   const events: { event: string; data: string }[] = [];
   const state = { ended: false, req: undefined as unknown as ClientRequest };
   let buffer = '';
-  state.req = request({ port, path: `/api/runs/${runId}/log/stream`, headers: { host: `localhost:${port}` } }, (res) => {
+  state.req = request({ port, path: `/api/runs/${runId}/log/stream`, headers: { host: `localhost:${port}`, cookie: `dashboard=${TOKEN}` } }, (res) => {
     res.setEncoding('utf8');
     res.on('data', (chunk: string) => {
       buffer += chunk;
@@ -90,6 +92,40 @@ function openStream(runId: number) {
 it('answers requests addressed to localhost or 127.0.0.1', async () => {
   assert.equal(await statusFor(`localhost:${port}`), 200);
   assert.equal(await statusFor(`127.0.0.1:${port}`), 200);
+});
+
+it('refuses every API route without the Dashboard cookie, as a sandbox sends it, and does nothing', async () => {
+  // A sandbox reaches 127.0.0.1 through host.docker.internal and can forge Host and Origin, but has no cookie.
+  actions.length = 0;
+  const forged = { origin: `http://localhost:${port}`, cookie: '' };
+  assert.equal((await send('/api/state', forged)).status, 401);
+  assert.equal((await send('/api/runs/1/log', forged)).status, 401);
+  assert.equal((await send('/api/runs/1/log/stream', forged)).status, 401);
+  assert.equal((await send('/api/runs/7/kill', forged, 'POST')).status, 401);
+  assert.equal((await send('/api/projects/fazwaz/run-now/fz-1', { ...forged, cookie: `dashboard=${'b'.repeat(64)}` }, 'POST')).status, 401);
+  assert.equal((await send('/api/state', { cookie: `dashboard=${TOKEN.slice(1)}` })).status, 401);
+  assert.deepEqual(actions, []);
+});
+
+it('will not start without a token, which would let every request through', () => {
+  assert.throws(() => createHttpServer(orchestrator, '/nonexistent', logs, ''));
+});
+
+it('trades the token in the URL for the cookie and drops it from the address bar', async () => {
+  const res = await send(`/?token=${TOKEN}`, { cookie: '' });
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.location, '/');
+  const cookie = String(res.headers['set-cookie']);
+  assert.match(cookie, new RegExp(`^dashboard=${TOKEN};`));
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.equal((await send('/api/state', { cookie: cookie.split(';')[0] })).status, 200);
+});
+
+it('refuses a wrong token in the URL', async () => {
+  const res = await send(`/?token=${'b'.repeat(64)}`, { cookie: '' });
+  assert.equal(res.status, 403);
+  assert.equal(res.headers['set-cookie'], undefined);
 });
 
 it('rejects a rebound foreign Host', async () => {

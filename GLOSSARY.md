@@ -22,4 +22,7 @@ _Avoid_: retry run, try.
 **Review agent**: The agent that reviews and corrects the Implement agent's work later in the same Attempt, before any pull request exists.
 _Avoid_: code review, review (alone).
 
+**Dashboard**: The web page where the human watches and steers the Orchestrator: Runs, Ready Tickets, Run logs, pausing Projects. Only the human may use it, never an agent.
+_Avoid_: UI, web app.
+
 **In review**: A Run's end once its pull request is open and waiting for the human. Always the human's review, never the Review agent's.

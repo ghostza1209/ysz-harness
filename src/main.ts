@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
 import { createOrchestrator } from './core';
@@ -45,6 +47,18 @@ void (async () => {
   }
 })();
 
-createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`)).listen(port, '127.0.0.1', () => {
-  console.log(`Orchestrator on http://localhost:${port}`);
+// The Dashboard's token: kept in data/, which no sandbox mounts, so the cookie survives restarts. Delete the file to rotate it.
+const tokenPath = `${root}data/dashboard-token`;
+let token: string;
+try {
+  token = readFileSync(tokenPath, 'utf8').trim();
+  if (!token) throw new Error('empty');
+} catch {
+  token = randomBytes(32).toString('hex');
+  mkdirSync(`${root}data`, { recursive: true });
+  writeFileSync(tokenPath, token, { mode: 0o600 });
+}
+
+createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`), token).listen(port, '127.0.0.1', () => {
+  console.log(`Orchestrator on http://localhost:${port}/?token=${token}`);
 });
