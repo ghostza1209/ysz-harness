@@ -1243,6 +1243,169 @@ input:focus-visible {
   box-shadow: 0 0 0 4px var(--glow);
 }
 
+/* Cyber layer: neon cyan/magenta, glitching brand, perspective floor grid, CRT scanlines, chamfered controls. */
+
+:root[data-theme='dark'] {
+  --bg: #05060d;
+  --card: #0b0f1c;
+  --ink: #e8f7ff;
+  --line: #17203a;
+  --soft: #10172a;
+  --accent: #00e5ff;
+  --violet: #ff2bd6;
+  --ok: #00ff9c;
+  --warn: #fcee0a;
+  --bad: #ff3864;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #05060d;
+    --card: #0b0f1c;
+    --ink: #e8f7ff;
+    --line: #17203a;
+    --soft: #10172a;
+    --accent: #00e5ff;
+    --violet: #ff2bd6;
+    --ok: #00ff9c;
+    --warn: #fcee0a;
+    --bad: #ff3864;
+  }
+}
+
+/* Neon floor grid in perspective, rolling toward the viewer. */
+#root::before {
+  content: '';
+  position: fixed;
+  left: -50%;
+  right: -50%;
+  bottom: 0;
+  height: 50vh;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--accent) 60%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--violet) 55%, transparent) 1px, transparent 1px);
+  background-size: 64px 64px;
+  transform: perspective(420px) rotateX(58deg);
+  transform-origin: bottom;
+  mask-image: linear-gradient(to top, #000 25%, transparent 95%);
+  opacity: 0.7;
+  animation: floor 2.4s linear infinite;
+}
+
+/* CRT scanlines with a scan band rolling down the screen. */
+#root::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background:
+    linear-gradient(transparent, color-mix(in srgb, var(--accent) 6%, transparent), transparent) 0 -20% / 100% 140px no-repeat,
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 4%, transparent) 0 1px, transparent 1px 3px);
+  animation: scan 9s linear infinite;
+}
+
+.brand {
+  font-family: 'Orbitron', var(--mono);
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  background: none;
+  color: var(--ink);
+  -webkit-text-fill-color: currentColor;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: glitch 7s steps(1) infinite;
+}
+
+h2 {
+  font-family: 'Orbitron', var(--mono);
+  letter-spacing: 0.18em;
+}
+
+h2::before {
+  content: '//';
+  width: auto;
+  height: auto;
+  background: none;
+  transform: none;
+  box-shadow: none;
+  color: var(--violet);
+  text-shadow: 0 0 8px var(--violet);
+}
+
+.topbar {
+  border-bottom-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: 0 1px 18px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.title {
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Chamfered corners, the cyber silhouette. */
+button:not(.ghost, .copy, .chip),
+.pill,
+.tag,
+.project,
+select,
+input[type='search'] {
+  border-radius: 0;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+}
+
+.pill {
+  text-transform: uppercase;
+  text-shadow: 0 0 8px currentColor;
+}
+
+button.primary {
+  color: var(--bg);
+}
+
+a {
+  text-shadow: 0 0 8px color-mix(in srgb, currentColor 45%, transparent);
+}
+
+@keyframes floor {
+  to {
+    background-position: 0 64px;
+  }
+}
+
+@keyframes scan {
+  to {
+    background-position: 0 120%, 0 0;
+  }
+}
+
+@keyframes glitch {
+  0% {
+    transform: none;
+  }
+  92% {
+    transform: translateX(-2px) skewX(-8deg);
+    text-shadow: -2px 0 var(--violet), 2px 0 var(--accent);
+  }
+  93% {
+    transform: translateX(2px);
+    text-shadow: 2px 0 var(--violet), -2px 0 var(--accent);
+    clip-path: inset(20% 0 35% 0);
+  }
+  94% {
+    transform: none;
+    clip-path: none;
+  }
+  96% {
+    transform: translateX(1px);
+    text-shadow: -1px 0 var(--violet), 1px 0 var(--accent);
+  }
+  97% {
+    transform: none;
+    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+}
+
 /* Motion */
 
 .card,
