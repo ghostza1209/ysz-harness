@@ -12,3 +12,4 @@ data/
 
 # Secrets (CLAUDE_CODE_OAUTH_TOKEN for the sandboxes)
 .env
+/.idea/

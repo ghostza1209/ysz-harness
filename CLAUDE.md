@@ -1,5 +1,8 @@
 # Project Instructions for AI Agents
 
+## Communication
+Reply me in Thai
+
 This file provides instructions and context for AI coding agents working on this project.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
