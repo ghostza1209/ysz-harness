@@ -48,6 +48,8 @@ export interface Store {
   /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
   setHostJob(id: number, job: string): void;
   hostJob(id: number): string | null;
+  /** State of the Ticket's newest Run, if it ever had one. */
+  lastRunState(project: string, ticketId: string): RunState | undefined;
   /** Pause or resume a Project's picking. Survives a restart. */
   setPaused(project: string, paused: boolean): void;
   pausedProjects(): string[];
@@ -120,6 +122,8 @@ export function openStore(path: string): Store {
     },
     setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),
     hostJob: (id) => (db.prepare('SELECT host_job FROM runs WHERE id = ?').get(id)?.host_job as string | null | undefined) ?? null,
+    lastRunState: (project, ticketId) =>
+      db.prepare('SELECT state FROM runs WHERE project = ? AND ticket_id = ? ORDER BY id DESC LIMIT 1').get(project, ticketId)?.state as RunState | undefined,
     setPaused: (project, on) => void (on ? pause : resume).run(project),
     pausedProjects: () => paused.all().map((row) => row.project as string),
   };

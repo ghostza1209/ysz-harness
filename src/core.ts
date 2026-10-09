@@ -437,7 +437,14 @@ export function createOrchestrator(deps: {
       await Promise.all(
         projects.map((p) =>
           attempt(`releasing orphan claims in ${p.name}`, async () => {
-            for (const id of await beads.listClaimed(p)) if (!live.has(key(p.name, id))) await beads.release(p, id);
+            for (const id of await beads.listClaimed(p)) {
+              if (live.has(key(p.name, id))) continue;
+              // A kill whose release failed still means skip: a plain release would make the Ticket Ready and re-run it.
+              const killed = store.lastRunState(p.name, id) === 'killed';
+              await attempt(`releasing orphan claim ${key(p.name, id)}`, () =>
+                killed ? beads.kill(p, id, 'Killed from the dashboard; released after an Orchestrator restart.') : beads.release(p, id),
+              );
+            }
           }),
         ),
       );

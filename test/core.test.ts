@@ -38,6 +38,7 @@ let stopError: Error | undefined;
 /** Beads the Orchestrator holds in_progress without in-review ("project/id"), the error the next interrupt fails with, and the sandcastle container sweeps. */
 let claimed: string[];
 let interruptError: Error | undefined;
+let releaseError: Error | undefined;
 let leftoverSweeps: number;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
@@ -68,6 +69,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     return !lostClaims.has(`${project.name}/${id}`);
   },
   async release(project, id) {
+    if (releaseError && id === 'tv-a') throw releaseError;
     writes.push(`release ${project.name}/${id}`);
   },
   async fail(project, id, reason) {
@@ -166,6 +168,7 @@ beforeEach(() => {
   stopError = undefined;
   claimed = [];
   interruptError = undefined;
+  releaseError = undefined;
   leftoverSweeps = 0;
   agentCalls = [];
   agent = async () => complete;
@@ -1322,6 +1325,24 @@ describe('restart recovery', () => {
     await o.recover();
     await o.whenIdle();
     assert.deepEqual(writes.sort(), ['markInReview thaivis/tv1 ' + PR_URL, 'release fazwaz/fz-orphan', 'release thaivis/tv-orphan']);
+  });
+
+  it('keeps a killed Ticket skipped when its kill could not release the claim', async () => {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'tv-killed', title: 't', state: 'killed', startedAt: now });
+    store.updateRun(id, { endedAt: now, note: 'Killed from the dashboard while agent.; releasing the Ticket failed: bd timed out' });
+    claimed = ['thaivis/tv-killed'];
+    const o = await polled();
+    await o.recover();
+    assert.deepEqual(writes, ['kill thaivis/tv-killed: Killed from the dashboard; released after an Orchestrator restart.']);
+  });
+
+  it('releases the other orphan claims when one release fails', async () => {
+    claimed = ['thaivis/tv-a', 'thaivis/tv-b'];
+    releaseError = new Error('bd timed out');
+    const o = await polled();
+    const problems = await o.recover();
+    assert.deepEqual(writes, ['release thaivis/tv-b']);
+    assert.deepEqual(problems, ['releasing orphan claim thaivis/tv-a: bd timed out']);
   });
 
   it('leaves in-review beads untouched: they are not listed as claimed, and an in-review Run is not live', async () => {
