@@ -281,9 +281,9 @@ describe('polling', () => {
     const o = await polled();
     assert.deepEqual(order(o), ['pd1']);
     assert.deepEqual(o.projectStatuses(), [
-      { name: 'fazwaz', ready: 0, error: 'bd timed out after 30000ms' },
-      { name: 'PopDeal', ready: 1, error: null },
-      { name: 'thaivis', ready: 0, error: null },
+      { name: 'fazwaz', ready: 0, paused: false, error: 'bd timed out after 30000ms' },
+      { name: 'PopDeal', ready: 1, paused: false, error: null },
+      { name: 'thaivis', ready: 0, paused: false, error: null },
     ]);
   });
 
@@ -961,5 +961,143 @@ describe('Clean up', () => {
       fakeHost.removeClone = removeClone;
     }
     assert.equal(o.runs().history[0].cloneDir, '/clones/tv1-2');
+  });
+});
+
+describe('pausing a Project', () => {
+  beforeEach(() => {
+    queues = {
+      fazwaz: [ticket('fz1', 2, '2026-01-01T00:00:00Z')],
+      PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')],
+    };
+  });
+
+  it('never picks a paused Project, shows why, and lets the others use its slot', async () => {
+    const o = await polled();
+    o.setPaused('fazwaz', true);
+    assert.deepEqual(o.readyQueue().map((t) => `${t.id}: ${t.waitReason}`), ['fz1: Project paused', 'pd1: next up']);
+    assert.deepEqual(o.projectStatuses().map((p) => p.paused), [true, false, false]);
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim PopDeal/pd1']);
+  });
+
+  it('picks the Project again once resumed', async () => {
+    const o = await polled();
+    o.setPaused('fazwaz', true);
+    o.setPaused('fazwaz', false);
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim fazwaz/fz1', 'claim PopDeal/pd1']);
+  });
+
+  it('survives a restart: a fresh core on the same store still has the Project paused', async () => {
+    (await polled()).setPaused('fazwaz', true);
+    const fresh = await polled();
+    assert.deepEqual(fresh.readyQueue().map((t) => t.waitReason), ['Project paused', 'next up']);
+    assert.equal(fresh.projectStatuses()[0].paused, true);
+  });
+
+  it('lets a live Run of the Project finish normally', async () => {
+    const finish = gatedAgent();
+    const o = await polled();
+    await o.tick();
+    await flush();
+    o.setPaused('fazwaz', true);
+    assert.deepEqual(o.runs().live.map((r) => [r.ticketId, r.state]), [['fz1', 'agent'], ['pd1', 'agent']]);
+    finish();
+    await o.whenIdle();
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state]).sort(), [['fz1', 'in-review'], ['pd1', 'in-review']]);
+  });
+
+  it('refuses an unknown Project', async () => {
+    const o = await polled();
+    assert.throws(() => o.setPaused('nope', true), /Unknown Project nope/);
+  });
+});
+
+describe('Run now', () => {
+  beforeEach(() => {
+    queues = {
+      fazwaz: [ticket('fz1', 0, '2026-01-01T00:00:00Z')],
+      PopDeal: [ticket('pd1', 1, '2026-01-01T00:00:00Z')],
+      thaivis: [ticket('tv-low', 4, '2026-01-01T00:00:00Z')],
+    };
+  });
+
+  it('jumps the queue ahead of higher-priority Tickets and takes the free slot', async () => {
+    const finish = gatedAgent();
+    const o = await polled();
+    startRun('fazwaz', 'agent'); // one slot is left
+    assert.deepEqual(order(o), ['fz1', 'pd1', 'tv-low']);
+    o.runNow('thaivis', 'tv-low');
+    assert.deepEqual(o.readyQueue().map((t) => `${t.id}: ${t.waitReason}`), [
+      'tv-low: next up',
+      'fz1: Project already has a Run',
+      'pd1: waiting for slot',
+    ]);
+    await o.tick();
+    assert.deepEqual(writes, ['claim thaivis/tv-low']);
+    finish();
+    await o.whenIdle();
+  });
+
+  it('orders several Run-nows by when they were asked', async () => {
+    const o = await polled();
+    o.runNow('thaivis', 'tv-low');
+    o.runNow('PopDeal', 'pd1');
+    assert.deepEqual(order(o), ['tv-low', 'pd1', 'fz1']);
+  });
+
+  it('overrides a pause on its own Ticket only', async () => {
+    const o = await polled();
+    o.setPaused('PopDeal', true);
+    o.setPaused('thaivis', true);
+    o.runNow('thaivis', 'tv-low');
+    assert.deepEqual(o.readyQueue().map((t) => `${t.id}: ${t.waitReason}`), [
+      'tv-low: next up',
+      'fz1: next up',
+      'pd1: Project paused',
+    ]);
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim thaivis/tv-low', 'claim fazwaz/fz1']);
+  });
+
+  it('waits for a free slot instead of preempting a live Run', async () => {
+    const finish = gatedAgent();
+    const o = await polled();
+    startRun('fazwaz', 'agent');
+    startRun('PopDeal', 'host');
+    o.runNow('thaivis', 'tv-low');
+    assert.equal(o.readyQueue()[0].waitReason, 'run-now · waiting for slot');
+    await o.tick();
+    assert.deepEqual(writes, []);
+    assert.deepEqual(o.runs().live.map((r) => r.state), ['agent', 'host']);
+    finish();
+  });
+
+  it('waits for its own Project\'s current Run rather than starting a second one', async () => {
+    const o = await polled();
+    startRun('thaivis', 'agent');
+    o.runNow('thaivis', 'tv-low');
+    assert.equal(o.readyQueue().find((t) => t.id === 'tv-low')!.waitReason, 'run-now · waiting for slot');
+    await o.tick();
+    assert.deepEqual(writes.filter((w) => w.includes('tv-low')), []);
+  });
+
+  it('is refused for a Ticket that is not Ready', async () => {
+    const o = await polled();
+    assert.throws(() => o.runNow('thaivis', 'tv-gone'), /not in the Ready queue/);
+  });
+
+  it('is forgotten once the Ticket is no longer Ready', async () => {
+    const o = await polled();
+    o.runNow('thaivis', 'tv-low');
+    queues.thaivis = [];
+    await o.poll();
+    queues.thaivis = [ticket('tv-low', 4, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    assert.equal(o.readyQueue().find((t) => t.id === 'tv-low')!.runNow, false);
   });
 });

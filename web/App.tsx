@@ -63,13 +63,14 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
-  /** A Run control: POST it, show why the server refused, and refresh. */
-  const act = async (runId: number, action: 'kill' | 'retry' | 'cleanup') => {
-    const res = await fetch(`/api/runs/${runId}/${action}`, { method: 'POST' }).catch((e: Error) => e);
+  /** A control: POST it, show why the server refused, and refresh. */
+  const post = async (url: string) => {
+    const res = await fetch(url, { method: 'POST' }).catch((e: Error) => e);
     if (res instanceof Error) setActionError(res.message);
     else setActionError(res.ok ? null : ((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `HTTP ${res.status}`);
     await load();
   };
+  const act = (runId: number, action: 'kill' | 'retry' | 'cleanup') => post(`/api/runs/${runId}/${action}`);
   const kill = (r: RunRow) => {
     if (window.confirm(`Kill ${r.ticketId}? Its agent stops and the Ticket gets orchestrator:skip.`)) void act(r.id, 'kill');
   };
@@ -98,7 +99,12 @@ export function App() {
                   </span>
                 </div>
                 <div>{t.title}</div>
-                <div className="mute">{t.waitReason}</div>
+                <div className="row">
+                  <span className="mute grow">{t.waitReason}</span>
+                  {!t.runNow && t.waitReason !== 'not onboarded' && (
+                    <button onClick={() => void post(`/api/projects/${encodeURIComponent(t.project)}/run-now/${encodeURIComponent(t.id)}`)}>Run now</button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -143,7 +149,9 @@ export function App() {
               <div className="project" key={p.name}>
                 <div className="row">
                   <b className="grow">{p.name}</b>
+                  {p.paused && <span className="tag">paused</span>}
                   <span className="mute">{p.ready} ready</span>
+                  <button onClick={() => void post(`/api/projects/${encodeURIComponent(p.name)}/${p.paused ? 'resume' : 'pause'}`)}>{p.paused ? 'Resume' : 'Pause'}</button>
                 </div>
                 {p.error && <div className="bad">{p.error}</div>}
               </div>

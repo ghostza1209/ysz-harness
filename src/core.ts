@@ -7,7 +7,7 @@ import type { RunRow, Store } from './store';
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
 
-export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded';
+export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot';
 
 export interface QueueItem {
   project: string;
@@ -16,11 +16,15 @@ export interface QueueItem {
   priority: number;
   ageMs: number;
   waitReason: WaitReason;
+  /** The user asked to run it ahead of the queue. */
+  runNow: boolean;
 }
 
 export interface ProjectStatus {
   name: string;
   ready: number;
+  /** Paused Projects start no new Runs (Run now excepted); live Runs finish normally. */
+  paused: boolean;
   /** Why the last poll failed (e.g. bd timed out); the queue then shows the last known Tickets. */
   error: string | null;
 }
@@ -44,6 +48,13 @@ export interface Orchestrator {
    * Rejects, leaving the Run live, if the container could not be removed.
    */
   kill(runId: number): Promise<void>;
+  /** Pause or resume picking from a Project. Persists in the store; Runs already live are untouched. */
+  setPaused(project: string, paused: boolean): void;
+  /**
+   * Move a Ready Ticket to the head of the queue, even if its Project is paused. It still waits for a free slot (and
+   * for its Project's current Run): nothing is preempted. Throws if the Ticket is not in the Ready queue.
+   */
+  runNow(project: string, ticketId: string): void;
   /** Resume a needs-attention Run from the host step that failed. Needs a free slot. Resolves once started, not finished. */
   retryHostStep(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
@@ -97,6 +108,8 @@ export function createOrchestrator(deps: {
   const killing = new Set<number>();
   /** Tickets whose Run failed since startup, so a failing Ticket is not retried every tick. Failure handling will replace this. */
   const failed = new Set<string>();
+  /** Run-now Tickets in the order asked. ponytail: in memory, so a restart forgets them; the Ticket is still Ready and re-queues normally. */
+  const runNowKeys = new Set<string>();
   const key = (project: string, id: string) => `${project}/${id}`;
 
   const byName = new Map(projects.map((p) => [p.name, p]));
@@ -250,25 +263,34 @@ export function createOrchestrator(deps: {
       }
     });
     // ponytail: ties interleave in registry order every time; rotating from the last-picked Project belongs with claiming
-    return entries.sort((a, b) => a.ticket.priority - b.ticket.priority || a.rank - b.rank || a.projectIndex - b.projectIndex);
+    const asked = [...runNowKeys];
+    const jump = (e: (typeof entries)[number]) => {
+      const i = asked.indexOf(key(e.project, e.ticket.id));
+      return i < 0 ? asked.length : i;
+    };
+    return entries.sort((a, b) => jump(a) - jump(b) || a.ticket.priority - b.ticket.priority || a.rank - b.rank || a.projectIndex - b.projectIndex);
   }
 
   function readyQueue(): QueueItem[] {
     const now = clock.now();
     const live = store.slotProjects();
     const busy = new Set(live);
+    const paused = new Set(store.pausedProjects());
     let free = SLOTS_TOTAL - live.length;
     // Walk in pick order, handing out the free slots as the next ticks would.
     return pickOrder().map(({ project, ticket }) => {
+      const runNow = runNowKeys.has(key(project, ticket.id));
       let waitReason: WaitReason;
       if (!byName.get(project)!.image) waitReason = 'not onboarded';
-      else if (busy.has(project)) waitReason = 'Project already has a Run';
+      else if (paused.has(project) && !runNow) waitReason = 'Project paused';
+      else if (busy.has(project)) waitReason = runNow ? 'run-now · waiting for slot' : 'Project already has a Run';
       else if (free > 0) {
         waitReason = 'next up';
         free--;
         busy.add(project);
-      } else waitReason = 'waiting for slot';
+      } else waitReason = runNow ? 'run-now · waiting for slot' : 'waiting for slot';
       return {
+        runNow,
         project,
         id: ticket.id,
         title: ticket.title,
@@ -298,6 +320,7 @@ export function createOrchestrator(deps: {
         }
         // Won or lost, the snapshot entry is stale now; the next poll refreshes it.
         snapshot.tickets = snapshot.tickets.filter((t) => t.id !== next.id);
+        runNowKeys.delete(key(next.project, next.id));
         if (!won) continue;
         const runId = store.insertRun({ project: next.project, ticketId: next.id, title: next.title, state: 'claimed', startedAt: clock.now() });
         const control: Control = { ctl: new AbortController() };
@@ -341,6 +364,17 @@ export function createOrchestrator(deps: {
       }
     },
 
+    setPaused(project, paused) {
+      if (!byName.has(project)) throw new Error(`Unknown Project ${project}`);
+      store.setPaused(project, paused);
+    },
+
+    runNow(project, ticketId) {
+      if (!byName.get(project)?.image) throw new Error(`${project} is not onboarded`);
+      if (!snapshots.get(project)!.tickets.some((t) => t.id === ticketId && !failed.has(key(project, t.id)))) throw new Error(`${ticketId} is not in the Ready queue`);
+      runNowKeys.add(key(project, ticketId));
+    },
+
     async retryHostStep(runId) {
       const run = store.getRun(runId);
       const control = controls.get(runId);
@@ -365,6 +399,8 @@ export function createOrchestrator(deps: {
         const snapshot = snapshots.get(projects[i].name)!;
         if (result.status === 'fulfilled') {
           snapshot.tickets = result.value;
+          // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
+          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !result.value.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
           snapshot.error = null;
         } else {
           snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
@@ -379,9 +415,10 @@ export function createOrchestrator(deps: {
     },
 
     projectStatuses() {
+      const pausedNow = new Set(store.pausedProjects());
       return projects.map((p) => {
         const { tickets, error } = snapshots.get(p.name)!;
-        return { name: p.name, ready: tickets.length, error };
+        return { name: p.name, ready: tickets.length, paused: pausedNow.has(p.name), error };
       });
     },
   };

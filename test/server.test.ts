@@ -23,6 +23,11 @@ const orchestrator = {
   },
   retryHostStep: async (id: number) => void actions.push(`retry ${id}`),
   cleanUp: async (id: number) => void actions.push(`cleanup ${id}`),
+  setPaused: (project: string, paused: boolean) => void actions.push(`${paused ? 'pause' : 'resume'} ${project}`),
+  runNow: (project: string, id: string) => {
+    if (id === 'gone') throw new Error('gone is not in the Ready queue');
+    actions.push(`run-now ${project}/${id}`);
+  },
 } as unknown as Orchestrator;
 const actions: string[] = [];
 const realLogs = createRunLogs(logDir);
@@ -157,6 +162,27 @@ it('runs a Run control posted from the dashboard itself', async () => {
   actions.length = 0;
   for (const action of ['kill', 'retry', 'cleanup']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
   assert.deepEqual(actions, ['kill 7', 'retry 7', 'cleanup 7']);
+});
+
+it('runs pause, resume and Run now posted from the dashboard itself, decoding the names', async () => {
+  actions.length = 0;
+  assert.equal((await post('/api/projects/PopDeal/pause')).status, 200);
+  assert.equal((await post('/api/projects/PopDeal/resume')).status, 200);
+  assert.equal((await post('/api/projects/my%20app/run-now/app-9q2.7')).status, 200);
+  assert.deepEqual(actions, ['pause PopDeal', 'resume PopDeal', 'run-now my app/app-9q2.7']);
+  const refused = await post('/api/projects/PopDeal/run-now/gone');
+  assert.equal(refused.status, 409);
+  assert.deepEqual(JSON.parse(refused.body), { error: 'gone is not in the Ready queue' });
+});
+
+it('refuses pause, resume and Run now from another origin or by GET, and does nothing', async () => {
+  actions.length = 0;
+  for (const path of ['/api/projects/PopDeal/pause', '/api/projects/PopDeal/resume', '/api/projects/PopDeal/run-now/pd1']) {
+    assert.equal((await post(path, 'http://evil.example')).status, 403);
+    assert.equal((await send(path, {}, 'POST')).status, 403);
+    assert.equal((await get(path)).status, 405);
+  }
+  assert.deepEqual(actions, []);
 });
 
 it('refuses a Run control from another origin, with no origin, or by GET, and does nothing', async () => {

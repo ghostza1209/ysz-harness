@@ -45,6 +45,9 @@ export interface Store {
   /** Runs that ended, newest first. */
   history(limit: number): RunRow[];
   getRun(id: number): RunRow | undefined;
+  /** Pause or resume a Project's picking. Survives a restart. */
+  setPaused(project: string, paused: boolean): void;
+  pausedProjects(): string[];
 }
 
 /** `:memory:` or a file path; the parent directory is created. */
@@ -70,12 +73,16 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
     db.exec('ALTER TABLE runs ADD COLUMN clone_dir TEXT; PRAGMA user_version = 2');
   }
+  db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at) VALUES (?, ?, ?, ?, ?)');
   const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
   const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
   const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC LIMIT ?`);
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
+  const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
+  const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
+  const paused = db.prepare('SELECT project FROM paused_projects');
   const toRow = (r: Record<string, unknown>): RunRow => ({
     id: r.id as number,
     project: r.project as string,
@@ -105,5 +112,7 @@ export function openStore(path: string): Store {
       const row = byId.get(id);
       return row && toRow(row);
     },
+    setPaused: (project, on) => void (on ? pause : resume).run(project),
+    pausedProjects: () => paused.all().map((row) => row.project as string),
   };
 }

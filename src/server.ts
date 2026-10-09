@@ -63,7 +63,7 @@ async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: 
   }
 }
 
-/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}; everything else is the built SPA from `staticDir`. */
+/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, pollMs = 1000): Server {
   return createServer(async (req, res) => {
     // Block DNS rebinding: a page on evil.com resolved to 127.0.0.1 still sends Host: evil.com.
@@ -89,19 +89,27 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       return;
     }
 
-    const action = /^\/api\/runs\/(\d+)\/(kill|retry|cleanup)$/.exec(path);
-    if (action) {
+    const post = ((): (() => unknown) | undefined => {
+      const run = /^\/api\/runs\/(\d+)\/(kill|retry|cleanup)$/.exec(path);
+      if (run) {
+        const runId = Number(run[1]);
+        return { kill: () => orchestrator.kill(runId), retry: () => orchestrator.retryHostStep(runId), cleanup: () => orchestrator.cleanUp(runId) }[run[2] as 'kill'];
+      }
+      const pause = /^\/api\/projects\/([^/]+)\/(pause|resume)$/.exec(path);
+      if (pause) return () => orchestrator.setPaused(decodeURIComponent(pause[1]), pause[2] === 'pause');
+      const runNow = /^\/api\/projects\/([^/]+)\/run-now\/([^/]+)$/.exec(path);
+      if (runNow) return () => orchestrator.runNow(decodeURIComponent(runNow[1]), decodeURIComponent(runNow[2]));
+    })();
+    if (post) {
       // The Host check above lets a form posted from any web page through, so only this page's own Origin may act.
       if (req.method !== 'POST' || req.headers.origin !== `http://${req.headers.host}`) {
         res.statusCode = req.method === 'POST' ? 403 : 405;
         res.end();
         return;
       }
-      const runId = Number(action[1]);
-      const act = { kill: () => orchestrator.kill(runId), retry: () => orchestrator.retryHostStep(runId), cleanup: () => orchestrator.cleanUp(runId) }[action[2] as 'kill'];
       res.setHeader('content-type', 'application/json');
       try {
-        await act();
+        await post();
         res.end('{}');
       } catch (err) {
         res.statusCode = 409;
