@@ -24,7 +24,7 @@ let hostSteps: string[];
 /** Tickets another actor claims first ("project/id"), and the claim error of a broken Project, by name. */
 let lostClaims: Set<string>;
 let claimErrors: Record<string, Error>;
-let agent: (req: { project: Project; branch: string }) => Promise<{ commits: number; completed: boolean }>;
+let agent: (req: { project: Project; branch: string }) => Promise<{ completed: boolean }>;
 let publish: () => Promise<string>;
 
 const fakeBeads = (queues: Queues): BeadsGateway => ({
@@ -54,14 +54,14 @@ const fakeSandbox: SandboxRunner = { implement: (req) => agent(req) };
 const fakeHost: HostSteps = {
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
-    return { branch: `agent/${ticketId}` };
+    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}` };
   },
-  async publish(_project, ticket, branch) {
+  async publish(_project, _ticket, { branch }) {
     hostSteps.push(`publish ${branch}`);
     return publish();
   },
-  async removeWorktree(_project, branch) {
-    hostSteps.push(`removeWorktree ${branch}`);
+  async removeClone({ branch }) {
+    hostSteps.push(`removeClone ${branch}`);
   },
 };
 
@@ -77,7 +77,7 @@ beforeEach(() => {
   hostSteps = [];
   lostClaims = new Set();
   claimErrors = {};
-  agent = async () => ({ commits: 1, completed: true });
+  agent = async () => ({ completed: true });
   publish = async () => PR_URL;
 });
 
@@ -245,7 +245,7 @@ function gatedAgent() {
   const gate = new Promise<void>((resolve) => (open = resolve));
   agent = async () => {
     await gate;
-    return { commits: 1, completed: true };
+    return { completed: true };
   };
   return open;
 }
@@ -330,14 +330,14 @@ describe('starting Runs', () => {
 });
 
 describe('a happy-path Run', () => {
-  it('ends in-review: pushes via the host, marks the bead in review, removes the worktree', async () => {
+  it('ends in-review: pushes via the host, marks the bead in review, removes the clone', async () => {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
     await o.whenIdle();
 
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
-    assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'publish agent/tv1', 'removeWorktree agent/tv1']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'publish agent/tv1', 'removeClone agent/tv1']);
     assert.deepEqual(o.runs().live, []);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
     const [run] = o.runs().history;
@@ -378,16 +378,8 @@ describe('a Run that does not reach a PR', () => {
     return o;
   }
 
-  it('fails and releases the Ticket when the agent makes no commits', async () => {
-    agent = async () => ({ commits: 0, completed: true });
-    const o = await failedRun();
-    assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
-    assert.deepEqual(hostSteps, ['prepare thaivis/tv1']);
-    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [['failed', 'the agent made no commits']]);
-  });
-
   it('fails when the agent never signals COMPLETE', async () => {
-    agent = async () => ({ commits: 2, completed: false });
+    agent = async () => ({ completed: false });
     const o = await failedRun();
     assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
     assert.equal(o.runs().history[0].note, 'the agent stopped without signalling COMPLETE');
@@ -402,7 +394,7 @@ describe('a Run that does not reach a PR', () => {
     assert.deepEqual(o.runs().history.map((r) => [r.state, r.attempt, r.note]), [['failed', 1, 'idle for 600s']]);
   });
 
-  it('fails and releases when pushing the PR fails, keeping the worktree', async () => {
+  it('fails and releases when pushing the PR fails, keeping the clone', async () => {
     publish = async () => {
       throw new Error('git push failed: rejected');
     };
@@ -413,7 +405,7 @@ describe('a Run that does not reach a PR', () => {
   });
 
   it('does not pick the failed Ticket again while the process lives', async () => {
-    agent = async () => ({ commits: 0, completed: true });
+    agent = async () => ({ completed: false });
     const o = await failedRun();
     await o.poll(); // the released bead is Ready again
     await o.tick();

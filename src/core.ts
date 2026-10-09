@@ -67,19 +67,18 @@ export function createOrchestrator(deps: {
     let prUrl: string | null = null;
     try {
       const context = await beads.showContext(project, ticket.id);
-      const { branch } = await host.prepare(project, ticket.id, context);
+      const prepared = await host.prepare(project, ticket.id, context);
       store.updateRun(runId, { state: 'agent', attempt: 1 });
-      const result = await sandbox.implement({ project, runId, branch });
+      const result = await sandbox.implement({ project, runId, ...prepared });
       if (!result.completed) throw new Error('the agent stopped without signalling COMPLETE');
-      if (result.commits === 0) throw new Error('the agent made no commits');
       store.updateRun(runId, { state: 'host' });
-      const url = await host.publish(project, ticket, branch);
+      const url = await host.publish(project, ticket, prepared);
       prUrl = url;
       store.updateRun(runId, { prUrl: url });
       await beads.markInReview(project, ticket.id, url);
       end({ state: 'in-review' });
-      // The PR is open and the bead is done, so a leftover worktree is only clutter.
-      await host.removeWorktree(project, branch).catch(() => {});
+      // The PR is open and the bead is done, so a leftover clone is only clutter.
+      await host.removeClone(prepared).catch(() => {});
     } catch (err) {
       failed.add(key(project.name, ticket.id));
       let note = err instanceof Error ? err.message : String(err);
