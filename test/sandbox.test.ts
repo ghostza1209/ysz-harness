@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox } from '../src/sandbox';
+import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox, teeCommand } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -37,6 +37,38 @@ it('reads no signal as stopped and keeps only the last 500 characters of what th
   assert.equal(result.outcome, 'stopped');
   assert.equal(result.outcome === 'stopped' && result.tail.length, 500);
   assert.ok(result.outcome === 'stopped' && result.tail.endsWith('blocked: no database'));
+});
+
+/** teeCommand on a fake sandbox handle: its exec streams one stdout line, then fails with stderr, as a broken pnpm install does. */
+describe('teeCommand', () => {
+  let root: string;
+  let log: string;
+  const handle = {
+    worktreePath: '/home/agent/workspace',
+    exec: async (_command: string, opts?: { onLine?: (line: string) => void }) => {
+      opts?.onLine?.('Progress: resolved 12, reused 12');
+      return { stdout: '', stderr: 'ERR_PNPM_OUTDATED_LOCKFILE lockfile is out of date\n', exitCode: 1 };
+    },
+    close: async () => {},
+    copyFileIn: async () => {},
+    copyFileOut: async () => {},
+  };
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'tee-'));
+    log = join(root, 'agent.log');
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('appends the command stdout and stderr to the log, indented under the setup step, even when it fails', async () => {
+    const result = await teeCommand(handle, 'pnpm install', log).exec('pnpm install');
+    assert.equal(result.exitCode, 1);
+    assert.equal(readFileSync(log, 'utf8'), '  Progress: resolved 12, reused 12\n  ERR_PNPM_OUTDATED_LOCKFILE lockfile is out of date\n');
+  });
+
+  it('passes any other command straight through and writes nothing', async () => {
+    assert.equal((await teeCommand(handle, 'pnpm install', log).exec('git rev-parse HEAD')).exitCode, 1);
+    assert.throws(() => readFileSync(log), /ENOENT/);
+  });
 });
 
 /** stopSandbox against a fake `docker`: containers live in a file, every call is logged. */
