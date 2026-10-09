@@ -45,6 +45,9 @@ export interface Store {
   /** Runs that ended, newest first. */
   history(limit: number): RunRow[];
   getRun(id: number): RunRow | undefined;
+  /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
+  setHostJob(id: number, job: string): void;
+  hostJob(id: number): string | null;
   /** Pause or resume a Project's picking. Survives a restart. */
   setPaused(project: string, paused: boolean): void;
   pausedProjects(): string[];
@@ -72,6 +75,9 @@ export function openStore(path: string): Store {
   )`);
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
     db.exec('ALTER TABLE runs ADD COLUMN clone_dir TEXT; PRAGMA user_version = 2');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 3) {
+    db.exec('ALTER TABLE runs ADD COLUMN host_job TEXT; PRAGMA user_version = 3');
   }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
@@ -112,6 +118,8 @@ export function openStore(path: string): Store {
       const row = byId.get(id);
       return row && toRow(row);
     },
+    setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),
+    hostJob: (id) => (db.prepare('SELECT host_job FROM runs WHERE id = ?').get(id)?.host_job as string | null | undefined) ?? null,
     setPaused: (project, on) => void (on ? pause : resume).run(project),
     pausedProjects: () => paused.all().map((row) => row.project as string),
   };

@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, stopSandbox } from '../src/sandbox';
+import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -90,6 +90,12 @@ esac
     setContainers('aaa');
     writeFileSync(join(root, 'rm-races'), '');
     await stopSandbox({ dir: '/clones/tv1-1' }, docker);
+  });
+
+  it('removes every sandcastle container, whichever Run it served', async () => {
+    setContainers('aaa', 'bbb');
+    await removeLeftoverSandboxes(docker);
+    assert.deepEqual(logOf(), ['ps -aq --no-trunc --filter name=sandcastle-', 'rm -f aaa bbb', 'ps -aq --no-trunc --filter name=sandcastle-']);
   });
 
   it('throws when docker cannot be asked', async () => {

@@ -152,6 +152,35 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual(await state(ids.unkillable), { status: 'in_progress', assignee: 'orchestrator', labels: ['ready-for-agent'] });
   });
 
+  it('lists the Tickets the orchestrator holds, bar in-review ones, other actors\' and open ones', async () => {
+    await create('held', 'held', '-l', 'ready-for-agent');
+    await create('reviewed', 'in review');
+    await create('hers', 'someone else\'s', '-a', 'someone');
+    await create('idle', 'idle');
+    await createBeadsGateway().claim(project, ids.held);
+    await createBeadsGateway().claim(project, ids.reviewed);
+    await createBeadsGateway().markInReview(project, ids.reviewed, 'https://github.com/o/r/pull/1');
+    await bd('update', ids.hers, '--status', 'in_progress');
+
+    const claimed = await createBeadsGateway().listClaimed(project);
+
+    assert.ok(claimed.includes(ids.held));
+    for (const key of ['reviewed', 'hers', 'idle', 'ready']) assert.ok(!claimed.includes(ids[key]), key);
+  });
+
+  it('hands an interrupted Ticket back: reason commented, open and unassigned, labels kept, Ready again', async () => {
+    await create('interrupted', 'will be interrupted', '-l', 'ready-for-agent,keep-me');
+    await createBeadsGateway().claim(project, ids.interrupted);
+
+    await createBeadsGateway().interrupt(project, ids.interrupted, 'Interrupted by an Orchestrator restart while agent.');
+
+    const { labels, ...rest } = await state(ids.interrupted);
+    assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'ready-for-agent'] });
+    const [issue] = JSON.parse((await bd('show', ids.interrupted, '--json', '--include-comments')).stdout);
+    assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', 'Interrupted by an Orchestrator restart while agent.']]);
+    assert.ok((await createBeadsGateway().listReady(project)).some((t) => t.id === ids.interrupted));
+  });
+
   it('shows a Ticket with its comments, parent epic and closed blockers only', async () => {
     await create('epic', 'the epic', '-t', 'epic', '-d', 'epic body');
     await create('child', 'the child', '--parent', ids.epic);

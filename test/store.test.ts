@@ -45,3 +45,17 @@ it('lists needs-attention Runs as live but not as slot holders, and ended Runs a
   assert.deepEqual(store.history(10).map((r) => r.project), ['c']);
   assert.equal(store.getRun(999), undefined);
 });
+
+it('keeps a Run\'s host job across a reopen, and has none until one is saved', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const store = openStore(path);
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'tv-1', title: 't', state: 'host', startedAt: 1 });
+    assert.equal(store.hostJob(id), null);
+    store.setHostJob(id, '{"tip":"abc"}');
+    assert.equal(openStore(path).hostJob(id), '{"tip":"abc"}');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

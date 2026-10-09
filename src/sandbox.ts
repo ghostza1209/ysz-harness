@@ -28,24 +28,30 @@ export interface SandboxRunner {
   review(req: AgentRequest): Promise<AgentResult>;
   /** Remove the Run's sandbox container now, if any is left. Throws unless it is gone afterwards: sandcastle's own teardown ignores docker errors. */
   stop(prepared: Pick<Prepared, 'dir'>): Promise<void>;
+  /** Remove every leftover sandcastle container, of any Run. Throws unless none is left. */
+  removeLeftovers(): Promise<void>;
 }
 
 const execFileAsync = promisify(execFile);
 
 /**
- * Remove every container that mounts the Run's clone. The clone path is unique per Attempt, so this never touches another
- * Run's or the user's own containers. `docker rm -f` may lose a race with sandcastle's own removal, so what counts is
- * whether the container is gone afterwards.
+ * Remove every container `docker ps` lists under `filter`. `docker rm -f` may lose a race with sandcastle's own removal,
+ * so what counts is whether the container is gone afterwards.
  */
-export async function stopSandbox({ dir }: Pick<Prepared, 'dir'>, dockerBin = 'docker'): Promise<void> {
-  const listed = async () =>
-    (await execFileAsync(dockerBin, ['ps', '-aq', '--no-trunc', '--filter', `volume=${join(dir, 'repo')}`], { timeout: 30_000 })).stdout.split('\n').filter(Boolean);
+async function removeContainers(filter: string, dockerBin: string): Promise<void> {
+  const listed = async () => (await execFileAsync(dockerBin, ['ps', '-aq', '--no-trunc', '--filter', filter], { timeout: 30_000 })).stdout.split('\n').filter(Boolean);
   const ids = await listed();
   if (!ids.length) return;
   const removal = await execFileAsync(dockerBin, ['rm', '-f', ...ids], { timeout: 60_000 }).then(() => null, (err: Error) => err);
   const left = await listed();
   if (left.length) throw new Error(`the sandbox container ${left.join(' ')} is still there${removal ? `: ${removal.message}` : ''}`);
 }
+
+/** Remove every container that mounts the Run's clone. The clone path is unique per Attempt, so this never touches another Run's or the user's own containers. */
+export const stopSandbox = ({ dir }: Pick<Prepared, 'dir'>, dockerBin = 'docker') => removeContainers(`volume=${join(dir, 'repo')}`, dockerBin);
+
+/** Remove every sandcastle container, whichever Run made it: the ones a crashed Orchestrator left behind. */
+export const removeLeftoverSandboxes = (dockerBin = 'docker') => removeContainers('name=sandcastle-', dockerBin);
 
 export async function imageExists(image: string, dockerBin = 'docker'): Promise<boolean> {
   return execFileAsync(dockerBin, ['image', 'inspect', image], { timeout: 30_000 }).then(() => true, () => false);
@@ -126,5 +132,6 @@ export function createSandboxRunner(root: string): SandboxRunner {
       }),
     review: (req) => runAgent('review', req, { BASE: req.base }),
     stop: (prepared) => stopSandbox(prepared),
+    removeLeftovers: () => removeLeftoverSandboxes(),
   };
 }

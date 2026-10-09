@@ -34,6 +34,10 @@ export interface BeadsGateway {
   fail(project: Project, id: string, reason: string): Promise<void>;
   /** The user killed the Run: comment why, then label orchestrator:skip and release the claim. ready-for-agent stays. */
   kill(project: Project, id: string, reason: string): Promise<void>;
+  /** The Orchestrator restarted mid-Run: comment why, then release the claim. Labels stay, so the Ticket is Ready again. */
+  interrupt(project: Project, id: string, reason: string): Promise<void>;
+  /** Ids of the Tickets the Orchestrator holds in_progress without an in-review label. */
+  listClaimed(project: Project): Promise<string[]>;
   showContext(project: Project, id: string): Promise<TicketContext>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
@@ -100,6 +104,17 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket claimed.
       await write(project, ['comment', id, reason]);
       await write(project, ['update', id, '--add-label', 'orchestrator:skip', '--assignee', '', '--status', 'open']);
+    },
+
+    async interrupt(project, id, reason) {
+      // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket claimed.
+      await write(project, ['comment', id, reason]);
+      await write(project, ['update', id, '--assignee', '', '--status', 'open']);
+    },
+
+    async listClaimed(project) {
+      const out = await bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'in_progress', '-a', ORCHESTRATOR, '--exclude-label', 'in-review', '-n', '0', '--json']);
+      return (JSON.parse(out) as { id: string }[]).map((i) => i.id);
     },
 
     async showContext(project, id) {

@@ -55,6 +55,13 @@ export interface Orchestrator {
    * for its Project's current Run): nothing is preempted. Throws if the Ticket is not in the Ready queue.
    */
   runNow(project: string, ticketId: string): void;
+  /**
+   * Run once at startup, before the first tick, to settle what a crash left behind: remove leftover sandbox containers;
+   * end agent-phase Runs as interrupted, removing their clone and releasing their Ticket with a comment (not an Attempt);
+   * resume host-phase Runs from their host step and re-arm needs-attention ones for Retry; release Tickets the
+   * Orchestrator holds with no live Run and no in-review label. Never rejects: returns what it could not do.
+   */
+  recover(): Promise<string[]>;
   /** Resume a needs-attention Run from the host step that failed. Needs a free slot. Resolves once started, not finished. */
   retryHostStep(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
@@ -82,7 +89,7 @@ interface HostJob {
   prUrl: string | null;
 }
 
-/** In-process handles on a live Run. ponytail: lost on restart, so after one a live row can be killed but not retried; 9q2.9 recovers them. */
+/** In-process handles on a live Run. Rebuilt by recover() after a restart. */
 interface Control {
   /** Aborted by kill(): stops the Run's agent and host processes. */
   ctl: AbortController;
@@ -142,6 +149,8 @@ export function createOrchestrator(deps: {
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
     store.updateRun(runId, { state: 'host', note: null });
+    // What recover() needs to pick the job up again; the PR url is already on the row.
+    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped }));
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
@@ -392,6 +401,47 @@ export function createOrchestrator(deps: {
       if (!byName.get(project)?.image) throw new Error(`${project} is not onboarded`);
       if (!snapshots.get(project)!.tickets.some((t) => t.id === ticketId && !failed.has(key(project, t.id)))) throw new Error(`${ticketId} is not in the Ready queue`);
       runNowKeys.add(key(project, ticketId));
+    },
+
+    async recover() {
+      const problems: string[] = [];
+      const attempt = (what: string, work: () => Promise<void>) => work().catch((err) => void problems.push(`${what}: ${message(err)}`));
+      await attempt('removing leftover sandbox containers', () => sandbox.removeLeftovers());
+
+      for (const run of store.liveRuns()) {
+        const project = byName.get(run.project);
+        if (!project) {
+          problems.push(`Run ${run.id}: ${run.project} is not a registered Project`);
+          continue;
+        }
+        const saved = store.hostJob(run.id);
+        if (saved) {
+          // Past the agents: the clone holds the finished work, so only the host steps are left.
+          const control: Control = { ctl: new AbortController() };
+          const job: HostJob = { project, ticket: { id: run.ticketId, title: run.title }, ...JSON.parse(saved), prUrl: run.prUrl };
+          controls.set(run.id, control);
+          if (run.state === 'needs-attention') control.parked = job;
+          else track(control, finish(run.id, control, job));
+          continue;
+        }
+        // An agent was cut off (or the Run had not got that far). Its work is gone, and no Attempt is spent.
+        await attempt(`Run ${run.id}`, async () => {
+          let note = `Interrupted by an Orchestrator restart while ${run.state}; not counted as an Attempt.`;
+          await beads.interrupt(project, run.ticketId, note).catch((err) => void (note += `; releasing the Ticket failed: ${message(err)}`));
+          if (run.cloneDir) await host.removeClone({ dir: run.cloneDir }).then(() => store.updateRun(run.id, { cloneDir: null }), () => {});
+          end(run.id, { state: 'interrupted', note });
+        });
+      }
+
+      const live = new Set(store.liveRuns().map((r) => key(r.project, r.ticketId)));
+      await Promise.all(
+        projects.map((p) =>
+          attempt(`releasing orphan claims in ${p.name}`, async () => {
+            for (const id of await beads.listClaimed(p)) if (!live.has(key(p.name, id))) await beads.release(p, id);
+          }),
+        ),
+      );
+      return problems;
     },
 
     async retryHostStep(runId) {

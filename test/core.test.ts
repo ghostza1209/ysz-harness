@@ -35,6 +35,10 @@ let contextGate: Promise<void> | undefined;
 /** The sandbox containers the orchestrator was asked to remove (by clone dir), and the error stop() fails with. */
 let stops: string[];
 let stopError: Error | undefined;
+/** Beads the Orchestrator holds in_progress without in-review ("project/id"), the error the next interrupt fails with, and the sandcastle container sweeps. */
+let claimed: string[];
+let interruptError: Error | undefined;
+let leftoverSweeps: number;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
@@ -74,6 +78,13 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (killError) throw killError;
     writes.push(`kill ${project.name}/${id}: ${reason}`);
   },
+  async interrupt(project, id, reason) {
+    if (interruptError) throw interruptError;
+    writes.push(`interrupt ${project.name}/${id}: ${reason}`);
+  },
+  async listClaimed(project) {
+    return claimed.filter((c) => c.startsWith(`${project.name}/`)).map((c) => c.split('/')[1]);
+  },
   async showContext(_project, id) {
     await contextGate;
     return { ticket: { id }, parent: null, closedBlockers: [] };
@@ -102,6 +113,9 @@ const fakeSandbox: SandboxRunner = {
   async stop({ dir }) {
     if (stopError) throw stopError;
     stops.push(dir);
+  },
+  async removeLeftovers() {
+    leftoverSweeps++;
   },
 };
 
@@ -150,6 +164,9 @@ beforeEach(() => {
   contextGate = undefined;
   stops = [];
   stopError = undefined;
+  claimed = [];
+  interruptError = undefined;
+  leftoverSweeps = 0;
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
@@ -1198,5 +1215,131 @@ describe('Run now', () => {
     queues.thaivis = [ticket('tv-low', 4, '2026-01-01T00:00:00Z')];
     await o.poll();
     assert.equal(o.readyQueue().find((t) => t.id === 'tv-low')!.runNow, false);
+  });
+});
+
+describe('restart recovery', () => {
+  const HOST_JOB = JSON.stringify({ prepared: { branch: 'agent/tv1', dir: '/clones/tv1-9', base: 'b'.repeat(40) }, tip: 'c'.repeat(40), reviewSkipped: 'no review' });
+
+  /** A Run the previous process left in `state`, in the store; a new Orchestrator then recovers it. */
+  function leftBehind(state: RunState, extra: { prUrl?: string; hostJob?: boolean; cloneDir?: string } = {}) {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'tv1', title: 'the Ticket', state, startedAt: now });
+    store.updateRun(id, { attempt: 1, cloneDir: extra.cloneDir ?? null, prUrl: extra.prUrl ?? null });
+    if (extra.hostJob) store.setHostJob(id, HOST_JOB);
+    return id;
+  }
+
+  it('ends an agent-phase Run as interrupted: bead released with a comment, clone removed, no slot held', async () => {
+    leftBehind('agent', { cloneDir: '/clones/tv1-9' });
+    const o = await polled();
+
+    assert.deepEqual(await o.recover(), []);
+
+    assert.equal(leftoverSweeps, 1);
+    assert.deepEqual(writes, ['interrupt thaivis/tv1: Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.deepEqual(hostSteps, ['removeClone /clones/tv1-9']);
+    assert.deepEqual(o.runs().live, []);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.cloneDir, run.note], ['interrupted', 1, null, 'Interrupted by an Orchestrator restart while agent; not counted as an Attempt.']);
+    assert.notEqual(run.endedAt, null);
+    assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it('treats a claimed Run, and a host Run still collecting the agent\'s commits, as agent-phase', async () => {
+    leftBehind('claimed');
+    store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'host', startedAt: now });
+    const o = await polled();
+    await o.recover();
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted', 'interrupted']);
+    assert.deepEqual(writes.map((w) => w.split(':')[0]).sort(), ['interrupt fazwaz/fz1', 'interrupt thaivis/tv1']);
+  });
+
+  it('still ends the Run, and says so, when the bead cannot be released', async () => {
+    interruptError = new Error('bd timed out');
+    leftBehind('agent');
+    const o = await polled();
+    await o.recover();
+    assert.match(o.runs().history[0].note!, /releasing the Ticket failed: bd timed out/);
+  });
+
+  it('resumes a host-phase Run from its host step to in-review, without another agent run', async () => {
+    let finishPublish!: () => void;
+    publish = () => new Promise((resolve) => (finishPublish = () => resolve(PR_URL)));
+    const id = leftBehind('host', { hostJob: true, cloneDir: '/clones/tv1-9' });
+    const o = await polled();
+
+    await o.recover();
+    assert.deepEqual(o.slots(), { used: 1, total: 2 }); // the slot is held while it resumes
+    finishPublish();
+    await o.whenIdle();
+
+    assert.deepEqual(hostSteps, ['publish agent/tv1', 'removeClone /clones/tv1-9']);
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review' });
+    assert.deepEqual(writes, ['markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(agentCalls, []);
+    const run = store.getRun(id)!;
+    assert.deepEqual([run.state, run.prUrl, run.cloneDir], ['in-review', PR_URL, null]);
+  });
+
+  it('opens no second PR when the previous process already had one', async () => {
+    leftBehind('host', { hostJob: true, prUrl: 'https://github.com/thaivis/app/pull/3' });
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, ['removeClone /clones/tv1-9']); // no publish
+    assert.deepEqual(writes, ['markInReview thaivis/tv1 https://github.com/thaivis/app/pull/3']);
+  });
+
+  it('parks a resumed host step that fails again in needs-attention', async () => {
+    publish = async () => {
+      throw new Error('git push failed: rejected');
+    };
+    leftBehind('host', { hostJob: true });
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(o.runs().live.map((r) => [r.state, r.note]), [['needs-attention', 'git push failed: rejected']]);
+  });
+
+  it('makes a needs-attention Run retryable again after a restart', async () => {
+    const id = leftBehind('needs-attention', { hostJob: true });
+    const o = await polled();
+    await o.recover();
+    assert.deepEqual(o.runs().live.map((r) => r.state), ['needs-attention']);
+    assert.deepEqual(writes, []);
+
+    await o.retryHostStep(id);
+    await o.whenIdle();
+
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['in-review']);
+    assert.deepEqual(writes, ['markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it('releases a bead the Orchestrator holds that has no Run, and leaves one with a live Run alone', async () => {
+    leftBehind('host', { hostJob: true });
+    claimed = ['thaivis/tv1', 'thaivis/tv-orphan', 'fazwaz/fz-orphan'];
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(writes.sort(), ['markInReview thaivis/tv1 ' + PR_URL, 'release fazwaz/fz-orphan', 'release thaivis/tv-orphan']);
+  });
+
+  it('leaves in-review beads untouched: they are not listed as claimed, and an in-review Run is not live', async () => {
+    store.insertRun({ project: 'thaivis', ticketId: 'tv-done', title: 'done', state: 'in-review', startedAt: now });
+    const o = await polled();
+    assert.deepEqual(await o.recover(), []);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['in-review']);
+  });
+
+  it('reports what it could not do and carries on with the rest', async () => {
+    store.insertRun({ project: 'gone', ticketId: 'g1', title: 't', state: 'agent', startedAt: now });
+    leftBehind('agent');
+    const o = await polled();
+    const problems = await o.recover();
+    assert.equal(problems.length, 1);
+    assert.match(problems[0], /gone is not a registered Project/);
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted']);
   });
 });

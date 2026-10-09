@@ -22,6 +22,8 @@ const orchestrator = createOrchestrator({
   clock: Date,
 });
 
+for (const problem of await orchestrator.recover()) console.error(`[recover] ${problem}`);
+
 // Sequential, so a slow poll can never overlap the next one. A tick only starts Runs; they finish in the background.
 void (async () => {
   for (;;) {
