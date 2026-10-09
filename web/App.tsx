@@ -335,6 +335,14 @@ export function App() {
     else toast(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `HTTP ${res.status}`, true);
     await load();
   };
+  /** Pause every picking Project, or resume all once every one is paused: one POST each, one toast. */
+  const pauseAll = async (resume: boolean) => {
+    const targets = state!.projects.filter((p) => p.paused === resume);
+    const res = await Promise.all(targets.map((p) => fetch(`/api/projects/${encodeURIComponent(p.name)}/${resume ? 'resume' : 'pause'}`, { method: 'POST' }).catch(() => null)));
+    const failed = targets.filter((_, i) => !res[i]?.ok).map((p) => p.name);
+    toast(failed.length ? `Could not ${resume ? 'resume' : 'pause'} ${failed.join(', ')}` : `${resume ? 'Resumed' : 'Paused'} all Projects`, failed.length > 0);
+    await load();
+  };
   const act = (r: RunRow, action: 'kill' | 'retry' | 'cleanup', done: string) => post(`/api/runs/${r.id}/${action}`, `${done} ${r.ticketId}`);
   const kill = (r: RunRow) => {
     if (window.confirm(`Kill ${r.ticketId}? Its agent stops and the Ticket gets orchestrator:skip.`)) void act(r, 'kill', 'Killed');
@@ -396,6 +404,11 @@ export function App() {
             </span>
           ))}
           <span className="grow" />
+          {state.projects.length > 1 && (
+            <button className="project" onClick={() => void pauseAll(allPaused)} title={allPaused ? 'Resume every Project' : 'Stop picking from every Project; live Runs keep going'}>
+              {allPaused ? '▶ Resume all' : '⏸ Pause all'}
+            </button>
+          )}
           {state.projects.map((p) => (
             <button
               key={p.name}
