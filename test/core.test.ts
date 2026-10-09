@@ -27,6 +27,8 @@ let claimErrors: Record<string, Error>;
 let failError: Error | undefined;
 /** The error the next prepare fails with. */
 let prepareError: Error | undefined;
+/** Each live Run's "<state> <attempt>" as every prepare starts. */
+let preparedWhile: string[];
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
 let killError: Error | undefined;
 let markError: Error | undefined;
@@ -132,6 +134,7 @@ const fakeHost: HostSteps = {
   },
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
+    preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40) };
   },
@@ -166,6 +169,7 @@ beforeEach(() => {
   claimErrors = {};
   failError = undefined;
   prepareError = undefined;
+  preparedWhile = [];
   killError = undefined;
   markError = undefined;
   contextGate = undefined;
@@ -684,6 +688,12 @@ describe('the Attempt policy', () => {
       ['failed', 2, 'Attempt 1 failed: the implement agent failed: boom 1\nAttempt 2 failed: the implement agent failed: boom 2'],
     ]);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it("shows Attempt 2's clone as claimed in Attempt 2, not the failed Attempt's agent stage", async () => {
+    collected = (dir) => ({ tip: 'a'.repeat(40), commits: dirAttempt(dir) === 1 ? 0 : 1 });
+    await run();
+    assert.deepEqual(preparedWhile, ['claimed 1', 'claimed 2']);
   });
 
   it('forgets the removed Attempt 1 clone when Attempt 2 makes none, so Clean up is not offered for it', async () => {

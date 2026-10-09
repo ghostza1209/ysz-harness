@@ -185,10 +185,11 @@ export function createOrchestrator(deps: {
       /** One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch. A kill throws out of it. */
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
+        store.updateRun(runId, { state: 'claimed', attempt: n });
         const prepared = await host.prepare(project, ticket.id, context, signal);
         store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
-        store.updateRun(runId, { state: 'agent', attempt: n });
+        store.updateRun(runId, { state: 'agent' });
         let implemented: AgentResult;
         try {
           implemented = await sandbox.implement({ ...req, previousAttemptSummary });
