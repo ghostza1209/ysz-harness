@@ -568,12 +568,22 @@ export function App() {
                       </div>
                       <div className="links">
                         {r.prUrl && (
-                          <a className="pr" href={r.prUrl} target="_blank" rel="noreferrer">
-                            PR #{prNumber(r.prUrl) ?? '?'} ↗
+                          <a className="act pr" href={r.prUrl} target="_blank" rel="noreferrer" aria-label={`PR #${prNumber(r.prUrl) ?? '?'}`}>
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                              <circle cx="4" cy="3.5" r="1.75" />
+                              <circle cx="4" cy="12.5" r="1.75" />
+                              <circle cx="12" cy="12.5" r="1.75" />
+                              <path d="M4 5.25v5.5M12 10.75V6.5a2 2 0 0 0-2-2H7.5m0 0L9.5 2.5m-2 2 2 2" />
+                            </svg>
+                            #{prNumber(r.prUrl) ?? '?'}
+                            <span className="arrow">↗</span>
                           </a>
                         )}
                         {r.attempt > 0 && (
-                          <button className="link" onClick={() => setLogRun(r)}>
+                          <button className="act" onClick={() => setLogRun(r)}>
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                              <path d="M3 4.5 6.5 8 3 11.5M8.5 11.5H13" />
+                            </svg>
                             Log
                           </button>
                         )}
