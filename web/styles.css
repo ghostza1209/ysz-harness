@@ -85,6 +85,7 @@ h2.gap {
 .bad {
   color: var(--bad);
   font-size: 12px;
+  white-space: pre-line;
 }
 
 .tag {

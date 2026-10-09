@@ -1,7 +1,7 @@
 import type { BeadsGateway, Ticket } from './beads';
-import type { HostSteps } from './host';
+import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
-import type { SandboxRunner } from './sandbox';
+import type { AgentResult, SandboxRunner } from './sandbox';
 import type { RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
@@ -44,6 +44,12 @@ export interface Clock {
   now(): number;
 }
 
+/** How one Attempt ended. A failed Attempt keeps its clone so the caller can remove it or leave it for inspection. */
+type Attempted =
+  | { kind: 'done'; prepared: Prepared; tip?: string; reviewSkipped?: string }
+  | { kind: 'failed'; prepared: Prepared; reason: string }
+  | { kind: 'needs-info'; agent: 'implement' | 'review'; question: string };
+
 export function createOrchestrator(deps: {
   projects: readonly Project[];
   beads: BeadsGateway;
@@ -61,18 +67,77 @@ export function createOrchestrator(deps: {
 
   const byName = new Map(projects.map((p) => [p.name, p]));
 
-  /** Run one claimed Ticket to its end: in-review with a PR, or failed and released. Never rejects. */
+  const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+  /** Run one claimed Ticket to its end: in-review with a PR, or failed and handed back. Never rejects. */
   async function execute(runId: number, project: Project, ticket: { id: string; title: string }): Promise<void> {
     const end = (patch: Parameters<Store['updateRun']>[1]) => store.updateRun(runId, { ...patch, endedAt: clock.now() });
     let prUrl: string | null = null;
     try {
       const context = await beads.showContext(project, ticket.id);
-      const prepared = await host.prepare(project, ticket.id, context);
-      store.updateRun(runId, { state: 'agent', attempt: 1 });
-      const result = await sandbox.implement({ project, runId, ...prepared });
-      if (!result.completed) throw new Error('the agent stopped without signalling COMPLETE');
+
+      /** One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch. */
+      async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
+        const prepared = await host.prepare(project, ticket.id, context);
+        const req = { project, runId, attempt: n, ...prepared };
+        store.updateRun(runId, { state: 'agent', attempt: n });
+        let implemented: AgentResult;
+        try {
+          implemented = await sandbox.implement({ ...req, previousAttemptSummary });
+        } catch (err) {
+          return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
+        }
+        if (implemented.outcome === 'needs-info') return { kind: 'needs-info', agent: 'implement', question: implemented.question };
+        if (implemented.outcome === 'stopped') {
+          return { kind: 'failed', prepared, reason: `the implement agent stopped without signalling COMPLETE${implemented.tail && `: ${implemented.tail}`}` };
+        }
+
+        store.updateRun(runId, { state: 'host' });
+        let collected: { tip: string; commits: number };
+        try {
+          collected = await host.collect(project, prepared);
+        } catch (err) {
+          return { kind: 'failed', prepared, reason: `the agent's commits could not be read back: ${message(err)}` };
+        }
+        if (collected.commits === 0) return { kind: 'failed', prepared, reason: 'the agent made no commits' };
+
+        store.updateRun(runId, { state: 'agent' });
+        let skipped: string;
+        try {
+          const reviewed = await sandbox.review(req);
+          if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
+          if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
+          skipped = 'the review agent stopped without signalling COMPLETE';
+        } catch (err) {
+          skipped = `the review agent failed: ${message(err)}`;
+        }
+        // An unfinished review may have left half a change, so the PR opens from the implement commits.
+        return { kind: 'done', prepared, tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
+      }
+
+      let result = await attempt(1);
+      let note = '';
+      if (result.kind === 'failed') {
+        note = `Attempt 1 failed: ${result.reason}`;
+        await host.removeClone(result.prepared).catch(() => {});
+        result = await attempt(2, note);
+        if (result.kind === 'failed') note += `\nAttempt 2 failed: ${result.reason}`;
+      }
+
+      if (result.kind !== 'done') {
+        if (result.kind === 'needs-info') note = `The ${result.agent} agent needs information:\n${result.question}`;
+        try {
+          await beads.fail(project, ticket.id, note);
+        } catch (err) {
+          throw new Error(`${note}\nhanding the Ticket back failed: ${message(err)}`); // the catch below releases the claim
+        }
+        end({ state: 'failed', note });
+        return;
+      }
+
       store.updateRun(runId, { state: 'host' });
-      const url = await host.publish(project, ticket, prepared);
+      const { prepared, tip, reviewSkipped } = result;
+      const url = await host.publish(project, ticket, prepared, { tip, reviewSkipped });
       prUrl = url;
       store.updateRun(runId, { prUrl: url });
       await beads.markInReview(project, ticket.id, url);
@@ -81,12 +146,12 @@ export function createOrchestrator(deps: {
       await host.removeClone(prepared).catch(() => {});
     } catch (err) {
       failed.add(key(project.name, ticket.id));
-      let note = err instanceof Error ? err.message : String(err);
+      let note = message(err);
       if (prUrl) note += ` (PR ${prUrl} was opened)`;
       try {
         await beads.release(project, ticket.id);
       } catch (releaseErr) {
-        note += `; releasing the Ticket failed: ${releaseErr instanceof Error ? releaseErr.message : releaseErr}`;
+        note += `; releasing the Ticket failed: ${message(releaseErr)}`;
       }
       end({ state: 'failed', note });
     }

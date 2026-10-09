@@ -23,8 +23,13 @@ export interface Prepared {
 export interface HostSteps {
   /** A fresh clone on `agent/<ticket-id>` at the just-fetched origin/<baseBranch>, with the Ticket context in place. */
   prepare(project: Project, ticketId: string, context: TicketContext): Promise<Prepared>;
-  /** Bring the agent's branch back into the Project repo, push it and open the PR against baseBranch. Returns the PR URL. */
-  publish(project: Project, ticket: { id: string; title: string }, prepared: Prepared): Promise<string>;
+  /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over origin/<baseBranch>. */
+  collect(project: Project, prepared: Prepared): Promise<{ tip: string; commits: number }>;
+  /**
+   * Bring the agent's branch back into the Project repo, push it and open the PR against baseBranch. Returns the PR URL.
+   * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review.
+   */
+  publish(project: Project, ticket: { id: string; title: string }, prepared: Prepared, opts?: { tip?: string; reviewSkipped?: string }): Promise<string>;
   /** Delete the Run's clone. */
   removeClone(prepared: Prepared): Promise<void>;
 }
@@ -100,11 +105,11 @@ function assertSelfContained(gitDir: string): void {
  * clone's config, so pack-objects reads the clone's object dir as its only store: a commit naming an object that only
  * the Project repo holds fails instead of carrying it out. index-pack recomputes every object id.
  */
-async function fetchBack(project: Project, { branch, dir, base }: Prepared): Promise<void> {
+async function fetchBack(project: Project, { branch, dir, base }: Prepared, wantedTip?: string): Promise<string> {
   const repo = project.repoPath;
   const gitDir = join(dir, 'repo/.git');
   assertSelfContained(gitDir);
-  const tip = cloneTip(gitDir, branch);
+  const tip = wantedTip ?? cloneTip(gitDir, branch);
   const pack = await run(
     'git',
     ['-c', 'core.commitGraph=false', '-c', 'pack.useBitmaps=false', '-c', 'core.multiPackIndex=false', 'pack-objects', '--revs', '--stdout', '--quiet'],
@@ -114,6 +119,7 @@ async function fetchBack(project: Project, { branch, dir, base }: Prepared): Pro
   await run('git', ['index-pack', '--stdin', '--fix-thin', '--strict'], repo, { input: pack });
   if ((await text('git', ['cat-file', '-t', tip], repo)) !== 'commit') throw new Error(`${branch} in the clone is not a commit`);
   await run('git', ['update-ref', `refs/heads/${branch}`, tip], repo);
+  return tip;
 }
 
 const PR_BODY_PROMPT = (ticket: { id: string; title: string }, base: string, log: string, diff: string) =>
@@ -158,11 +164,17 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       return { branch, dir, base: sha };
     },
 
-    async publish(project, ticket, prepared) {
+    async collect(project, prepared) {
+      const tip = await fetchBack(project, prepared);
+      const commits = Number(await text('git', ['rev-list', '--count', `origin/${project.baseBranch}..${prepared.branch}`], project.repoPath));
+      return { tip, commits };
+    },
+
+    async publish(project, ticket, prepared, { tip, reviewSkipped } = {}) {
       const repo = project.repoPath;
       const { branch } = prepared;
       const range = `origin/${project.baseBranch}..${branch}`;
-      await fetchBack(project, prepared);
+      await fetchBack(project, prepared, tip);
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
       // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
       // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
@@ -190,7 +202,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
           { timeout: 5 * 60_000, input: '' }, // closed stdin, or claude waits 3s for piped input
         );
         if (!body) throw new Error('claude -p returned an empty PR body');
-        writeFileSync(join(tmp, 'body.md'), body);
+        writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
         const out = await text(
           'gh',
           ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', `${ticket.id}: ${ticket.title}`, '--body-file', join(tmp, 'body.md')],

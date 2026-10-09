@@ -111,6 +111,27 @@ describe('Beads gateway against real bd', () => {
     ]);
   });
 
+  it('hands a claimed Ticket back as failed: reason commented, needs-info added, ready-for-agent dropped, open and unassigned', async () => {
+    await create('failing', 'will fail', '-l', 'ready-for-agent,keep-me');
+    await createBeadsGateway().claim(project, ids.failing);
+    const reason = 'Attempt 1 failed: the agent made no commits\nAttempt 2 failed: "quoted" -- and \'single\'';
+
+    await createBeadsGateway().fail(project, ids.failing, reason);
+
+    const { labels, ...rest } = await state(ids.failing);
+    assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'needs-info'] });
+    const [issue] = JSON.parse((await bd('show', ids.failing, '--json', '--include-comments')).stdout);
+    assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', reason]]);
+    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.failing));
+  });
+
+  it('leaves the Ticket claimed when the failed hand-back cannot even comment', async () => {
+    await create('unfailable', 'cannot fail', '-l', 'ready-for-agent');
+    await createBeadsGateway().claim(project, ids.unfailable);
+    await assert.rejects(createBeadsGateway().fail({ ...project, repoPath: join(dir, 'missing') }, ids.unfailable, 'x'));
+    assert.deepEqual(await state(ids.unfailable), { status: 'in_progress', assignee: 'orchestrator', labels: ['ready-for-agent'] });
+  });
+
   it('shows a Ticket with its comments, parent epic and closed blockers only', async () => {
     await create('epic', 'the epic', '-t', 'epic', '-d', 'epic body');
     await create('child', 'the child', '--parent', ids.epic);

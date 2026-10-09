@@ -66,7 +66,7 @@ describe('host steps against real git', () => {
     const bin = join(root, 'bin');
     mkdirSync(bin);
     script(join(bin, 'claude'), `pwd > ${log}/claude.cwd\nprintf '%s\\n' "$@" > ${log}/claude.argv\necho 'the PR body'`);
-    script(join(bin, 'gh'), 'echo https://example.test/pull/1');
+    script(join(bin, 'gh'), `while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.body; shift; done\necho https://example.test/pull/1`);
     process.env.PATH = `${bin}:${savedPath}`;
   });
 
@@ -127,6 +127,44 @@ describe('host steps against real git', () => {
     const cwd = readFileSync(join(log, 'claude.cwd'), 'utf8').trim();
     assert.ok(!cwd.startsWith(prepared.dir) && !cwd.startsWith(repo), `claude ran in ${cwd}`);
     assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the agent change/);
+  });
+
+  it('collects: counts the agent commits over base and brings them into the Project repo without pushing', async () => {
+    const prepared = await host.prepare(project, 't-13', context);
+    const clone = join(prepared.dir, 'repo');
+    assert.deepEqual(await host.collect(project, prepared), { tip: git(clone, 'rev-parse', 'HEAD'), commits: 0 });
+    commit(clone, 'one.txt', '1');
+    commit(clone, 'two.txt', '2');
+
+    const collected = await host.collect(project, prepared);
+    assert.deepEqual(collected, { tip: git(clone, 'rev-parse', 'HEAD'), commits: 2 });
+    assert.equal(git(repo, 'rev-parse', 'agent/t-13'), collected.tip);
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-13'), '');
+  });
+
+  it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
+    const prepared = await host.prepare(project, 't-14', context);
+    const clone = join(prepared.dir, 'repo');
+    commit(clone, 'impl.txt', 'implemented');
+    const { tip } = await host.collect(project, prepared);
+    commit(clone, 'half-review.txt', 'unfinished');
+
+    await host.publish(project, ticket('t-14'), prepared, { tip, reviewSkipped: 'the review agent failed: idle for 600s' });
+
+    assert.equal(git(origin, 'rev-parse', 'agent/t-14'), tip);
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '> review skipped: the review agent failed: idle for 600s\n\nthe PR body');
+  });
+
+  it('publishes the reviewed branch with the body as written when the review was not skipped', async () => {
+    const prepared = await host.prepare(project, 't-15', context);
+    const clone = join(prepared.dir, 'repo');
+    commit(clone, 'impl.txt', 'implemented');
+    commit(clone, 'review-fix.txt', 'fixed in review');
+
+    await host.publish(project, ticket('t-15'), prepared);
+
+    assert.equal(git(origin, 'rev-parse', 'agent/t-15'), git(clone, 'rev-parse', 'HEAD'));
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
   });
 
   it('refuses a branch with no commits', async () => {
