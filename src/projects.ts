@@ -13,5 +13,5 @@ const projectsDir = join(homedir(), 'Desktop/projects');
 export const projects: readonly Project[] = [
   { name: 'fazwaz', repoPath: join(projectsDir, 'work/fazwaz'), baseBranch: 'develop' },
   { name: 'PopDeal', repoPath: join(projectsDir, 'work/PopDeal'), baseBranch: 'develop' },
-  { name: 'thaivis', repoPath: join(projectsDir, 'personal/app'), baseBranch: 'main' },
+  { name: 'thaivis', repoPath: join(projectsDir, 'personal/app'), baseBranch: 'develop' },
 ];
