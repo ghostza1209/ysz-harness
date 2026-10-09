@@ -88,6 +88,14 @@ describe('host steps against real git', () => {
     assert.equal(git(origin, 'branch', '--list', 'agent/t-1'), '');
   });
 
+  it('refuses to push a branch whose history committed .orchestrator/ even after a later commit untracked it', async () => {
+    const dir = worktreePath(project, 'agent/t-1');
+    git(dir, 'rm', '--cached', '-q', '.orchestrator/ticket.json');
+    git(dir, 'commit', '-m', 'hide it');
+    await assert.rejects(host.publish(project, { id: 't-1', title: 'a ticket' }, 'agent/t-1'), /\.orchestrator\/ is committed/);
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-1'), '');
+  });
+
   it('removes the worktree and keeps the local branch', async () => {
     await host.removeWorktree(project, 'agent/t-1');
     assert.equal(existsSync(worktreePath(project, 'agent/t-1')), false);

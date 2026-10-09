@@ -69,8 +69,9 @@ export function createHostSteps(model: string): HostSteps {
 
     async publish(project, ticket, branch) {
       const repo = project.repoPath;
-      const tracked = await run('git', ['ls-tree', '-r', '--name-only', branch], repo);
-      if (/^\.orchestrator\//m.test(tracked)) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
+      // Every commit, not just the tip: a ticket.json added and then deleted would still be pushed in history.
+      const touched = await run('git', ['log', '--format=', '--name-only', `origin/${project.baseBranch}..${branch}`], repo);
+      if (/^\.orchestrator\//m.test(touched)) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
       await run('git', ['push', '-u', 'origin', branch], repo);
 
       // Run in the worktree so the host's user-level plugins (the pr skill) load and the branch is the checked-out one.
