@@ -1,0 +1,149 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { Project } from './projects';
+
+const execFileAsync = promisify(execFile);
+
+export interface Ticket {
+  id: string;
+  title: string;
+  /** 0 (highest) to 4. */
+  priority: number;
+  /** RFC 3339. */
+  createdAt: string;
+}
+
+/** What the agent gets in .orchestrator/ticket.json: the bead as bd prints it, its parent epic and the closed blockers. */
+export interface TicketContext {
+  ticket: Record<string, unknown>;
+  parent: Record<string, unknown> | null;
+  closedBlockers: { id: string; title: string; closeReason: string }[];
+}
+
+/** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
+export const ORCHESTRATOR = 'orchestrator';
+
+export interface BeadsGateway {
+  /** Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no open blockers. */
+  listReady(project: Project): Promise<Ticket[]>;
+  /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
+  claim(project: Project, id: string): Promise<boolean>;
+  /** Hand a claimed Ticket back: open and unassigned. */
+  release(project: Project, id: string): Promise<void>;
+  /** The Run failed: comment why, then label needs-info, drop ready-for-agent and release the claim. */
+  fail(project: Project, id: string, reason: string): Promise<void>;
+  /** The user killed the Run: comment why, then label orchestrator:skip and release the claim. ready-for-agent stays. */
+  kill(project: Project, id: string, reason: string): Promise<void>;
+  /** The Orchestrator restarted mid-Run: comment why, then release the claim. Labels stay, so the Ticket is Ready again. */
+  interrupt(project: Project, id: string, reason: string): Promise<void>;
+  /** Ids of the Tickets the Orchestrator holds in_progress without an in-review label. */
+  listClaimed(project: Project): Promise<string[]>;
+  /**
+   * Refresh the 5-minute bd lease of every Ticket the Orchestrator holds in_progress, in-review ones included, so
+   * `bd reclaim` leaves them alone. Call more often than the lease lasts. Beats every Ticket, then throws if any failed.
+   */
+  heartbeat(project: Project): Promise<void>;
+  showContext(project: Project, id: string): Promise<TicketContext>;
+  /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
+  markInReview(project: Project, id: string, prUrl: string): Promise<void>;
+}
+
+export interface BeadsOptions {
+  bin?: string;
+  /** Every bd call is killed after this long: embedded Dolt waits on its lock with no deadline. */
+  timeoutMs?: number;
+}
+
+export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOptions = {}): BeadsGateway {
+  async function bd(args: string[]): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync(bin, args, {
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      return stdout; // stderr carries bd's "beads.role not configured" warning on every call
+    } catch (err) {
+      if ((err as { killed?: boolean }).killed) throw new Error(`bd timed out after ${timeoutMs}ms: ${args.join(' ')}`);
+      throw err;
+    }
+  }
+
+  const write = (project: Project, args: string[]) => bd(['-C', project.repoPath, '--actor', ORCHESTRATOR, ...args]);
+  const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
+    JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
+
+  return {
+    async listReady(project) {
+      const out = await bd([
+        '--readonly', '-C', project.repoPath,
+        'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '-u', '-n', '0', '--json',
+      ]);
+      const issues: { id: string; title: string; priority: number; created_at: string }[] = JSON.parse(out);
+      return issues.map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+    },
+
+    async claim(project, id) {
+      try {
+        await write(project, ['update', id, '--claim']);
+        return true;
+      } catch (err) {
+        // Any other failure (bad repo path, unknown id, timeout) must surface instead of looking like a lost race.
+        if (/already claimed|not claimable/.test((err as { stderr?: string }).stderr ?? '')) return false;
+        throw err;
+      }
+    },
+
+    async release(project, id) {
+      await write(project, ['update', id, '--assignee', '', '--status', 'open']);
+    },
+
+    async fail(project, id, reason) {
+      // bd batch cannot comment or edit labels, so this is two writes. The second is one atomic update, and it releases
+      // the claim, so a failure before it leaves the Ticket still claimed rather than half handed back.
+      await write(project, ['comment', id, reason]);
+      await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--assignee', '', '--status', 'open']);
+    },
+
+    async kill(project, id, reason) {
+      // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket claimed.
+      await write(project, ['comment', id, reason]);
+      await write(project, ['update', id, '--add-label', 'orchestrator:skip', '--assignee', '', '--status', 'open']);
+    },
+
+    async interrupt(project, id, reason) {
+      // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket claimed.
+      await write(project, ['comment', id, reason]);
+      await write(project, ['update', id, '--assignee', '', '--status', 'open']);
+    },
+
+    async listClaimed(project) {
+      const out = await bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'in_progress', '-a', ORCHESTRATOR, '--exclude-label', 'in-review', '-n', '0', '--json']);
+      return (JSON.parse(out) as { id: string }[]).map((i) => i.id);
+    },
+
+    async heartbeat(project) {
+      const out = await bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'in_progress', '-a', ORCHESTRATOR, '-n', '0', '--json']);
+      const failures: string[] = [];
+      for (const { id } of JSON.parse(out) as { id: string }[]) {
+        await write(project, ['heartbeat', id]).catch((err) => void failures.push(`${id}: ${(err as Error).message}`));
+      }
+      if (failures.length) throw new Error(`heartbeat failed for ${failures.join('; ')}`);
+    },
+
+    async showContext(project, id) {
+      const ticket = await show(project, [id, '--include-comments']);
+      const parent = ticket.parent ? await show(project, [ticket.parent]) : null;
+      const closedBlockers = (ticket.dependencies ?? [])
+        .filter((d: { dependency_type: string; status: string }) => d.dependency_type === 'blocks' && d.status === 'closed')
+        .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
+      return { ticket, parent, closedBlockers };
+    },
+
+    async markInReview(project, id, prUrl) {
+      // bd batch cannot comment or label, so these are two writes; the label goes last because it is what marks the Ticket done.
+      await write(project, ['comment', id, `PR opened: ${prUrl}`]);
+      await write(project, ['update', id, '--add-label', 'in-review']);
+    },
+  };
+}
