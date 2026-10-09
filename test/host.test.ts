@@ -117,6 +117,15 @@ describe('host steps against real git', () => {
     assert.equal(readdirSync(join(root, 'clones')).length, before);
   });
 
+  it('removes a clone it could not finish, so a failed or killed prepare leaves nothing behind', async () => {
+    mkdirSync(join(repo, 'adir'), { recursive: true });
+    writeFileSync(join(repo, 'adir/f'), 'f');
+    const before = readdirSync(join(root, 'clones')).length;
+    await assert.rejects(host.prepare({ ...project, copyToWorktree: ['adir'] }, 't-broken', context), /directory/i);
+    assert.equal(readdirSync(join(root, 'clones')).length, before);
+    rmSync(join(repo, 'adir'), { recursive: true });
+  });
+
   it('kills the claude process of a publish that is aborted, and opens no PR', async () => {
     const prepared = await host.prepare(project, 't-hang', context);
     commit(join(prepared.dir, 'repo'), 'h.txt', 'h');

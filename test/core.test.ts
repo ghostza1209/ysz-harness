@@ -25,6 +25,8 @@ let hostSteps: string[];
 let lostClaims: Set<string>;
 let claimErrors: Record<string, Error>;
 let failError: Error | undefined;
+/** The error the next prepare fails with. */
+let prepareError: Error | undefined;
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
 let killError: Error | undefined;
 let markError: Error | undefined;
@@ -98,6 +100,7 @@ const fakeSandbox: SandboxRunner = {
 const fakeHost: HostSteps = {
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
+    if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40) };
   },
   async collect(_project, { dir }) {
@@ -129,6 +132,7 @@ beforeEach(() => {
   lostClaims = new Set();
   claimErrors = {};
   failError = undefined;
+  prepareError = undefined;
   killError = undefined;
   markError = undefined;
   contextGate = undefined;
@@ -545,6 +549,16 @@ describe('the Attempt policy', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
+  it('forgets the removed Attempt 1 clone when Attempt 2 makes none, so Clean up is not offered for it', async () => {
+    agent = async () => {
+      prepareError = new Error('git fetch failed: network down');
+      throw new Error('boom 1');
+    };
+    const o = await run();
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'removeClone /clones/tv1-1', 'prepare thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.cloneDir]), [['failed', null]]);
+  });
+
   it('publishes the implement commits with a "review skipped" reason when the review agent throws', async () => {
     reviewer = async () => {
       throw new Error('idle for 600s');
@@ -837,6 +851,19 @@ describe('Kill', () => {
     await o.kill(id);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
     assert.deepEqual(o.runs().history.map((r) => r.state), ['killed']);
+  });
+
+  it('refuses a second Kill while the first is still settling, so the bead is written once', async () => {
+    gatedAgent();
+    const o = await started();
+    const [{ id }] = o.runs().live;
+
+    const first = o.kill(id);
+    await assert.rejects(o.kill(id), /already being killed/);
+    await first;
+
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(stops, ['/clones/tv1-1']);
   });
 
   it('still ends killed, saying so in the note, when the bead hand-back fails', async () => {

@@ -93,6 +93,8 @@ export function createOrchestrator(deps: {
   const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
+  /** Runs a kill() is settling, so a second click does not write the bead twice. */
+  const killing = new Set<number>();
   /** Tickets whose Run failed since startup, so a failing Ticket is not retried every tick. Failure handling will replace this. */
   const failed = new Set<string>();
   const key = (project: string, id: string) => `${project}/${id}`;
@@ -201,7 +203,7 @@ export function createOrchestrator(deps: {
       let note = '';
       if (result.kind === 'failed') {
         note = `Attempt 1 failed: ${result.reason}`;
-        await host.removeClone(result.prepared).catch(() => {});
+        await host.removeClone(result.prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
         result = await attempt(2, note);
         if (result.kind === 'failed') note += `\nAttempt 2 failed: ${result.reason}`;
       }
@@ -315,29 +317,35 @@ export function createOrchestrator(deps: {
     async kill(runId) {
       const run = store.getRun(runId);
       if (!run || !store.liveRuns().some((r) => r.id === runId)) throw new Error(`Run ${runId} is not live`);
-      const control = controls.get(runId);
-      control?.ctl.abort();
-      // sandcastle removes its container on abort but ignores docker's errors, so check it ourselves.
-      if (run.state === 'agent' && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
-      await control?.running;
-
-      const reason = `Killed from the dashboard while ${run.state}.`;
-      let note = reason;
-      const { prUrl } = store.getRun(runId)!;
-      if (prUrl) note += ` (PR ${prUrl} was opened)`;
+      if (killing.has(runId)) throw new Error(`Run ${runId} is already being killed`);
+      killing.add(runId);
       try {
-        await beads.kill(byName.get(run.project)!, run.ticketId, reason);
-      } catch (err) {
-        note += `; releasing the Ticket failed: ${message(err)}`;
+        const control = controls.get(runId);
+        control?.ctl.abort();
+        // sandcastle removes its container on abort but ignores docker's errors, so check it ourselves.
+        if (run.state === 'agent' && run.cloneDir) await sandbox.stop({ dir: run.cloneDir });
+        await control?.running;
+
+        const reason = `Killed from the dashboard while ${run.state}.`;
+        let note = reason;
+        const { prUrl } = store.getRun(runId)!;
+        if (prUrl) note += ` (PR ${prUrl} was opened)`;
+        try {
+          await beads.kill(byName.get(run.project)!, run.ticketId, reason);
+        } catch (err) {
+          note += `; releasing the Ticket failed: ${message(err)}`;
+        }
+        end(runId, { state: 'killed', note });
+      } finally {
+        killing.delete(runId);
       }
-      end(runId, { state: 'killed', note });
     },
 
     async retryHostStep(runId) {
       const run = store.getRun(runId);
       const control = controls.get(runId);
       const job = control?.parked;
-      if (run?.state !== 'needs-attention' || !control || !job) throw new Error(`Run ${runId} has no host step to retry here`);
+      if (run?.state !== 'needs-attention' || !control || !job || killing.has(runId)) throw new Error(`Run ${runId} has no host step to retry here`);
       const busy = store.slotProjects();
       if (busy.length >= SLOTS_TOTAL || busy.includes(run.project)) throw new Error('No free slot for this Project yet; retry when a Run finishes');
       control.parked = undefined;

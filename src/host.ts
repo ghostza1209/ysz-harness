@@ -163,22 +163,28 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       mkdirSync(clonesDir, { recursive: true });
       const dir = mkdtempSync(join(clonesDir, `${project.name}-${ticketId}-`));
       const clone = join(dir, 'repo');
-      // Only origin/<base>'s history: a local clone would copy the whole object dir, stashes and local branches included.
-      await run('git', ['init', '--quiet', clone], dir);
-      await run('git', ['fetch', '--quiet', '--no-tags', repo, `refs/remotes/origin/${base}`], clone, { timeout: 10 * 60_000 });
-      await run('git', ['remote', 'add', 'origin', url], clone);
-      await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
-      await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);
+      try {
+        // Only origin/<base>'s history: a local clone would copy the whole object dir, stashes and local branches included.
+        await run('git', ['init', '--quiet', clone], dir);
+        await run('git', ['fetch', '--quiet', '--no-tags', repo, `refs/remotes/origin/${base}`], clone, { timeout: 10 * 60_000 });
+        await run('git', ['remote', 'add', 'origin', url], clone);
+        await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
+        await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);
 
-      for (const file of project.copyToWorktree ?? []) {
-        if (!existsSync(join(repo, file))) continue;
-        mkdirSync(dirname(join(clone, file)), { recursive: true });
-        cpSync(join(repo, file), join(clone, file));
+        for (const file of project.copyToWorktree ?? []) {
+          if (!existsSync(join(repo, file))) continue;
+          mkdirSync(dirname(join(clone, file)), { recursive: true });
+          cpSync(join(repo, file), join(clone, file));
+        }
+        mkdirSync(join(clone, '.orchestrator'));
+        writeFileSync(join(clone, '.orchestrator/ticket.json'), JSON.stringify(context, null, 2));
+        mkdirSync(join(clone, '.git/info'), { recursive: true });
+        appendFileSync(join(clone, '.git/info/exclude'), '.orchestrator/\n');
+      } catch (err) {
+        // A half-made clone (a kill aborts the fetch) is never handed out, so nothing else could remove it.
+        await rm(dir, { recursive: true, force: true });
+        throw err;
       }
-      mkdirSync(join(clone, '.orchestrator'));
-      writeFileSync(join(clone, '.orchestrator/ticket.json'), JSON.stringify(context, null, 2));
-      mkdirSync(join(clone, '.git/info'), { recursive: true });
-      appendFileSync(join(clone, '.git/info/exclude'), '.orchestrator/\n');
       return { branch, dir, base: sha };
     },
 
