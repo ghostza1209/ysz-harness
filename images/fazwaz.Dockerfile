@@ -7,10 +7,8 @@ RUN apt-get update && apt-get install -y \
   ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
-# fazwaz runs its PHP tooling through the host's compose stack (ADR 0001): the CLI and compose plugin talk to the
-# host Docker socket that the Project mounts. Static binaries, so no daemon is installed.
-COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=docker:cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+# No Docker CLI or socket: the host runs PHP checks for the agent (ADR 0002).
+COPY --chmod=755 php-check /usr/local/bin/php-check
 
 # pnpm comes from corepack, which installs the version the repo's packageManager field pins.
 RUN corepack enable

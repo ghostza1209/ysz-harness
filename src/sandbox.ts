@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseEnv, promisify } from 'node:util';
 import { claudeCode, createBindMountSandboxProvider, createWorktree } from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
+import { startCheckServer } from './checks';
 import type { Prepared } from './host';
 import type { Project } from './projects';
 
@@ -93,33 +94,40 @@ export function createSandboxRunner(root: string): SandboxRunner {
     execFileSync('git', ['-c', 'user.name=ysz-harness', '-c', 'user.email=ysz-harness@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'decoy'], { cwd: decoy });
     const worktree = await createWorktree({ cwd: decoy, branchStrategy: { type: 'branch', branch } });
 
-    const inner = docker({ imageName: project.image, mounts: project.mounts, containerUid: project.containerUid, containerGid: project.containerGid, groups: project.groups });
+    const inner = docker({ imageName: project.image, containerUid: project.containerUid, containerGid: project.containerGid });
     // docker's provider has create() at runtime; its public type hides it.
     const create = (inner as unknown as { create: CreateSandbox }).create;
     const sandbox = createBindMountSandboxProvider({
       ...inner,
-      // Project.mounts are added by docker itself, after these.
       create: (opts) => create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] }),
     });
 
-    const result = await worktree.run({
-      // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
-      agent: claudeCode(MODEL, { effort: 'high', env: { CLAUDE_CODE_OAUTH_TOKEN: token }, captureSessions: false }),
-      // No .beads, no ssh, no push credentials, and no host git dir: the clone's .git is its own.
-      sandbox,
-      // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
-      promptFile: join(root, `prompts/${role}.md`),
-      promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
-      completionSignal: [COMPLETE, NEEDS_INFO],
-      idleTimeoutSeconds: 600,
-      signal,
-      name: `run-${runId}-attempt${attempt}-${role}`,
-      logging: { type: 'file', path: join(root, 'data/logs', `${runId}-attempt${attempt}-${role}.log`) },
-      hooks: project.installCommand
-        ? { sandbox: { onSandboxReady: [{ command: project.installCommand, timeoutMs: 600_000 }] } }
-        : undefined,
-    });
-    return agentResult(result);
+    // ADR 0002: the agent's only way to run PHP checks; it ends with the agent.
+    const checks = project.checkContainer && (await startCheckServer({ ...project.checkContainer, clone: join(dir, 'repo') }));
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: token, ...(checks && { PHP_CHECK_URL: checks.url, PHP_CHECK_TOKEN: checks.token }) };
+
+    try {
+      const result = await worktree.run({
+        // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
+        agent: claudeCode(MODEL, { effort: 'high', env, captureSessions: false }),
+        // No .beads, no ssh, no push credentials, and no host git dir: the clone's .git is its own.
+        sandbox,
+        // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
+        promptFile: join(root, `prompts/${role}.md`),
+        promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
+        completionSignal: [COMPLETE, NEEDS_INFO],
+        idleTimeoutSeconds: 600,
+        signal,
+        name: `run-${runId}-attempt${attempt}-${role}`,
+        logging: { type: 'file', path: join(root, 'data/logs', `${runId}-attempt${attempt}-${role}.log`) },
+        hooks: project.installCommand
+          ? { sandbox: { onSandboxReady: [{ command: project.installCommand, timeoutMs: 600_000 }] } }
+          : undefined,
+      });
+      return agentResult(result);
+    } finally {
+      await checks?.close();
+    }
   }
 
   return {

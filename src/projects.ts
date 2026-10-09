@@ -12,10 +12,8 @@ export interface Project {
   /** UID/GID of the image's `agent` user; sandcastle defaults to the host's, which differs from the image on macOS. */
   containerUid?: number;
   containerGid?: number;
-  /** Supplementary groups for the sandbox user, e.g. one that may use a mounted Docker socket. */
-  groups?: (string | number)[];
-  /** Extra bind mounts for the sandbox. */
-  mounts?: { hostPath: string; sandboxPath: string; readonly?: boolean }[];
+  /** ADR 0002: the running compose service whose image the agent's `php-check` runs commands in, on its clone. */
+  checkContainer?: { composeProject: string; service: string };
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */
   copyToWorktree?: string[];
   /** Runs inside the sandbox before the agent starts, to install dependencies. */
@@ -46,19 +44,12 @@ export const projects: readonly Project[] = [
     preflight: ['docker', 'compose', 'exec', '-T', 'php', 'true'],
     containerUid: 1000,
     containerGid: 1000,
-    // ADR 0001: root-equivalent host access, fazwaz only. Read-only is enough to connect. Group 0 owns the socket on Docker Desktop.
-    mounts: [{ hostPath: '/var/run/docker.sock', sandboxPath: '/var/run/docker.sock', readonly: true }],
-    groups: [0],
+    checkContainer: { composeProject: 'fazwaz', service: 'php' },
     copyToWorktree: ['.env'],
     checkHint:
-      'Run PHP checks through the Docker CLI here. The compose `php` container sees the host checkout, not your clone, so run them in a throwaway container on your clone:\n' +
-      "php=$(docker ps -q --filter label=com.docker.compose.project=fazwaz --filter label=com.docker.compose.service=php); " +
-      `clone=$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{if eq .Destination "/home/agent/workspace"}}{{.Source}}{{end}}{{end}}'); ` +
-      `repo=$(docker inspect "$php" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'); ` +
-      `image=$(docker inspect "$php" --format '{{.Config.Image}}')\n` +
-      'then: docker run --rm -v "$clone:/var/www" -v "$repo/vendor:/var/www/vendor:ro" -w /var/www --network fazwaz_default "$image" <command>, ' +
-      'e.g. `vendor/bin/phpcs --standard=phpcs.xml <changed files>` and `php artisan test --filter=<TestClass>`. ' +
-      'Never run docker commands that touch other containers, volumes or the host checkout. Best-effort: CI covers the rest.',
+      'Run PHP checks with `php-check <command>`: it runs <command> in a throwaway container of the fazwaz php image, on your clone, ' +
+      'e.g. `php-check vendor/bin/phpcs --standard=phpcs.xml <changed files>` and `php-check php artisan test --filter=<TestClass>`. ' +
+      'One command at a time. Best-effort: CI covers the rest.',
   },
   {
     name: 'PopDeal',

@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// php-check <command...>: the host runs <command> in a throwaway container of the Project's php image, on this
+// clone (ADR 0002). Prints its output and exits with its exit code.
+const { request } = require('node:http');
+
+const req = request(process.env.PHP_CHECK_URL, { method: 'POST', headers: { authorization: `Bearer ${process.env.PHP_CHECK_TOKEN}` } }, (res) => {
+  // Anything but 200 is php-check's own complaint, not the command's output.
+  res.pipe(res.statusCode === 200 ? process.stdout : process.stderr, { end: false });
+  res.on('end', () => (process.exitCode = res.statusCode === 200 ? Number(res.trailers['x-exit-code'] ?? 1) : 1));
+  res.on('error', (err) => {
+    console.error(`php-check: ${err.message}`);
+    process.exitCode = 1;
+  });
+});
+req.on('error', (err) => {
+  console.error(`php-check: ${err.message}`);
+  process.exitCode = 1;
+});
+req.end(JSON.stringify(process.argv.slice(2)));
