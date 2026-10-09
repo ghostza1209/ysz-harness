@@ -12,6 +12,26 @@ interface State {
 
 const REFRESH_MS = 5_000;
 
+/** Flips light/dark and remembers it; until clicked, the OS setting decides. */
+function ThemeToggle() {
+  const [dark, setDark] = useState(
+    () => document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches),
+  );
+  const flip = () => {
+    const theme = dark ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem('theme', theme);
+    } catch {}
+    setDark(!dark);
+  };
+  return (
+    <button className="ghost theme" onClick={flip} aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'} title={dark ? 'Light mode' : 'Dark mode'}>
+      {dark ? '☀' : '☾'}
+    </button>
+  );
+}
+
 /** Longest tail kept in the browser, in characters. */
 const TAIL_CHARS = 32_000;
 
@@ -264,6 +284,7 @@ export function App() {
           </b>
         </div>
         <span className="grow" />
+        <ThemeToggle />
         <span className={`conn ${error ? 'down' : state ? 'up' : ''}`}>{error === SIGNED_OUT ? 'Signed out' : error ? 'Server unreachable' : state ? 'Live' : 'Connecting…'}</span>
       </header>
 

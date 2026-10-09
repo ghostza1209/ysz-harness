@@ -18,8 +18,9 @@
   color-scheme: light;
 }
 
+/* Dark follows the OS unless the topbar toggle pinned a theme. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #0e1117;
     --card: #161b24;
     --ink: #e6e9ef;
@@ -35,6 +36,23 @@
     --shadow: none;
     color-scheme: dark;
   }
+}
+
+:root[data-theme='dark'] {
+  --bg: #0e1117;
+  --card: #161b24;
+  --ink: #e6e9ef;
+  --mute: #8b93a7;
+  --line: #262d3a;
+  --soft: #1d2430;
+  --accent: #6d93ff;
+  --ok: #3ccf8e;
+  --warn: #f0a33a;
+  --bad: #ff6b66;
+  --violet: #a586ff;
+  --log-bg: #0a0d12;
+  --shadow: none;
+  color-scheme: dark;
 }
 
 * {
@@ -440,6 +458,12 @@ button.ghost {
   border: none;
   background: none;
   color: inherit;
+}
+
+.theme {
+  padding: 4px 8px;
+  font-size: 15px;
+  line-height: 1;
 }
 
 a {
@@ -1036,6 +1060,166 @@ body::after {
     transform: scale(2.4);
     opacity: 0;
   }
+}
+
+/* Future skin: HUD type, glass panels with corner brackets, neon edges. */
+
+:root {
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --glass: color-mix(in srgb, var(--card) 72%, transparent);
+  --hud: color-mix(in srgb, var(--accent) 70%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+:root[data-theme='dark'] {
+  --bg: #070a12;
+  --card: #0e1420;
+  --line: #1b2436;
+  --soft: #141c2b;
+  --accent: #4fb4ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #070a12;
+    --card: #0e1420;
+    --line: #1b2436;
+    --soft: #141c2b;
+    --accent: #4fb4ff;
+  }
+}
+
+body {
+  font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+code,
+.count,
+.stat .num,
+.elapsed,
+.slots b {
+  font-family: var(--mono);
+}
+
+.brand {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 14px;
+}
+
+h2 {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+h2::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  transform: rotate(45deg);
+}
+
+.stat.has .num {
+  text-shadow: 0 0 12px currentColor;
+}
+
+/* Scanlines on the glass top bar. */
+.topbar {
+  background:
+    repeating-linear-gradient(0deg, color-mix(in srgb, var(--ink) 3%, transparent) 0 1px, transparent 1px 3px),
+    color-mix(in srgb, var(--card) 70%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+
+/* Glass panels with HUD corner brackets drawn as background layers, so ::before/::after stay free. */
+.card,
+.table,
+.empty {
+  --b: linear-gradient(var(--hud), var(--hud));
+  background:
+    var(--b) top left / 12px 1px no-repeat,
+    var(--b) top left / 1px 12px no-repeat,
+    var(--b) top right / 12px 1px no-repeat,
+    var(--b) top right / 1px 12px no-repeat,
+    var(--b) bottom left / 12px 1px no-repeat,
+    var(--b) bottom left / 1px 12px no-repeat,
+    var(--b) bottom right / 12px 1px no-repeat,
+    var(--b) bottom right / 1px 12px no-repeat,
+    var(--glass);
+  backdrop-filter: blur(10px);
+  border-color: color-mix(in srgb, var(--accent) 14%, var(--line));
+}
+
+.empty {
+  --hud: color-mix(in srgb, var(--accent) 40%, transparent);
+  border-style: solid;
+  border-width: 1px;
+}
+
+.card:hover,
+.table:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent), 0 8px 30px var(--glow);
+}
+
+.pill,
+.tag {
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.pill.in-review,
+.pill.agent,
+.pill.agent-review,
+.pill.host,
+.pill.failed,
+.pill.needs-attention {
+  box-shadow: 0 0 10px color-mix(in srgb, currentColor 25%, transparent);
+}
+
+.project {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--glass);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  backdrop-filter: blur(8px);
+}
+
+.dot.ok {
+  box-shadow: 0 0 8px var(--ok);
+}
+
+button.primary {
+  box-shadow: 0 0 16px var(--glow);
+}
+
+.chips {
+  background: var(--glass);
+  border: 1px solid var(--line);
+}
+
+.chip.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+select,
+input[type='search'] {
+  background: var(--glass);
+}
+
+select:focus-visible,
+input:focus-visible {
+  box-shadow: 0 0 0 4px var(--glow);
 }
 
 /* Motion */
