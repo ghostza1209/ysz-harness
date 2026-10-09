@@ -465,11 +465,16 @@ export function App() {
                         <div className="title">{r.title}</div>
                         {r.note && <div className="note">{r.note}</div>}
                       </div>
-                      <div className="mute when" title={new Date(r.startedAt).toLocaleString()}>
-                        {ago(now - (r.endedAt ?? r.startedAt))}
-                        {r.endedAt ? ` · took ${span(r.endedAt - r.startedAt)}` : ''}
-                        <br />
-                        {r.attempt} Attempt{r.attempt === 1 ? '' : 's'}
+                      <div className="when">
+                        <time title={new Date(r.endedAt ?? r.startedAt).toLocaleString()}>
+                          {ago(now - (r.endedAt ?? r.startedAt))}
+                        </time>
+                        <span className="mute">
+                          {r.endedAt && <span title="Duration">{span(r.endedAt - r.startedAt)} · </span>}
+                          <span className={r.attempt > 1 ? 'retried' : undefined}>
+                            {r.attempt} attempt{r.attempt === 1 ? '' : 's'}
+                          </span>
+                        </span>
                       </div>
                       <div className="links">
                         {r.prUrl && (

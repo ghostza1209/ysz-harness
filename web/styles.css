@@ -512,7 +512,7 @@ a:hover {
 
 .tr {
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr) 150px 170px;
+  grid-template-columns: 130px minmax(0, 1fr) auto 170px;
   gap: 16px;
   align-items: start;
   padding: 12px 16px;
@@ -525,6 +525,23 @@ a:hover {
 .what {
   display: grid;
   gap: 4px;
+}
+
+.when {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  font-size: 13px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.when time {
+  font-weight: 500;
+}
+
+.when .retried {
+  color: var(--warn);
 }
 
 .links {
@@ -635,6 +652,10 @@ div.log {
   .tr {
     grid-template-columns: 1fr;
     gap: 8px;
+  }
+
+  .when {
+    justify-items: start;
   }
 
   .links {
