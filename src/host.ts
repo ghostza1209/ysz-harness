@@ -40,6 +40,8 @@ export interface HostSteps {
   ): Promise<string>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
+  /** The PR's state on GitHub, asked as the Project's gh account. */
+  prState(project: Project, prUrl: string): Promise<'OPEN' | 'MERGED' | 'CLOSED'>;
 }
 
 /** Under /Users, which Docker Desktop shares, and outside every repo's working tree. */
@@ -75,6 +77,11 @@ function within(signal?: AbortSignal) {
     run: (cmd: string, args: string[], cwd: string, opts: Opts = {}) => run(cmd, args, cwd, { ...opts, signal }),
     text: (cmd: string, args: string[], cwd: string, opts: Opts = {}) => text(cmd, args, cwd, { ...opts, signal }),
   };
+}
+
+/** gh's env to act as the Project's gh account; undefined keeps gh's active one. */
+async function ghEnv(project: Project): Promise<NodeJS.ProcessEnv | undefined> {
+  return project.ghUser ? { ...process.env, GH_TOKEN: await text('gh', ['auth', 'token', '-u', project.ghUser], project.repoPath) } : undefined;
 }
 
 /** A regular file of sane size, read without following links or blocking on a FIFO the sandbox planted. */
@@ -238,7 +245,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
         // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
         step(`Opening the PR against ${project.baseBranch}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
-        const env = project.ghUser ? { ...process.env, GH_TOKEN: await text('gh', ['auth', 'token', '-u', project.ghUser], repo) } : undefined;
+        const env = await ghEnv(project);
         const out = await text(
           'gh',
           ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', `${ticket.id}: ${ticket.title}`, '--body-file', join(tmp, 'body.md')],
@@ -249,6 +256,11 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
+    },
+
+    async prState(project, prUrl) {
+      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state'], project.repoPath, { env: await ghEnv(project) });
+      return JSON.parse(out).state;
     },
 
     async removeClone({ dir }) {

@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 export type RunState =
   | 'claimed' | 'agent' | 'agent-review' | 'host' | 'needs-attention'
-  | 'in-review' | 'failed' | 'killed' | 'interrupted';
+  | 'in-review' | 'merged' | 'pr-closed' | 'failed' | 'killed' | 'interrupted';
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
 const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];
@@ -42,7 +42,9 @@ export interface Store {
   slotProjects(): string[];
   /** Runs still open to Kill, oldest first: those holding a slot, and needs-attention ones. */
   liveRuns(): RunRow[];
-  /** Runs that ended, newest first. */
+  /** Runs waiting on the human's review of their PR, oldest first. */
+  inReview(): RunRow[];
+  /** Runs that ended or wait in review, newest first. */
   history(limit: number): RunRow[];
   getRun(id: number): RunRow | undefined;
   /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
@@ -87,6 +89,7 @@ export function openStore(path: string): Store {
   const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
   const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
   const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC LIMIT ?`);
+  const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
@@ -115,6 +118,7 @@ export function openStore(path: string): Store {
     },
     slotProjects: () => slotted.all(...SLOT_STATES).map((row) => row.project as string),
     liveRuns: () => live.all(...LIVE_STATES).map(toRow),
+    inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
     getRun: (id) => {
       const row = byId.get(id);

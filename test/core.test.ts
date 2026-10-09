@@ -27,6 +27,10 @@ let claimErrors: Record<string, Error>;
 let failError: Error | undefined;
 /** The error the next prepare fails with. */
 let prepareError: Error | undefined;
+/** What gh reports for each PR url, or the error it fails with; beads the human changed by hand ("project/id"), and the error the next PR-outcome bead write fails with. */
+let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
+let touchedByHand: Set<string>;
+let outcomeError: Error | undefined;
 /** Each live Run's "<state> <attempt>" as every prepare starts. */
 let preparedWhile: string[];
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
@@ -101,6 +105,18 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (markError) throw markError;
     writes.push(`markInReview ${project.name}/${id} ${prUrl}`);
   },
+  async merged(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`merged ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async prClosed(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`prClosed ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
 });
 
 const complete: AgentResult = { outcome: 'complete' };
@@ -153,6 +169,11 @@ const fakeHost: HostSteps = {
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
   },
+  async prState(_project, prUrl) {
+    const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
+    if (state instanceof Error) throw state;
+    return state;
+  },
 };
 
 let store: Store;
@@ -170,6 +191,9 @@ beforeEach(() => {
   failError = undefined;
   prepareError = undefined;
   preparedWhile = [];
+  prStates = {};
+  touchedByHand = new Set();
+  outcomeError = undefined;
   killError = undefined;
   markError = undefined;
   contextGate = undefined;
@@ -1413,5 +1437,76 @@ describe('restart recovery', () => {
     assert.equal(problems.length, 1);
     assert.match(problems[0], /gone is not a registered Project/);
     assert.deepEqual(o.runs().history.map((r) => r.state), ['interrupted']);
+  });
+});
+
+describe('watching in-review PRs', () => {
+  const inReview = (ticketId: string, prUrl: string) => {
+    const id = store.insertRun({ project: 'thaivis', ticketId, title: 't', state: 'in-review', startedAt: now });
+    store.updateRun(id, { prUrl, endedAt: now + 1000 });
+    return id;
+  };
+  const states = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.ticketId, r.state, r.endedAt]);
+
+  it('ends a Run Merged and closes its bead once the PR merges, keeping the time the Orchestrator finished', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, [`merged thaivis/tv1 ${PR_URL}`]);
+    assert.deepEqual(states(o), [['tv1', 'merged', now + 1000]]);
+    assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`]);
+  });
+
+  it('ends a Run PR closed and hands its bead back once the PR closes unmerged', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'CLOSED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, [`prClosed thaivis/tv1 ${PR_URL}`]);
+    assert.deepEqual(states(o), [['tv1', 'pr-closed', now + 1000]]);
+  });
+
+  it('leaves a Run in review while its PR is open', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'OPEN';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(states(o), [['tv1', 'in-review', now + 1000]]);
+  });
+
+  it('still ends the Run but leaves alone a bead the human already changed', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'MERGED';
+    touchedByHand.add('thaivis/tv1');
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(states(o), [['tv1', 'merged', now + 1000]]);
+    assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`, '1: Ticket left alone: changed by hand since the PR opened']);
+  });
+
+  it('keeps a Run in review when gh fails, and still checks the other Runs', async () => {
+    const other = 'https://github.com/thaivis/app/pull/8';
+    inReview('tv1', PR_URL);
+    inReview('tv2', other);
+    prStates[PR_URL] = new Error('gh pr failed: HTTP 502');
+    prStates[other] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), [`checking ${PR_URL}: gh pr failed: HTTP 502`]);
+    assert.deepEqual(states(o), [['tv2', 'merged', now + 1000], ['tv1', 'in-review', now + 1000]]);
+  });
+
+  it('keeps a Run in review when the bead write fails, so the next tick tries again', async () => {
+    inReview('tv1', PR_URL);
+    prStates[PR_URL] = 'CLOSED';
+    outcomeError = new Error('bd timed out');
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), [`checking ${PR_URL}: bd timed out`]);
+    assert.deepEqual(states(o), [['tv1', 'in-review', now + 1000]]);
+    outcomeError = undefined;
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.deepEqual(states(o), [['tv1', 'pr-closed', now + 1000]]);
   });
 });

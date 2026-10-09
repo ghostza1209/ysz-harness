@@ -40,6 +40,7 @@ void (async () => {
   for (;;) {
     // Before the poll, which can run long: a bd lease lasts 5 minutes and the loop comes round every 30 seconds.
     await Promise.all(projects.map((p) => beads.heartbeat(p).catch((err) => console.error(`[heartbeat] ${p.name}: ${err.message}`))));
+    for (const problem of await orchestrator.watchReviews()) console.error(`[review-watch] ${problem}`);
     await orchestrator.poll();
     await orchestrator.tick();
     for (const p of orchestrator.projectStatuses()) if (p.error) console.error(`[poll] ${p.name}: ${p.error}`);

@@ -399,6 +399,16 @@ a:focus-visible {
   background: color-mix(in srgb, var(--ok) 14%, transparent);
 }
 
+.pill.merged {
+  color: var(--violet);
+  background: color-mix(in srgb, var(--violet) 14%, transparent);
+}
+
+.pill.pr-closed {
+  color: var(--mute);
+  background: color-mix(in srgb, var(--mute) 14%, transparent);
+}
+
 .pill.failed,
 .pill.interrupted {
   color: var(--bad);
@@ -1298,6 +1308,7 @@ h2::before {
 }
 
 .pill.in-review,
+.pill.merged,
 .pill.agent,
 .pill.agent-review,
 .pill.host,

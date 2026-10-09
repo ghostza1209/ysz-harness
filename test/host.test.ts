@@ -199,6 +199,20 @@ describe('host steps against real git', () => {
     assert.equal(git(origin, 'branch', '--list', 'agent/t-13'), '');
   });
 
+  it("reads a PR's state as the Project's gh account", async () => {
+    const bin = join(root, 'bin-pr-view');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED"}'`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.equal(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), 'MERGED');
+      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state');
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
   it("opens the PR as the Project's gh account, and as gh's active account when it names none", async () => {
     for (const [ghUser, token] of [['work-acct', 'tok-work-acct'], [undefined, 'none']] as const) {
       const id = `t-gh-${ghUser ?? 'default'}`;

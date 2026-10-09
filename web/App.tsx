@@ -270,7 +270,14 @@ interface Toast {
   bad: boolean;
 }
 
-const FILTERS = { all: () => true, 'in-review': (s: string) => s === 'in-review', failed: (s: string) => s === 'failed' || s === 'interrupted', killed: (s: string) => s === 'killed' };
+const FILTERS = {
+  all: () => true,
+  'in-review': (s: string) => s === 'in-review',
+  merged: (s: string) => s === 'merged',
+  'pr-closed': (s: string) => s === 'pr-closed',
+  failed: (s: string) => s === 'failed' || s === 'interrupted',
+  killed: (s: string) => s === 'killed',
+};
 
 /** The error a 401 from /api/state stands for: this browser has no Dashboard cookie. */
 const SIGNED_OUT = 'signed out';

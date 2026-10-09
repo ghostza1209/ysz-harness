@@ -66,6 +66,12 @@ export interface Orchestrator {
   retryHostStep(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
   cleanUp(runId: number): Promise<void>;
+  /**
+   * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
+   * one closed unmerged ends it pr-closed and hands the bead back. A bead the human changed is left alone. endedAt keeps the
+   * time the Run reached in-review. Never rejects: a Run whose check failed stays in-review for the next call.
+   */
+  watchReviews(): Promise<string[]>;
 }
 
 export interface Clock {
@@ -473,6 +479,31 @@ export function createOrchestrator(deps: {
       if ((run?.state !== 'failed' && run?.state !== 'killed') || !run.cloneDir) throw new Error(`Run ${runId} has no clone to clean up`);
       await host.removeClone({ dir: run.cloneDir });
       store.updateRun(runId, { cloneDir: null });
+    },
+
+    async watchReviews() {
+      const problems: string[] = [];
+      for (const run of store.inReview()) {
+        const project = byName.get(run.project);
+        if (!run.prUrl) continue; // an in-review Run always has its PR
+        if (!project) {
+          problems.push(`checking ${run.prUrl}: ${run.project} is not a registered Project`);
+          continue;
+        }
+        try {
+          const state = await host.prState(project, run.prUrl);
+          if (state !== 'MERGED' && state !== 'CLOSED') continue;
+          const merged = state === 'MERGED';
+          // Bead first: if its write fails the Run stays in-review, so the next call tries again.
+          const written = merged ? await beads.merged(project, run.ticketId, run.prUrl) : await beads.prClosed(project, run.ticketId, run.prUrl);
+          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed' });
+          logRun(run.id, `PR ${merged ? 'merged' : 'closed unmerged'}: ${run.prUrl}`);
+          if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
+        } catch (err) {
+          problems.push(`checking ${run.prUrl}: ${message(err)}`);
+        }
+      }
+      return problems;
     },
 
     async poll() {
