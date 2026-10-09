@@ -9,6 +9,11 @@ export interface Project {
   image?: string;
   /** Host command (argv) run in the repo before each claim; a non-zero exit means infrastructure is down (e.g. a compose service) and nothing is claimed. */
   preflight?: string[];
+  /** UID/GID of the image's `agent` user; sandcastle defaults to the host's, which differs from the image on macOS. */
+  containerUid?: number;
+  containerGid?: number;
+  /** Supplementary groups for the sandbox user, e.g. one that may use a mounted Docker socket. */
+  groups?: (string | number)[];
   /** Extra bind mounts for the sandbox. */
   mounts?: { hostPath: string; sandboxPath: string; readonly?: boolean }[];
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */
@@ -28,7 +33,29 @@ const appRepo = join(projectsDir, 'personal/app');
 
 // Edit and restart to add or change a Project.
 export const projects: readonly Project[] = [
-  { name: 'fazwaz', repoPath: join(projectsDir, 'work/fazwaz'), baseBranch: 'develop' },
+  {
+    name: 'fazwaz',
+    repoPath: join(projectsDir, 'work/fazwaz'),
+    baseBranch: 'develop',
+    image: 'ysz-harness/fazwaz',
+    // Not running means the compose stack is down: `exec` exits non-zero then.
+    preflight: ['docker', 'compose', 'exec', '-T', 'php', 'true'],
+    containerUid: 1000,
+    containerGid: 1000,
+    // ADR 0001: root-equivalent host access, fazwaz only. Read-only is enough to connect. Group 0 owns the socket on Docker Desktop.
+    mounts: [{ hostPath: '/var/run/docker.sock', sandboxPath: '/var/run/docker.sock', readonly: true }],
+    groups: [0],
+    copyToWorktree: ['.env'],
+    checkHint:
+      'Run PHP checks through the Docker CLI here. The compose `php` container sees the host checkout, not your clone, so run them in a throwaway container on your clone:\n' +
+      "php=$(docker ps -q --filter label=com.docker.compose.project=fazwaz --filter label=com.docker.compose.service=php); " +
+      `clone=$(docker inspect "$(hostname)" --format '{{range .Mounts}}{{if eq .Destination "/home/agent/workspace"}}{{.Source}}{{end}}{{end}}'); ` +
+      `repo=$(docker inspect "$php" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}'); ` +
+      `image=$(docker inspect "$php" --format '{{.Config.Image}}')\n` +
+      'then: docker run --rm -v "$clone:/var/www" -v "$repo/vendor:/var/www/vendor:ro" -w /var/www --network fazwaz_default "$image" <command>, ' +
+      'e.g. `vendor/bin/phpcs --standard=phpcs.xml <changed files>` and `php artisan test --filter=<TestClass>`. ' +
+      'Never run docker commands that touch other containers, volumes or the host checkout. Best-effort: CI covers the rest.',
+  },
   { name: 'PopDeal', repoPath: join(projectsDir, 'work/PopDeal'), baseBranch: 'develop' },
   {
     name: 'thaivis',

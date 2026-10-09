@@ -93,7 +93,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
     execFileSync('git', ['-c', 'user.name=ysz-harness', '-c', 'user.email=ysz-harness@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'decoy'], { cwd: decoy });
     const worktree = await createWorktree({ cwd: decoy, branchStrategy: { type: 'branch', branch } });
 
-    const inner = docker({ imageName: project.image, mounts: project.mounts });
+    const inner = docker({ imageName: project.image, mounts: project.mounts, containerUid: project.containerUid, containerGid: project.containerGid, groups: project.groups });
     // docker's provider has create() at runtime; its public type hides it.
     const create = (inner as unknown as { create: CreateSandbox }).create;
     const sandbox = createBindMountSandboxProvider({
