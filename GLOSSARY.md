@@ -14,3 +14,5 @@ _Avoid_: job, session.
 
 **Attempt**: One pass at a Run's Ticket in fresh isolated sandboxes: an agent implements the Ticket, then a second agent reviews and corrects that work. A Run retries with a second Attempt at most once.
 _Avoid_: retry run, try.
+
+**Run log**: Everything a Run recorded, in order: each Attempt's agent output, then the host steps that follow.

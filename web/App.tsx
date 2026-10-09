@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
+import { parseLog, type LogBlock } from './logView';
 import type { RunRow } from '../src/store';
 
 interface State {
@@ -14,10 +15,54 @@ const REFRESH_MS = 5_000;
 /** Longest tail kept in the browser, in characters. */
 const TAIL_CHARS = 32_000;
 
-/** The live tail of one Run's log. React renders the text as text, so agent output can't inject markup. */
-function LogTail({ runId }: { runId: number }) {
+/** Tool calls longer than this, or over one line, show folded to their first line. */
+const FOLD_CHARS = 120;
+
+/** One block of the log view. Every string goes in as a text node, never as markup. */
+const Block = memo(function Block({ b, now }: { b: LogBlock; now: number }) {
+  if (b.kind === 'rule') return <div className="log-rule">{b.text}</div>;
+  if (b.kind === 'message') return <div className="log-msg">{b.text}</div>;
+  if (b.kind === 'step')
+    return (
+      <div className={`log-step ${b.text.startsWith('Failed:') ? 'bad' : ''}`}>
+        {b.text}
+        {b.since !== undefined && (
+          <>
+            {' · '}
+            <span className="elapsed">{span(now - b.since)}</span>
+            <span className="waiting" />
+          </>
+        )}
+        {b.sub.map((l, i) => (
+          <div className="log-sub" key={i}>
+            {l.trim()}
+          </div>
+        ))}
+      </div>
+    );
+  const args = b.text.slice(b.name.length + 1).replace(/\)$/, '');
+  const name = <span className="log-tool-name">{b.name}</span>;
+  if (!args.includes('\n') && args.length <= FOLD_CHARS)
+    return (
+      <div className="log-tool">
+        {name} {args}
+      </div>
+    );
+  return (
+    <details className="log-tool">
+      <summary>
+        {name} {args.split('\n')[0].slice(0, FOLD_CHARS)}…
+      </summary>
+      <pre>{args}</pre>
+    </details>
+  );
+});
+
+/** The live tail of one Run's log, as steps, tool calls and agent messages. */
+function LogTail({ runId, now }: { runId: number; now: number }) {
   const [text, setText] = useState('');
-  const box = useRef<HTMLPreElement>(null);
+  const blocks = useMemo(() => parseLog(text), [text]);
+  const box = useRef<HTMLDivElement>(null);
   // Follow the tail only while the reader sits at the bottom; scrolling up to read stops it.
   const follow = useRef(true);
   useEffect(() => {
@@ -34,7 +79,7 @@ function LogTail({ runId }: { runId: number }) {
     return () => source.close();
   }, [runId]);
   return (
-    <pre
+    <div
       className="log"
       ref={box}
       onScroll={(e) => {
@@ -42,8 +87,13 @@ function LogTail({ runId }: { runId: number }) {
         follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
       }}
     >
-      {text || <span className="waiting">Waiting for the agent’s first output</span>}
-    </pre>
+      {blocks.length ? (
+        // Only a running step reads the clock, so the per-second tick re-renders just that block.
+        blocks.map((b, i) => <Block b={b} now={b.kind === 'step' && b.since !== undefined ? now : 0} key={i} />)
+      ) : (
+        <span className="waiting">Waiting for the agent’s first output</span>
+      )}
+    </div>
   );
 }
 
@@ -298,7 +348,7 @@ export function App() {
                       {r.state === 'needs-attention' ? (
                         <div className="note">{r.note}</div>
                       ) : (
-                        <LogTail runId={r.id} />
+                        <LogTail runId={r.id} now={now} />
                       )}
                       <div className="actions">
                         {r.attempt > 0 && (

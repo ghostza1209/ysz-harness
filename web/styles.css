@@ -12,6 +12,8 @@
   --violet: #7a4fd6;
   --log-bg: #0f131b;
   --log-ink: #cfe3c8;
+  --log-mute: #8b93a7;
+  --log-text: #e6e9ef;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 4%);
   color-scheme: light;
 }
@@ -511,7 +513,7 @@ a:hover {
 
 /* Log */
 
-pre.log {
+div.log {
   background: var(--log-bg);
   color: var(--log-ink);
   font: 12px/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
@@ -523,6 +525,65 @@ pre.log {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* Log blocks: steps are dim, tool calls are code, the agent's own words read as prose. */
+.log-rule {
+  color: var(--log-mute);
+  font-size: 11px;
+  border-top: 1px solid #ffffff22;
+  margin: 10px 0 4px;
+  padding-top: 4px;
+}
+
+.log-rule:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
+.log-step {
+  color: var(--log-mute);
+  font-size: 11px;
+}
+
+.log-step.bad {
+  color: var(--bad);
+}
+
+.log-step .elapsed {
+  color: inherit;
+}
+
+.log-sub {
+  padding-left: 14px;
+}
+
+.log-tool {
+  margin: 2px 0;
+}
+
+.log-tool summary {
+  cursor: pointer;
+}
+
+.log-tool pre {
+  margin: 2px 0 6px 14px;
+  font: inherit;
+  white-space: pre-wrap;
+}
+
+.log-tool-name {
+  background: #ffffff1a;
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.log-msg {
+  color: var(--log-text);
+  font: 13px/1.55 system-ui, -apple-system, sans-serif;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  margin: 6px 0;
 }
 
 @media (max-width: 900px) {
