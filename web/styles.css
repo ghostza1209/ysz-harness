@@ -1107,6 +1107,28 @@ body::after {
   box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* A working Run's HUD brackets light up, the stage bar runs as a glowing comet, and the timer glows. */
+.card.live:is(.agent, .agent-review, .host) {
+  --hud: var(--accent);
+}
+
+.card.live:is(.agent, .agent-review, .host) .stages li.now span::after {
+  background: linear-gradient(90deg, transparent, var(--accent) 80%, #fff);
+  box-shadow: 0 0 8px var(--accent), 0 0 16px var(--violet);
+}
+
+.card.live:is(.agent, .agent-review, .host) .elapsed {
+  color: var(--accent);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* While anything is being worked on, the Live Runs count beats like a heart monitor. */
+section:has(.card.live:is(.agent, .agent-review, .host)) h2 .count {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  animation: beat 1.6s ease-out infinite;
+}
+
 /* Empty states sonar-ping, waiting for work. */
 .empty-icon {
   position: relative;
@@ -1190,6 +1212,16 @@ body::after {
 @keyframes ring {
   to {
     --spin: 360deg;
+  }
+}
+
+@keyframes beat {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 8px transparent;
   }
 }
 
