@@ -7,7 +7,7 @@ import type { RunRow, Store } from './store';
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
 
-export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot';
+export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot' | 'preflight failed' | 'image missing';
 
 export interface QueueItem {
   project: string;
@@ -113,6 +113,8 @@ export function createOrchestrator(deps: {
   const key = (project: string, id: string) => `${project}/${id}`;
 
   const byName = new Map(projects.map((p) => [p.name, p]));
+  /** Projects whose last infrastructure check failed, and why. Rewritten by every tick that checks them. */
+  const gates = new Map<string, 'preflight failed' | 'image missing'>();
 
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -284,6 +286,7 @@ export function createOrchestrator(deps: {
       if (!byName.get(project)!.image) waitReason = 'not onboarded';
       else if (paused.has(project) && !runNow) waitReason = 'Project paused';
       else if (busy.has(project)) waitReason = runNow ? 'run-now · waiting for slot' : 'Project already has a Run';
+      else if (gates.has(project)) waitReason = gates.get(project)!; // takes no slot: the next Project's Ticket may use it
       else if (free > 0) {
         waitReason = 'next up';
         free--;
@@ -303,6 +306,20 @@ export function createOrchestrator(deps: {
 
   return {
     async tick() {
+      // Infrastructure gates, before anything is claimed: a failure never burns an Attempt. Busy Projects claim nothing, so they are not checked.
+      const busyNow = store.slotProjects();
+      if (busyNow.length >= SLOTS_TOTAL) return;
+      await Promise.all(
+        projects
+          .filter((p) => p.image && !busyNow.includes(p.name) && snapshots.get(p.name)!.tickets.length)
+          .map(async (p) => {
+            const down = !(await sandbox.hasImage(p))
+              ? 'image missing'
+              : await host.preflight(p).then(() => null, () => 'preflight failed' as const);
+            if (down) gates.set(p.name, down);
+            else gates.delete(p.name);
+          }),
+      );
       const skipped = new Set<string>();
       for (;;) {
         // The queue's own slot arithmetic decides what fits; re-read it after every claim.

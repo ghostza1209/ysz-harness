@@ -7,6 +7,8 @@ export interface Project {
   baseBranch: string;
   /** Sandbox image (built by `npm run images`). A Project without one is not onboarded: its Tickets are never claimed. */
   image?: string;
+  /** Host command (argv) run in the repo before each claim; a non-zero exit means infrastructure is down (e.g. a compose service) and nothing is claimed. */
+  preflight?: string[];
   /** Extra bind mounts for the sandbox. */
   mounts?: { hostPath: string; sandboxPath: string; readonly?: boolean }[];
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */

@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, stopSandbox } from '../src/sandbox';
+import { agentResult, imageExists, stopSandbox } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -94,5 +94,27 @@ esac
 
   it('throws when docker cannot be asked', async () => {
     await assert.rejects(stopSandbox({ dir: '/clones/tv1-1' }, join(root, 'no-such-docker')), /ENOENT/);
+  });
+});
+
+/** imageExists against a fake `docker` that knows one image. */
+describe('imageExists', () => {
+  let root: string;
+  let docker: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'fake-docker-'));
+    docker = join(root, 'docker');
+    writeFileSync(docker, '#!/bin/sh\n[ "$1 $2 $3" = "image inspect ysz-harness/app" ] || { echo "No such image: $3" >&2; exit 1; }\n');
+    chmodSync(docker, 0o755);
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('is true for an image docker knows and false for one it does not', async () => {
+    assert.equal(await imageExists('ysz-harness/app', docker), true);
+    assert.equal(await imageExists('ysz-harness/gone', docker), false);
+  });
+
+  it('is false, not a throw, when docker cannot be run', async () => {
+    assert.equal(await imageExists('ysz-harness/app', join(root, 'no-such-docker')), false);
   });
 });

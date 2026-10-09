@@ -46,6 +46,11 @@ let _signal: unknown;
 /** What the host finds in a clone after its agent: commits ahead of base, or an error. */
 let collected: (dir: string) => { tip: string; commits: number } | Error;
 let clones: number;
+/** Projects whose sandbox image is absent, and the Projects whose preflight fails. */
+let missingImages: Set<string>;
+let failingPreflights: Set<string>;
+/** Every preflight the orchestrator ran, by Project. */
+let preflights: string[];
 
 const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
@@ -83,6 +88,9 @@ const complete: AgentResult = { outcome: 'complete' };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
 const fakeSandbox: SandboxRunner = {
+  async hasImage(project) {
+    return !missingImages.has(project.name);
+  },
   implement(req) {
     agentCalls.push(`implement attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
     return agent(req.attempt, req.signal);
@@ -98,6 +106,10 @@ const fakeSandbox: SandboxRunner = {
 };
 
 const fakeHost: HostSteps = {
+  async preflight(project) {
+    preflights.push(project.name);
+    if (failingPreflights.has(project.name)) throw new Error('compose php is not running');
+  },
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
     if (prepareError) throw prepareError;
@@ -145,6 +157,9 @@ beforeEach(() => {
   publishOpts = undefined;
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
   clones = 0;
+  missingImages = new Set();
+  failingPreflights = new Set();
+  preflights = [];
 });
 
 async function polled(registry: readonly Project[] = projects) {
@@ -398,6 +413,76 @@ describe('starting Runs', () => {
     await o.tick();
     assert.deepEqual(writes, []);
     assert.deepEqual(o.readyQueue().map((t) => t.waitReason), ['not onboarded']);
+  });
+});
+
+describe('infrastructure gates', () => {
+  beforeEach(() => {
+    queues = {
+      fazwaz: [ticket('fz1', 2, '2026-01-01T00:00:00Z')],
+      PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')],
+      thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')],
+    };
+  });
+  const reasons = (o: Awaited<ReturnType<typeof polled>>) => o.readyQueue().map((t) => `${t.id}: ${t.waitReason}`);
+
+  it('a failed preflight claims nothing for that Project and shows "preflight failed"; its slot goes to the next Project', async () => {
+    failingPreflights.add('fazwaz');
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim PopDeal/pd1', 'claim thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => r.project).sort(), ['PopDeal', 'thaivis']);
+    assert.deepEqual(reasons(o), ['fz1: preflight failed']);
+  });
+
+  it('a missing image claims nothing and shows "image missing" without running the preflight', async () => {
+    missingImages.add('fazwaz');
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.includes('fazwaz')), []);
+    assert.deepEqual(reasons(o), ['fz1: image missing']);
+    assert.deepEqual(preflights.sort(), ['PopDeal', 'thaivis']);
+  });
+
+  it('claims the Ticket on the next tick once the preflight passes, with no Attempt burned in between', async () => {
+    queues = { fazwaz: [ticket('fz1', 2, '2026-01-01T00:00:00Z')] };
+    failingPreflights.add('fazwaz');
+    const o = await polled();
+    await o.tick();
+    await o.tick();
+    assert.equal(writes.length, 0);
+    assert.equal(agentCalls.length, 0);
+    assert.deepEqual(reasons(o), ['fz1: preflight failed']);
+
+    failingPreflights.clear();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim fazwaz/fz1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state]), [['fz1', 'in-review']]);
+  });
+
+  it('claims the Ticket on the next tick once the image is back', async () => {
+    queues = { fazwaz: [ticket('fz1', 2, '2026-01-01T00:00:00Z')] };
+    missingImages.add('fazwaz');
+    const o = await polled();
+    await o.tick();
+    assert.deepEqual(reasons(o), ['fz1: image missing']);
+
+    missingImages.clear();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim fazwaz/fz1']);
+  });
+
+  it('does not check a Project that already has a Run', async () => {
+    startRun('fazwaz', 'agent');
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.ok(!preflights.includes('fazwaz'));
+    assert.equal(reasons(o)[0], 'fz1: Project already has a Run');
   });
 });
 

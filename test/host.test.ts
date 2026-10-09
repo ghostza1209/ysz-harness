@@ -75,6 +75,15 @@ describe('host steps against real git', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('runs the preflight command in the Project repo: passes on exit 0, fails on non-zero, passes when there is none', async () => {
+    const probe = join(root, 'probe');
+    const withPreflight = (code: number) => ({ ...project, preflight: ['sh', '-c', `pwd > ${probe}; exit ${code}`] });
+    await host.preflight(withPreflight(0));
+    assert.equal(readFileSync(probe, 'utf8').trim(), repo);
+    await assert.rejects(host.preflight(withPreflight(1)), /sh -c failed/);
+    await host.preflight(project);
+  });
+
   it('clones onto agent/<id> at the freshly fetched origin tip, not the stale local ref, with origin pointing at the real remote', async () => {
     const other = join(root, 'other');
     git(root, 'clone', '-q', '-b', 'develop', origin, other);

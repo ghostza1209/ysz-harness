@@ -21,6 +21,8 @@ export interface Prepared {
 }
 
 export interface HostSteps {
+  /** Run the Project's preflight command in its repo. Throws if it fails or times out; passes when the Project has none. */
+  preflight(project: Project): Promise<void>;
   /** A fresh clone on `agent/<ticket-id>` at the just-fetched origin/<baseBranch>, with the Ticket context in place. */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over origin/<baseBranch>. */
@@ -150,6 +152,10 @@ const clip = (s: string) => (s.length > PROMPT_GIT_CHARS ? `${s.slice(0, PROMPT_
 
 export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostSteps {
   return {
+    async preflight({ preflight, repoPath }) {
+      if (preflight) await run(preflight[0], preflight.slice(1), repoPath, { timeout: 60_000 });
+    },
+
     async prepare(project, ticketId, context, signal) {
       const { run, text } = within(signal);
       const repo = project.repoPath;

@@ -20,6 +20,8 @@ export type AgentResult =
 type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal } & Prepared;
 
 export interface SandboxRunner {
+  /** Whether the Project's sandbox image exists locally. Never throws: docker being unreachable counts as missing. */
+  hasImage(project: Project): Promise<boolean>;
   /** One implement agent in a fresh sandbox on the host-prepared clone. Throws if the agent errors or idles out. */
   implement(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult>;
   /** One review agent in a fresh sandbox on the same clone, after the implement agent. Throws like `implement`. */
@@ -43,6 +45,10 @@ export async function stopSandbox({ dir }: Pick<Prepared, 'dir'>, dockerBin = 'd
   const removal = await execFileAsync(dockerBin, ['rm', '-f', ...ids], { timeout: 60_000 }).then(() => null, (err: Error) => err);
   const left = await listed();
   if (left.length) throw new Error(`the sandbox container ${left.join(' ')} is still there${removal ? `: ${removal.message}` : ''}`);
+}
+
+export async function imageExists(image: string, dockerBin = 'docker'): Promise<boolean> {
+  return execFileAsync(dockerBin, ['image', 'inspect', image], { timeout: 30_000 }).then(() => true, () => false);
 }
 
 const COMPLETE = '<promise>COMPLETE</promise>';
@@ -111,6 +117,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
   }
 
   return {
+    hasImage: (project) => imageExists(project.image!),
     implement: ({ previousAttemptSummary, ...req }) =>
       runAgent('implement', req, {
         PREVIOUS_ATTEMPT: previousAttemptSummary
