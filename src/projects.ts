@@ -14,6 +14,8 @@ export interface Project {
   containerGid?: number;
   /** ADR 0002: the running compose service whose image the agent's `php-check` runs commands in, on its clone. */
   checkContainer?: { composeProject: string; service: string };
+  /** `gh` account that opens the Project's PRs; omitted means gh's active account. Logged in accounts: `gh auth status`. */
+  ghUser?: string;
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */
   copyToWorktree?: string[];
   /** Runs inside the sandbox before the agent starts, to install dependencies. */
@@ -37,6 +39,7 @@ const popdealRepo = join(projectsDir, 'work/PopDeal');
 export const projects: readonly Project[] = [
   {
     name: 'fazwaz',
+    ghUser: 'yoss1209',
     repoPath: join(projectsDir, 'work/fazwaz'),
     baseBranch: 'develop',
     image: 'ysz-harness/fazwaz',
@@ -53,6 +56,7 @@ export const projects: readonly Project[] = [
   },
   {
     name: 'PopDeal',
+    ghUser: 'yoss1209',
     repoPath: popdealRepo,
     baseBranch: 'develop',
     image: 'ysz-harness/popdeal',

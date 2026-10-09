@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
 import { createOrchestrator } from './core';
 import { createHostSteps } from './host';
-import { createRunLogs } from './logs';
+import { appendRunLog, createRunLogs } from './logs';
 import { projects } from './projects';
 import { createSandboxRunner, MODEL } from './sandbox';
 import { createHttpServer } from './server';
@@ -21,6 +21,14 @@ const orchestrator = createOrchestrator({
   host: createHostSteps(MODEL),
   store: openStore(`${root}data/orchestrator.db`),
   clock: Date,
+  // A log write that fails must not fail the Run.
+  log: (runId, line) => {
+    try {
+      appendRunLog(`${root}data/logs`, runId, line);
+    } catch (err) {
+      console.error(`[log] run ${runId}: ${(err as Error).message}`);
+    }
+  },
 });
 
 for (const problem of await orchestrator.recover()) console.error(`[recover] ${problem}`);

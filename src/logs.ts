@@ -1,7 +1,8 @@
+import { appendFileSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
-/** A Run's log: its agent log files (`<runId>-attempt<n>-<role>.log`, written by sandcastle) read as one stream, oldest Attempt first. */
+/** A Run's log: its agent log files (`<runId>-attempt<n>-<role>.log`, written by sandcastle) read as one stream, oldest Attempt first, then its host log. */
 export interface RunLogs {
   /** Total bytes across the Run's log files; 0 while none exists yet. */
   size(runId: number): Promise<number>;
@@ -15,10 +16,11 @@ export function createRunLogs(dir: string): RunLogs {
       if (err.code === 'ENOENT') return [];
       throw err;
     });
-    const re = new RegExp(`^${runId}-attempt(\\d+)-(implement|review)\\.log$`);
+    const re = new RegExp(`^${runId}-(?:attempt(\\d+)-(implement|review)|host)\\.log$`);
     const found = names.flatMap((name) => {
       const m = re.exec(name);
-      return m ? [{ path: join(dir, name), attempt: Number(m[1]), role: m[2] }] : [];
+      // The host log comes after every Attempt: the host steps that write it run once the agents are done.
+      return m ? [{ path: join(dir, name), attempt: m[1] ? Number(m[1]) : Infinity, role: m[2] ?? '' }] : [];
     });
     // "implement" sorts before "review", which is the order the agents run in.
     found.sort((a, b) => a.attempt - b.attempt || a.role.localeCompare(b.role));
@@ -51,4 +53,9 @@ export function createRunLogs(dir: string): RunLogs {
       return Buffer.concat(parts);
     },
   };
+}
+
+/** Append a line to a Run's host log, `<runId>-host.log`. */
+export function appendRunLog(dir: string, runId: number, line: string): void {
+  appendFileSync(join(dir, `${runId}-host.log`), `${line}\n`);
 }

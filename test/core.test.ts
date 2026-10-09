@@ -47,7 +47,10 @@ let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
 /** What the last publish was given, bar its signal. */
 let publishOpts: unknown;
+/** Lines the orchestrator wrote to each Run's host log. */
+let runLog: string[];
 let _signal: unknown;
+let _log: unknown;
 /** What the host finds in a clone after its agent: commits ahead of base, or an error. */
 let collected: (dir: string) => { tip: string; commits: number } | Error;
 let clones: number;
@@ -140,7 +143,8 @@ const fakeHost: HostSteps = {
   },
   async publish(_project, _ticket, { branch }, opts) {
     hostSteps.push(`publish ${branch}`);
-    if (opts) ({ signal: _signal, ...publishOpts } = opts);
+    if (opts) ({ signal: _signal, log: _log, ...publishOpts } = opts);
+    opts?.log?.(`pushing ${branch}`);
     return publish(opts?.signal);
   },
   async removeClone({ dir }) {
@@ -176,6 +180,7 @@ beforeEach(() => {
   reviewer = async () => complete;
   publish = async () => PR_URL;
   publishOpts = undefined;
+  runLog = [];
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
   clones = 0;
   missingImages = new Set();
@@ -191,6 +196,7 @@ async function polled(registry: readonly Project[] = projects) {
     host: fakeHost,
     store,
     clock: { now: () => now },
+    log: (runId, line) => runLog.push(`${runId}: ${line}`),
   });
   await orchestrator.poll();
   return orchestrator;
@@ -790,6 +796,18 @@ describe('a host step that fails', () => {
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
     assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+  });
+
+  it("writes each Push & PR try to the Run's log: the host step's lines, then the PR or why it failed", async () => {
+    const o = await parkedRun();
+    const [{ id }] = o.runs().live;
+    await o.retryHostStep(id);
+    await o.whenIdle();
+    const started = `${id}: --- Push & PR started: 2026-10-08T12:00:00.000Z ---`;
+    assert.deepEqual(runLog, [
+      started, `${id}: pushing agent/tv1`, `${id}: Failed: git push failed: rejected`,
+      started, `${id}: pushing agent/tv1`, `${id}: PR opened: ${PR_URL}`,
+    ]);
   });
 
   it('parks the Run again, with the new reason, when the retry fails too', async () => {

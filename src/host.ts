@@ -30,13 +30,13 @@ export interface HostSteps {
   /**
    * Bring the agent's branch back into the Project repo, push it and open the PR against baseBranch. Returns the PR URL.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
-   * aborting `signal` kills the git, claude and gh processes in flight.
+   * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
   publish(
     project: Project,
     ticket: { id: string; title: string },
     prepared: Prepared,
-    opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal },
+    opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal; log?: (line: string) => void },
   ): Promise<string>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
@@ -200,7 +200,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       return { tip, commits };
     },
 
-    async publish(project, ticket, prepared, { tip, reviewSkipped, signal } = {}) {
+    async publish(project, ticket, prepared, { tip, reviewSkipped, signal, log: step = () => {} } = {}) {
       const { run, text } = within(signal);
       const repo = project.repoPath;
       const { branch } = prepared;
@@ -214,6 +214,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       if (touched.some((path) => path.startsWith('.orchestrator/'))) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
       const secret = project.copyToWorktree?.find((file) => touched.includes(file.toLowerCase()));
       if (secret) throw new Error(`refusing to push: ${secret} is committed on the branch`);
+      step(`Pushing ${branch} to origin`);
       await run('git', ['push', '-u', 'origin', branch], repo);
 
       const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));
@@ -221,6 +222,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       // In an empty dir with only user settings and the Skill tool: the change is agent-written text, so it gets nothing to act on.
       const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
       try {
+        step('Writing the PR body (claude -p)');
         const body = await text(
           'claude',
           [
@@ -234,10 +236,14 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         );
         if (!body) throw new Error('claude -p returned an empty PR body');
         writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
+        // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
+        step(`Opening the PR against ${project.baseBranch}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
+        const env = project.ghUser ? { ...process.env, GH_TOKEN: await text('gh', ['auth', 'token', '-u', project.ghUser], repo) } : undefined;
         const out = await text(
           'gh',
           ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', `${ticket.id}: ${ticket.title}`, '--body-file', join(tmp, 'body.md')],
           repo,
+          { env },
         );
         return out.split('\n').pop()!;
       } finally {

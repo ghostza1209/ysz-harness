@@ -106,8 +106,10 @@ export function createOrchestrator(deps: {
   host: HostSteps;
   store: Store;
   clock: Clock;
+  /** Appends a line to a Run's log. */
+  log?: (runId: number, line: string) => void;
 }): Orchestrator {
-  const { projects, beads, sandbox, host, store, clock } = deps;
+  const { projects, beads, sandbox, host, store, clock, log: logRun = () => {} } = deps;
   const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
@@ -148,14 +150,17 @@ export function createOrchestrator(deps: {
    */
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
+    const log = (line: string) => logRun(runId, line);
     store.updateRun(runId, { state: 'host', note: null });
+    log(`--- Push & PR started: ${new Date(clock.now()).toISOString()} ---`);
     // What recover() needs to pick the job up again; the PR url is already on the row.
     store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped }));
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal });
+        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
         store.updateRun(runId, { prUrl: job.prUrl });
+        log(`PR opened: ${job.prUrl}`);
       }
       signal.throwIfAborted();
       await beads.markInReview(job.project, job.ticket.id, job.prUrl);
@@ -166,6 +171,7 @@ export function createOrchestrator(deps: {
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       control.parked = job;
+      log(`Failed: ${message(err)}`);
       store.updateRun(runId, { state: 'needs-attention', note: message(err) });
     }
   }
