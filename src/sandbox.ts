@@ -29,12 +29,14 @@ const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
 
 export function agentResult({ completionSignal, stdout }: { completionSignal?: string; stdout: string }): AgentResult {
-  if (completionSignal === COMPLETE) return { outcome: 'complete' };
-  if (completionSignal === NEEDS_INFO) {
+  // sandcastle reports the first signal in its list that the output holds anywhere, so COMPLETE wins over a NEEDS_INFO
+  // given after it. The signal the agent ended on is the one that counts.
+  if (completionSignal === undefined) return { outcome: 'stopped', tail: stdout.trim().slice(-500) };
+  if (stdout.lastIndexOf(NEEDS_INFO) > stdout.lastIndexOf(COMPLETE)) {
     const question = [...stdout.matchAll(/<question>([\s\S]*?)<\/question>/g)].at(-1)?.[1].trim();
     return { outcome: 'needs-info', question: question || 'the agent signalled NEEDS_INFO without a <question>' };
   }
-  return { outcome: 'stopped', tail: stdout.trim().slice(-500) };
+  return { outcome: 'complete' };
 }
 
 type CreateSandbox = Parameters<typeof createBindMountSandboxProvider>[0]['create'];

@@ -14,6 +14,11 @@ it('takes the last <question> of the output as the question for NEEDS_INFO', () 
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.' });
 });
 
+it('goes by the signal the agent ended on, not the one sandcastle matched first', () => {
+  const stdout = `I will print ${COMPLETE} once done, but first: <question>Which API?</question>\n${NEEDS_INFO}`;
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?' });
+});
+
 it('still ends needs-info, with a stand-in question, when the agent forgot the <question>', () => {
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: NEEDS_INFO }), {
     outcome: 'needs-info',
