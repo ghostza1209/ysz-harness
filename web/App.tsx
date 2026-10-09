@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import type { RunRow } from '../src/store';
 
@@ -16,6 +16,29 @@ function age(ms: number): string {
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/** Longest tail kept in the browser, in characters. */
+const TAIL_CHARS = 32_000;
+
+/** The live tail of one Run's log. React renders the text as text, so agent output can't inject markup. */
+function LogTail({ runId }: { runId: number }) {
+  const [text, setText] = useState('');
+  const box = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [text]);
+  useEffect(() => {
+    const source = new EventSource(`/api/runs/${runId}/log/stream`);
+    const data = (e: Event) => JSON.parse((e as MessageEvent<string>).data) as string;
+    // A `tail` replaces the text: the stream sends one on every (re)connect.
+    source.addEventListener('tail', (e) => setText(data(e)));
+    source.addEventListener('log', (e) => setText((t) => (t + data(e)).slice(-TAIL_CHARS)));
+    // The server closes when the Run ends; without this the browser would reconnect.
+    source.addEventListener('end', () => source.close());
+    return () => source.close();
+  }, [runId]);
+  return <pre className="log" ref={box}>{text || 'No log output yet.'}</pre>;
 }
 
 const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -81,6 +104,7 @@ export function App() {
                 <div className="mute">
                   {r.project} · started {time(r.startedAt)}
                 </div>
+                <LogTail runId={r.id} />
               </div>
             ))}
           </div>
@@ -112,6 +136,11 @@ export function App() {
                 <div className="mute">
                   {r.attempt} Attempt{r.attempt === 1 ? '' : 's'} used · {time(r.startedAt)} to {r.endedAt ? time(r.endedAt) : '?'}
                 </div>
+                {r.attempt > 0 && (
+                  <a href={`/api/runs/${r.id}/log`} target="_blank" rel="noreferrer">
+                    Full log
+                  </a>
+                )}
                 {r.prUrl && (
                   <a href={r.prUrl} target="_blank" rel="noreferrer">
                     {r.prUrl}

@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
 import { createOrchestrator } from './core';
 import { createHostSteps } from './host';
+import { createRunLogs } from './logs';
 import { projects } from './projects';
 import { createSandboxRunner, MODEL } from './sandbox';
 import { createHttpServer } from './server';
@@ -31,6 +32,6 @@ void (async () => {
   }
 })();
 
-createHttpServer(orchestrator, `${root}dist`).listen(port, '127.0.0.1', () => {
+createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`)).listen(port, '127.0.0.1', () => {
   console.log(`Orchestrator on http://localhost:${port}`);
 });

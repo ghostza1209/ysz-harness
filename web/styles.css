@@ -135,3 +135,16 @@ a {
     grid-template-columns: 1fr;
   }
 }
+
+pre.log {
+  background: #11151d;
+  color: #cfe3c8;
+  font: 12px/1.45 ui-monospace, monospace;
+  padding: 8px;
+  border-radius: 6px;
+  margin: 6px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
