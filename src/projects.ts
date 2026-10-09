@@ -27,6 +27,9 @@ export interface Project {
 const projectsDir = join(homedir(), 'Desktop/projects');
 
 // No Project mounts the host pnpm store: read-write, the agent could poison packages that host installs then run.
+// Measured 2026-10-09 on a scratch clone of thaivis (install only, Docker, pnpm 10.33.2): no mount 113s; read-only
+// mount fails (pnpm writes to the store to register the project); per-Run copy-on-write copy of the 7GB store 67s
+// to copy + 133s to install. No mount wins, so there is nothing to build.
 const STORE_IN_SANDBOX = '/home/agent/.pnpm-store';
 
 const appRepo = join(projectsDir, 'personal/app');
