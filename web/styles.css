@@ -121,6 +121,34 @@ h2.gap {
   background: var(--bad);
 }
 
+.pill.needs-attention {
+  background: #c77d0a;
+}
+
+.pill.killed {
+  background: #4a5163;
+}
+
+button {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.card .row:has(button) {
+  margin-top: 6px;
+}
+
 a {
   font-size: 12px;
   word-break: break-all;

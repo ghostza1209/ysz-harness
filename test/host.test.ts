@@ -111,6 +111,45 @@ describe('host steps against real git', () => {
     assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), git(repo, 'rev-parse', 'origin/develop'));
   });
 
+  it('stops a step whose signal is already aborted, before it makes a clone', async () => {
+    const before = readdirSync(join(root, 'clones')).length;
+    await assert.rejects(host.prepare(project, 't-aborted', context, AbortSignal.abort()), { name: 'AbortError' });
+    assert.equal(readdirSync(join(root, 'clones')).length, before);
+  });
+
+  it('kills the claude process of a publish that is aborted, and opens no PR', async () => {
+    const prepared = await host.prepare(project, 't-hang', context);
+    commit(join(prepared.dir, 'repo'), 'h.txt', 'h');
+    const bin = join(root, 'bin-hang');
+    mkdirSync(bin);
+    script(join(bin, 'claude'), `touch ${log}/hang.claude\nexec sleep 60`);
+    script(join(bin, 'gh'), `touch ${log}/hang.gh`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const abort = new AbortController();
+      const publishing = host.publish(project, ticket('t-hang'), prepared, { signal: abort.signal });
+      for (let i = 0; i < 200 && !existsSync(join(log, 'hang.claude')); i++) await new Promise((r) => setTimeout(r, 25));
+      assert.ok(existsSync(join(log, 'hang.claude')), 'claude never started');
+      const aborted = Date.now();
+      abort.abort();
+      await assert.rejects(publishing, { name: 'AbortError' });
+      assert.ok(Date.now() - aborted < 5_000);
+      assert.equal(existsSync(join(log, 'hang.gh')), false);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  it('refuses to remove a directory outside the clones directory, or the clones directory itself', async () => {
+    const outside = mkdtempSync(join(root, 'outside-'));
+    await assert.rejects(host.removeClone({ dir: outside }), /refusing to remove/);
+    await assert.rejects(host.removeClone({ dir: join(root, 'clones') }), /refusing to remove/);
+    await assert.rejects(host.removeClone({ dir: '' }), /refusing to remove/);
+    assert.ok(existsSync(outside));
+    assert.ok(existsSync(join(root, 'clones')));
+  });
+
   it('publishes: fetches the agent branch back, pushes it, and writes the PR body outside the clone and the repo', async () => {
     const prepared = await host.prepare(project, 't-2', context);
     const clone = join(prepared.dir, 'repo');

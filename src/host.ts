@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import type { TicketContext } from './beads';
 import type { Project } from './projects';
@@ -22,16 +22,22 @@ export interface Prepared {
 
 export interface HostSteps {
   /** A fresh clone on `agent/<ticket-id>` at the just-fetched origin/<baseBranch>, with the Ticket context in place. */
-  prepare(project: Project, ticketId: string, context: TicketContext): Promise<Prepared>;
+  prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over origin/<baseBranch>. */
-  collect(project: Project, prepared: Prepared): Promise<{ tip: string; commits: number }>;
+  collect(project: Project, prepared: Prepared, signal?: AbortSignal): Promise<{ tip: string; commits: number }>;
   /**
    * Bring the agent's branch back into the Project repo, push it and open the PR against baseBranch. Returns the PR URL.
-   * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review.
+   * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
+   * aborting `signal` kills the git, claude and gh processes in flight.
    */
-  publish(project: Project, ticket: { id: string; title: string }, prepared: Prepared, opts?: { tip?: string; reviewSkipped?: string }): Promise<string>;
-  /** Delete the Run's clone. */
-  removeClone(prepared: Prepared): Promise<void>;
+  publish(
+    project: Project,
+    ticket: { id: string; title: string },
+    prepared: Prepared,
+    opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal },
+  ): Promise<string>;
+  /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
+  removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
 }
 
 /** Under /Users, which Docker Desktop shares, and outside every repo's working tree. */
@@ -44,20 +50,30 @@ async function run(
   cmd: string,
   args: string[],
   cwd: string,
-  { timeout = 120_000, input, env }: { timeout?: number; input?: string | Buffer; env?: NodeJS.ProcessEnv } = {},
+  { timeout = 120_000, input, env, signal }: { timeout?: number; input?: string | Buffer; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = {},
 ): Promise<Buffer> {
-  const pending = execFileAsync(cmd, args, { cwd, env, timeout, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' });
+  const pending = execFileAsync(cmd, args, { cwd, env, timeout, signal, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' });
   pending.child.stdin?.on('error', () => {}); // the child may exit before reading it all; its exit status reports that
   if (input !== undefined) pending.child.stdin?.end(input);
   try {
     return (await pending).stdout;
   } catch (err) {
+    if (signal?.aborted) throw err; // an abort is the caller's own doing, not a failure to describe
     const e = err as { killed?: boolean; stderr?: Buffer; message: string };
     throw new Error(e.killed ? `${cmd} ${args[0]} timed out after ${timeout}ms` : `${cmd} ${args[0]} failed: ${e.stderr?.toString().trim() || e.message}`);
   }
 }
 
 const text = async (...args: Parameters<typeof run>) => (await run(...args)).toString().trim();
+
+/** `run` and `text` whose processes die with `signal`. */
+function within(signal?: AbortSignal) {
+  type Opts = Parameters<typeof run>[3];
+  return {
+    run: (cmd: string, args: string[], cwd: string, opts: Opts = {}) => run(cmd, args, cwd, { ...opts, signal }),
+    text: (cmd: string, args: string[], cwd: string, opts: Opts = {}) => text(cmd, args, cwd, { ...opts, signal }),
+  };
+}
 
 /** A regular file of sane size, read without following links or blocking on a FIFO the sandbox planted. */
 function readPlainFile(path: string): string | undefined {
@@ -105,7 +121,8 @@ function assertSelfContained(gitDir: string): void {
  * clone's config, so pack-objects reads the clone's object dir as its only store: a commit naming an object that only
  * the Project repo holds fails instead of carrying it out. index-pack recomputes every object id.
  */
-async function fetchBack(project: Project, { branch, dir, base }: Prepared, wantedTip?: string): Promise<string> {
+async function fetchBack(project: Project, { branch, dir, base }: Prepared, wantedTip?: string, signal?: AbortSignal): Promise<string> {
+  const { run, text } = within(signal);
   const repo = project.repoPath;
   const gitDir = join(dir, 'repo/.git');
   assertSelfContained(gitDir);
@@ -133,7 +150,8 @@ const clip = (s: string) => (s.length > PROMPT_GIT_CHARS ? `${s.slice(0, PROMPT_
 
 export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostSteps {
   return {
-    async prepare(project, ticketId, context) {
+    async prepare(project, ticketId, context, signal) {
+      const { run, text } = within(signal);
       const repo = project.repoPath;
       const base = project.baseBranch;
       const branch = `agent/${ticketId}`;
@@ -164,17 +182,18 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       return { branch, dir, base: sha };
     },
 
-    async collect(project, prepared) {
-      const tip = await fetchBack(project, prepared);
-      const commits = Number(await text('git', ['rev-list', '--count', `origin/${project.baseBranch}..${prepared.branch}`], project.repoPath));
+    async collect(project, prepared, signal) {
+      const tip = await fetchBack(project, prepared, undefined, signal);
+      const commits = Number(await within(signal).text('git', ['rev-list', '--count', `origin/${project.baseBranch}..${prepared.branch}`], project.repoPath));
       return { tip, commits };
     },
 
-    async publish(project, ticket, prepared, { tip, reviewSkipped } = {}) {
+    async publish(project, ticket, prepared, { tip, reviewSkipped, signal } = {}) {
+      const { run, text } = within(signal);
       const repo = project.repoPath;
       const { branch } = prepared;
       const range = `origin/${project.baseBranch}..${branch}`;
-      await fetchBack(project, prepared, tip);
+      await fetchBack(project, prepared, tip, signal);
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
       // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
       // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
@@ -215,6 +234,9 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
     },
 
     async removeClone({ dir }) {
+      // The path may come from the database; rm -rf must not leave the clones directory, nor be the directory itself.
+      const inside = relative(clonesDir, dir);
+      if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`refusing to remove ${dir}: not inside ${clonesDir}`);
       await rm(dir, { recursive: true, force: true }); // async: a clone holds a node_modules
     },
   };

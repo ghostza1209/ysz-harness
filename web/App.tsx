@@ -46,20 +46,33 @@ const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: '2-digi
 export function App() {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const load = () =>
+    fetch('/api/state')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((s: State) => {
+        setState(s);
+        setError(null);
+      })
+      .catch((e: Error) => setError(e.message));
 
   useEffect(() => {
-    const load = () =>
-      fetch('/api/state')
-        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-        .then((s: State) => {
-          setState(s);
-          setError(null);
-        })
-        .catch((e: Error) => setError(e.message));
     void load();
     const timer = setInterval(load, REFRESH_MS);
     return () => clearInterval(timer);
   }, []);
+
+  /** A Run control: POST it, show why the server refused, and refresh. */
+  const act = async (runId: number, action: 'kill' | 'retry' | 'cleanup') => {
+    const res = await fetch(`/api/runs/${runId}/${action}`, { method: 'POST' }).catch((e: Error) => e);
+    if (res instanceof Error) setActionError(res.message);
+    else setActionError(res.ok ? null : ((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `HTTP ${res.status}`);
+    await load();
+  };
+  const kill = (r: RunRow) => {
+    if (window.confirm(`Kill ${r.ticketId}? Its agent stops and the Ticket gets orchestrator:skip.`)) void act(r.id, 'kill');
+  };
 
   return (
     <>
@@ -68,6 +81,7 @@ export function App() {
         <span>{state ? `slots ${state.slots.used}/${state.slots.total} · max 1 per Project` : ''}</span>
         <span className="grow" />
         {error && <span className="bad">server unreachable: {error}</span>}
+        {actionError && <span className="bad">{actionError}</span>}
       </header>
       <main>
         <section>
@@ -104,7 +118,22 @@ export function App() {
                 <div className="mute">
                   {r.project} · started {time(r.startedAt)}
                 </div>
-                <LogTail runId={r.id} />
+                {r.state === 'needs-attention' ? (
+                  <>
+                    <div className="bad">{r.note}</div>
+                    <a href={`/api/runs/${r.id}/log`} target="_blank" rel="noreferrer">
+                      Full log
+                    </a>
+                  </>
+                ) : (
+                  <LogTail runId={r.id} />
+                )}
+                <div className="row">
+                  {r.state === 'needs-attention' && <button onClick={() => void act(r.id, 'retry')}>Retry host step</button>}
+                  <button className="danger" onClick={() => kill(r)}>
+                    Kill
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -147,6 +176,11 @@ export function App() {
                   </a>
                 )}
                 {r.note && <div className="bad">{r.note}</div>}
+                {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+                  <div className="row">
+                    <button onClick={() => void act(r.id, 'cleanup')}>Clean up</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

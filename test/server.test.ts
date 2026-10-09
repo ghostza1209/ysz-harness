@@ -17,7 +17,14 @@ const orchestrator = {
   readyQueue: () => [],
   runs: () => ({ live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
+  kill: async (id: number) => {
+    if (id === 13) throw new Error('docker rm failed');
+    actions.push(`kill ${id}`);
+  },
+  retryHostStep: async (id: number) => void actions.push(`retry ${id}`),
+  cleanUp: async (id: number) => void actions.push(`cleanup ${id}`),
 } as unknown as Orchestrator;
+const actions: string[] = [];
 const realLogs = createRunLogs(logDir);
 let sizeCalls = 0;
 const logs: RunLogs = { ...realLogs, size: (id) => (sizeCalls++, realLogs.size(id)) };
@@ -30,15 +37,18 @@ before(() => new Promise<void>((done) => server.listen(0, '127.0.0.1', () => {
 })));
 after(() => server.close());
 
-const get = (path: string, host = `localhost:${port}`) =>
+const send = (path: string, headers: Record<string, string> = {}, method = 'GET', host = `localhost:${port}`) =>
   new Promise<{ status: number; headers: Record<string, unknown>; body: string }>((resolve, reject) => {
-    request({ port, path, headers: { host } }, (res) => {
+    request({ port, path, method, headers: { host, ...headers } }, (res) => {
       res.setEncoding('utf8');
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body }));
     }).on('error', reject).end();
   });
+const get = (path: string, host = `localhost:${port}`) => send(path, {}, 'GET', host);
+/** A POST as the dashboard's own page sends it. */
+const post = (path: string, origin = `http://localhost:${port}`) => send(path, { origin }, 'POST');
 
 const statusFor = async (host: string) => (await get('/api/state', host)).status;
 
@@ -141,4 +151,26 @@ it('stops reading the log once the client disconnects', async () => {
   await sleep(POLL_MS * 10);
   assert.equal(sizeCalls, before);
   liveIds = [];
+});
+
+it('runs a Run control posted from the dashboard itself', async () => {
+  actions.length = 0;
+  for (const action of ['kill', 'retry', 'cleanup']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
+  assert.deepEqual(actions, ['kill 7', 'retry 7', 'cleanup 7']);
+});
+
+it('refuses a Run control from another origin, with no origin, or by GET, and does nothing', async () => {
+  actions.length = 0;
+  assert.equal((await post('/api/runs/7/kill', 'http://evil.example')).status, 403);
+  assert.equal((await post('/api/runs/7/kill', `http://localhost:${port + 1}`)).status, 403);
+  assert.equal((await send('/api/runs/7/kill', {}, 'POST')).status, 403);
+  assert.equal((await get('/api/runs/7/kill')).status, 405);
+  assert.equal((await send('/api/runs/7/kill', { origin: 'http://localhost' }, 'POST', 'evil.example')).status, 403);
+  assert.deepEqual(actions, []);
+});
+
+it("answers a Run control the orchestrator refuses with 409 and the reason", async () => {
+  const res = await post('/api/runs/13/kill');
+  assert.equal(res.status, 409);
+  assert.deepEqual(JSON.parse(res.body), { error: 'docker rm failed' });
 });

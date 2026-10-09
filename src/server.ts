@@ -20,7 +20,7 @@ const FULL_CHUNK_BYTES = 1024 * 1024;
 
 /**
  * Server-sent events for one Run's log: a `tail` event with the log's last TAIL_BYTES, then `log` events with
- * what was appended, then `end` once the Run no longer holds a slot. Stops polling the moment the client leaves.
+ * what was appended, then `end` once the Run is no longer live. Stops polling the moment the client leaves.
  */
 async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: RunLogs, runId: number, pollMs: number) {
   res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
@@ -63,7 +63,7 @@ async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: 
   }
 }
 
-/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); everything else is the built SPA from `staticDir`. */
+/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}; everything else is the built SPA from `staticDir`. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, pollMs = 1000): Server {
   return createServer(async (req, res) => {
     // Block DNS rebinding: a page on evil.com resolved to 127.0.0.1 still sends Host: evil.com.
@@ -86,6 +86,27 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
           projects: orchestrator.projectStatuses(),
         }),
       );
+      return;
+    }
+
+    const action = /^\/api\/runs\/(\d+)\/(kill|retry|cleanup)$/.exec(path);
+    if (action) {
+      // The Host check above lets a form posted from any web page through, so only this page's own Origin may act.
+      if (req.method !== 'POST' || req.headers.origin !== `http://${req.headers.host}`) {
+        res.statusCode = req.method === 'POST' ? 403 : 405;
+        res.end();
+        return;
+      }
+      const runId = Number(action[1]);
+      const act = { kill: () => orchestrator.kill(runId), retry: () => orchestrator.retryHostStep(runId), cleanup: () => orchestrator.cleanUp(runId) }[action[2] as 'kill'];
+      res.setHeader('content-type', 'application/json');
+      try {
+        await act();
+        res.end('{}');
+      } catch (err) {
+        res.statusCode = 409;
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      }
       return;
     }
 

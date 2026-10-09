@@ -132,6 +132,26 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual(await state(ids.unfailable), { status: 'in_progress', assignee: 'orchestrator', labels: ['ready-for-agent'] });
   });
 
+  it('hands a killed Ticket back: reason commented, orchestrator:skip added, ready-for-agent kept, open and unassigned, never Ready again', async () => {
+    await create('killing', 'will be killed', '-l', 'ready-for-agent,keep-me');
+    await createBeadsGateway().claim(project, ids.killing);
+
+    await createBeadsGateway().kill(project, ids.killing, 'Killed from the dashboard while agent.');
+
+    const { labels, ...rest } = await state(ids.killing);
+    assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'orchestrator:skip', 'ready-for-agent'] });
+    const [issue] = JSON.parse((await bd('show', ids.killing, '--json', '--include-comments')).stdout);
+    assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', 'Killed from the dashboard while agent.']]);
+    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.killing));
+  });
+
+  it('leaves the Ticket claimed when the kill hand-back cannot even comment', async () => {
+    await create('unkillable', 'cannot kill', '-l', 'ready-for-agent');
+    await createBeadsGateway().claim(project, ids.unkillable);
+    await assert.rejects(createBeadsGateway().kill({ ...project, repoPath: join(dir, 'missing') }, ids.unkillable, 'x'));
+    assert.deepEqual(await state(ids.unkillable), { status: 'in_progress', assignee: 'orchestrator', labels: ['ready-for-agent'] });
+  });
+
   it('shows a Ticket with its comments, parent epic and closed blockers only', async () => {
     await create('epic', 'the epic', '-t', 'epic', '-d', 'epic body');
     await create('child', 'the child', '--parent', ids.epic);

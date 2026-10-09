@@ -32,6 +32,8 @@ export interface BeadsGateway {
   release(project: Project, id: string): Promise<void>;
   /** The Run failed: comment why, then label needs-info, drop ready-for-agent and release the claim. */
   fail(project: Project, id: string, reason: string): Promise<void>;
+  /** The user killed the Run: comment why, then label orchestrator:skip and release the claim. ready-for-agent stays. */
+  kill(project: Project, id: string, reason: string): Promise<void>;
   showContext(project: Project, id: string): Promise<TicketContext>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
@@ -92,6 +94,12 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       // the claim, so a failure before it leaves the Ticket still claimed rather than half handed back.
       await write(project, ['comment', id, reason]);
       await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--assignee', '', '--status', 'open']);
+    },
+
+    async kill(project, id, reason) {
+      // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket claimed.
+      await write(project, ['comment', id, reason]);
+      await write(project, ['update', id, '--add-label', 'orchestrator:skip', '--assignee', '', '--status', 'open']);
     },
 
     async showContext(project, id) {

@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseEnv } from 'node:util';
+import { parseEnv, promisify } from 'node:util';
 import { claudeCode, createBindMountSandboxProvider, createWorktree } from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import type { Prepared } from './host';
@@ -16,13 +16,33 @@ export type AgentResult =
   | { outcome: 'needs-info'; question: string }
   | { outcome: 'stopped'; tail: string };
 
-type AgentRequest = { project: Project; runId: number; attempt: number } & Prepared;
+/** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
+type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal } & Prepared;
 
 export interface SandboxRunner {
   /** One implement agent in a fresh sandbox on the host-prepared clone. Throws if the agent errors or idles out. */
   implement(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult>;
   /** One review agent in a fresh sandbox on the same clone, after the implement agent. Throws like `implement`. */
   review(req: AgentRequest): Promise<AgentResult>;
+  /** Remove the Run's sandbox container now, if any is left. Throws unless it is gone afterwards: sandcastle's own teardown ignores docker errors. */
+  stop(prepared: Pick<Prepared, 'dir'>): Promise<void>;
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Remove every container that mounts the Run's clone. The clone path is unique per Attempt, so this never touches another
+ * Run's or the user's own containers. `docker rm -f` may lose a race with sandcastle's own removal, so what counts is
+ * whether the container is gone afterwards.
+ */
+export async function stopSandbox({ dir }: Pick<Prepared, 'dir'>, dockerBin = 'docker'): Promise<void> {
+  const listed = async () =>
+    (await execFileAsync(dockerBin, ['ps', '-aq', '--no-trunc', '--filter', `volume=${join(dir, 'repo')}`], { timeout: 30_000 })).stdout.split('\n').filter(Boolean);
+  const ids = await listed();
+  if (!ids.length) return;
+  const removal = await execFileAsync(dockerBin, ['rm', '-f', ...ids], { timeout: 60_000 }).then(() => null, (err: Error) => err);
+  const left = await listed();
+  if (left.length) throw new Error(`the sandbox container ${left.join(' ')} is still there${removal ? `: ${removal.message}` : ''}`);
 }
 
 const COMPLETE = '<promise>COMPLETE</promise>';
@@ -45,9 +65,10 @@ type CreateSandbox = Parameters<typeof createBindMountSandboxProvider>[0]['creat
 export function createSandboxRunner(root: string): SandboxRunner {
   async function runAgent(
     role: 'implement' | 'review',
-    { project, runId, attempt, branch, dir }: AgentRequest,
+    { project, runId, attempt, branch, dir, signal }: AgentRequest,
     promptArgs: Record<string, string>,
   ): Promise<AgentResult> {
+    signal.throwIfAborted();
     // Read per Run, so adding the token needs no restart. It reaches the sandbox only through the agent's env.
     const token = parseEnv(readFileSync(join(root, '.env'), 'utf8')).CLAUDE_CODE_OAUTH_TOKEN;
     if (!token) throw new Error('CLAUDE_CODE_OAUTH_TOKEN is missing from the ysz-harness .env');
@@ -79,6 +100,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
       promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
       completionSignal: [COMPLETE, NEEDS_INFO],
       idleTimeoutSeconds: 600,
+      signal,
       name: `run-${runId}-attempt${attempt}-${role}`,
       logging: { type: 'file', path: join(root, 'data/logs', `${runId}-attempt${attempt}-${role}.log`) },
       hooks: project.installCommand
@@ -96,5 +118,6 @@ export function createSandboxRunner(root: string): SandboxRunner {
           : '',
       }),
     review: (req) => runAgent('review', req, { BASE: req.base }),
+    stop: (prepared) => stopSandbox(prepared),
   };
 }

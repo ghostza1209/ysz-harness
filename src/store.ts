@@ -8,6 +8,8 @@ export type RunState =
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
 const SLOT_STATES = ['claimed', 'agent', 'host'];
+/** Runs the user can still act on: the slot holders and the ones waiting on a Retry or Kill. */
+const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 
 export interface RunRow {
   id: number;
@@ -22,12 +24,14 @@ export interface RunRow {
   note: string | null;
   startedAt: number;
   endedAt: number | null;
+  /** The Run's disposable clone while it exists on disk; null once removed or before the first one. */
+  cloneDir: string | null;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt' | 'cloneDir'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir',
 };
 
 export interface Store {
@@ -36,10 +40,11 @@ export interface Store {
   updateRun(id: number, patch: RunPatch): void;
   /** Project name of every Run holding a slot (one entry per Run). */
   slotProjects(): string[];
-  /** Runs holding a slot, oldest first. */
+  /** Runs still open to Kill, oldest first: those holding a slot, and needs-attention ones. */
   liveRuns(): RunRow[];
-  /** Runs that ended (or wait on the user), newest first. */
+  /** Runs that ended, newest first. */
   history(limit: number): RunRow[];
+  getRun(id: number): RunRow | undefined;
 }
 
 /** `:memory:` or a file path; the parent directory is created. */
@@ -62,10 +67,15 @@ export function openStore(path: string): Store {
     started_at INTEGER NOT NULL,
     ended_at INTEGER
   )`);
-  const inSlotStates = `state IN (${SLOT_STATES.map(() => '?').join(',')})`;
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
+    db.exec('ALTER TABLE runs ADD COLUMN clone_dir TEXT; PRAGMA user_version = 2');
+  }
+  const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at) VALUES (?, ?, ?, ?, ?)');
-  const live = db.prepare(`SELECT * FROM runs WHERE ${inSlotStates} ORDER BY id`);
-  const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inSlotStates}) ORDER BY id DESC LIMIT ?`);
+  const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
+  const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
+  const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC LIMIT ?`);
+  const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
   const toRow = (r: Record<string, unknown>): RunRow => ({
     id: r.id as number,
     project: r.project as string,
@@ -77,6 +87,7 @@ export function openStore(path: string): Store {
     note: r.note as string | null,
     startedAt: r.started_at as number,
     endedAt: r.ended_at as number | null,
+    cloneDir: r.clone_dir as string | null,
   });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt).lastInsertRowid),
@@ -87,8 +98,12 @@ export function openStore(path: string): Store {
         id,
       );
     },
-    slotProjects: () => live.all(...SLOT_STATES).map((row) => row.project as string),
-    liveRuns: () => live.all(...SLOT_STATES).map(toRow),
-    history: (limit) => ended.all(...SLOT_STATES, limit).map(toRow),
+    slotProjects: () => slotted.all(...SLOT_STATES).map((row) => row.project as string),
+    liveRuns: () => live.all(...LIVE_STATES).map(toRow),
+    history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
+    getRun: (id) => {
+      const row = byId.get(id);
+      return row && toRow(row);
+    },
   };
 }
