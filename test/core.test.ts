@@ -54,7 +54,7 @@ const fakeSandbox: SandboxRunner = { implement: (req) => agent(req) };
 const fakeHost: HostSteps = {
   async prepare(project, ticketId) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}` };
+    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}`, base: 'b'.repeat(40) };
   },
   async publish(_project, _ticket, { branch }) {
     hostSteps.push(`publish ${branch}`);

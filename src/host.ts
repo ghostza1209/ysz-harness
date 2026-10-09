@@ -16,6 +16,8 @@ const execFileAsync = promisify(execFile);
 export interface Prepared {
   branch: string;
   dir: string;
+  /** The origin/<baseBranch> sha the clone was made at. */
+  base: string;
 }
 
 export interface HostSteps {
@@ -73,34 +75,41 @@ function cloneTip(gitDir: string, branch: string): string {
 
 /**
  * Git follows alternates files and symlinks out of an object dir, so the sandbox could point pack-objects at another
- * repo's objects and get them pushed. Only plain files and dirs may be there. The sandbox has stopped, so no race.
+ * repo's objects and get them pushed, or point a ref read at a host file. Only plain files and dirs may be in objects/
+ * and refs/, under ASCII names: a case-insensitive disk serves info/Alternates to git as info/alternates. The sandbox
+ * has stopped, so no race.
  */
-function assertSelfContained(objects: string): void {
-  for (const path of [dirname(dirname(objects)), dirname(objects), objects]) {
+function assertSelfContained(gitDir: string): void {
+  for (const path of [dirname(gitDir), gitDir]) {
     if (!lstatSync(path).isDirectory()) throw new Error(`refusing to read the clone: ${path} is not a plain directory`);
   }
-  for (const entry of readdirSync(objects, { recursive: true, withFileTypes: true })) {
-    const path = join(entry.parentPath, entry.name);
-    if (!(entry.isFile() || entry.isDirectory()) || /^info\/(http-)?alternates$/.test(relative(objects, path))) {
-      throw new Error(`refusing to read the clone: ${relative(objects, path)} could point outside it`);
+  for (const sub of ['objects', 'refs']) {
+    const top = join(gitDir, sub);
+    if (!lstatSync(top).isDirectory()) throw new Error(`refusing to read the clone: ${sub} is not a plain directory`);
+    for (const entry of readdirSync(top, { recursive: true, withFileTypes: true })) {
+      const rel = relative(gitDir, join(entry.parentPath, entry.name));
+      if (!(entry.isFile() || entry.isDirectory()) || !/^[\w.-]+$/.test(entry.name) || /^objects\/info\/(http-)?alternates$/i.test(rel)) {
+        throw new Error(`refusing to read the clone: ${rel} could point outside it`);
+      }
     }
   }
 }
 
 /**
  * Copy the clone's commits on `branch` into the Project repo. `git fetch <clone>` would run upload-pack under the
- * clone's config, so the clone's object dir is only read as an alternate, and index-pack recomputes every object id.
+ * clone's config, so pack-objects reads the clone's object dir as its only store: a commit naming an object that only
+ * the Project repo holds fails instead of carrying it out. index-pack recomputes every object id.
  */
-async function fetchBack(project: Project, { branch, dir }: Prepared): Promise<void> {
+async function fetchBack(project: Project, { branch, dir, base }: Prepared): Promise<void> {
   const repo = project.repoPath;
   const gitDir = join(dir, 'repo/.git');
+  assertSelfContained(gitDir);
   const tip = cloneTip(gitDir, branch);
-  assertSelfContained(join(gitDir, 'objects'));
   const pack = await run(
     'git',
     ['-c', 'core.commitGraph=false', '-c', 'pack.useBitmaps=false', '-c', 'core.multiPackIndex=false', 'pack-objects', '--revs', '--stdout', '--quiet'],
     repo,
-    { input: `${tip}\n^origin/${project.baseBranch}\n`, env: { ...process.env, GIT_ALTERNATE_OBJECT_DIRECTORIES: join(gitDir, 'objects') } },
+    { input: `${tip}\n^${base}\n`, env: { ...process.env, GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') } },
   );
   await run('git', ['index-pack', '--stdin', '--fix-thin', '--strict'], repo, { input: pack });
   if ((await text('git', ['cat-file', '-t', tip], repo)) !== 'commit') throw new Error(`${branch} in the clone is not a commit`);
@@ -130,9 +139,10 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       mkdirSync(clonesDir, { recursive: true });
       const dir = mkdtempSync(join(clonesDir, `${project.name}-${ticketId}-`));
       const clone = join(dir, 'repo');
-      // No --shared: its alternates would point the sandbox into the repo's own object dir.
-      await run('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', repo, clone], dir, { timeout: 10 * 60_000 });
-      await run('git', ['remote', 'set-url', 'origin', url], clone);
+      // Only origin/<base>'s history: a local clone would copy the whole object dir, stashes and local branches included.
+      await run('git', ['init', '--quiet', clone], dir);
+      await run('git', ['fetch', '--quiet', '--no-tags', repo, `refs/remotes/origin/${base}`], clone, { timeout: 10 * 60_000 });
+      await run('git', ['remote', 'add', 'origin', url], clone);
       await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
       await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);
 
@@ -145,7 +155,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       writeFileSync(join(clone, '.orchestrator/ticket.json'), JSON.stringify(context, null, 2));
       mkdirSync(join(clone, '.git/info'), { recursive: true });
       appendFileSync(join(clone, '.git/info/exclude'), '.orchestrator/\n');
-      return { branch, dir };
+      return { branch, dir, base: sha };
     },
 
     async publish(project, ticket, prepared) {
@@ -155,8 +165,12 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       await fetchBack(project, prepared);
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
       // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
-      const touched = (await text('git', ['log', '-m', '-z', '--format=', '--name-only', range], repo)).split('\0');
-      if (touched.some((path) => path.trim().startsWith('.orchestrator/'))) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
+      // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
+      // Their content committed under another name is not caught.
+      const touched = (await text('git', ['log', '-m', '-z', '--format=', '--name-only', range], repo)).split('\0').map((path) => path.trim().toLowerCase());
+      if (touched.some((path) => path.startsWith('.orchestrator/'))) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
+      const secret = project.copyToWorktree?.find((file) => touched.includes(file.toLowerCase()));
+      if (secret) throw new Error(`refusing to push: ${secret} is committed on the branch`);
       await run('git', ['push', '-u', 'origin', branch], repo);
 
       const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));

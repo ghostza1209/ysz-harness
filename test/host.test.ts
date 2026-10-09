@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -160,6 +160,86 @@ describe('host steps against real git', () => {
     await assert.rejects(host.publish(project, ticket('t-6'), prepared));
     assert.throws(() => git(origin, 'cat-file', '-e', secret));
     assert.throws(() => git(repo, 'cat-file', '-e', secret));
+  });
+
+  it('clones only origin/<base>: no stash, local branch or unreachable object of the Project repo', async () => {
+    git(repo, 'switch', '-q', '-c', 'local-only');
+    commit(repo, 'local.txt', 'LOCAL ONLY');
+    const local = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'switch', '-q', 'develop');
+    writeFileSync(join(repo, 'a.txt'), 'STASHED SECRET');
+    git(repo, 'stash', '-q');
+    const stash = git(repo, 'rev-parse', 'stash');
+    const clone = join((await host.prepare(project, 't-7', context)).dir, 'repo');
+    git(repo, 'stash', 'drop', '-q');
+    git(repo, 'branch', '-q', '-D', 'local-only');
+    assert.throws(() => git(clone, 'cat-file', '-e', stash));
+    assert.throws(() => git(clone, 'cat-file', '-e', local));
+  });
+
+  it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', async () => {
+    const other = join(root, 'other-project-2');
+    git(root, 'init', '-q', other);
+    commit(other, 'secret.txt', 'TOP SECRET 2');
+    const secret = git(other, 'rev-parse', 'HEAD:secret.txt');
+    const prepared = await host.prepare(project, 't-8', context);
+    const clone = join(prepared.dir, 'repo');
+    git(clone, 'update-index', '--add', '--cacheinfo', `100644,${secret},leak.txt`, '--info-only');
+    writeFileSync(join(clone, '.git/objects/info/Alternates'), `${join(other, '.git/objects')}\n`);
+    git(clone, 'commit', '-q', '-m', 'leak');
+
+    await assert.rejects(host.publish(project, ticket('t-8'), prepared), /refusing to read the clone/);
+    assert.throws(() => git(origin, 'cat-file', '-e', secret));
+    assert.throws(() => git(repo, 'cat-file', '-e', secret));
+  });
+
+  it('packs only objects the clone holds, not ones it names from the Project repo\'s own store', async () => {
+    git(repo, 'switch', '-q', '-c', 'local-secret');
+    commit(repo, 'local-secret.txt', 'LOCAL SECRET');
+    const secret = git(repo, 'rev-parse', 'HEAD:local-secret.txt');
+    git(repo, 'switch', '-q', 'develop');
+    const prepared = await host.prepare(project, 't-11', context);
+    const clone = join(prepared.dir, 'repo');
+    git(clone, 'update-index', '--add', '--info-only', '--cacheinfo', `100644,${secret},leak.txt`);
+    const tree = git(clone, 'write-tree', '--missing-ok');
+    git(clone, 'update-ref', `refs/heads/${prepared.branch}`, git(clone, 'commit-tree', tree, '-p', 'HEAD', '-m', 'leak'));
+
+    await assert.rejects(host.publish(project, ticket('t-11'), prepared));
+    assert.throws(() => git(origin, 'cat-file', '-e', secret));
+    git(repo, 'branch', '-q', '-D', 'local-secret');
+  });
+
+  it('refuses a copyToWorktree or .orchestrator/ path committed in another case, which is the same file on a case-insensitive disk', async () => {
+    const prepared = await host.prepare(project, 't-12', context);
+    const clone = join(prepared.dir, 'repo');
+    git(clone, 'update-index', '--add', '--cacheinfo', `100644,${git(clone, 'hash-object', '-w', '.env')},.ENV`);
+    git(clone, 'commit', '-q', '-m', 'oops');
+    await assert.rejects(host.publish(project, ticket('t-12'), prepared), /\.env is committed/);
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-12'), '');
+  });
+
+  it('refuses a clone whose refs reach out of it through a symlink', async () => {
+    const prepared = await host.prepare(project, 't-9', context);
+    const clone = join(prepared.dir, 'repo');
+    commit(clone, 'b.txt', 'b');
+    const outside = join(root, 'outside-refs');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 't-9'), `${git(clone, 'rev-parse', 'HEAD')}\n`);
+    git(clone, 'switch', '-q', '--detach');
+    rmSync(join(clone, '.git/refs/heads/agent'), { recursive: true });
+    symlinkSync(outside, join(clone, '.git/refs/heads/agent'));
+
+    await assert.rejects(host.publish(project, ticket('t-9'), prepared), /refusing to read the clone/);
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-9'), '');
+  });
+
+  it('refuses to push a branch that commits a copyToWorktree file', async () => {
+    const prepared = await host.prepare(project, 't-10', context);
+    const clone = join(prepared.dir, 'repo');
+    git(clone, 'add', '-f', '.env');
+    git(clone, 'commit', '-q', '-m', 'oops');
+    await assert.rejects(host.publish(project, ticket('t-10'), prepared), /\.env is committed/);
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-10'), '');
   });
 
   it('runs nothing on the host for a sandbox that poisons its git dir and smuggles .orchestrator/ in through a merge', async () => {

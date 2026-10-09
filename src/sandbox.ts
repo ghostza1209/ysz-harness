@@ -38,12 +38,13 @@ export function createSandboxRunner(root: string): SandboxRunner {
       const create = (inner as unknown as { create: CreateSandbox }).create;
       const sandbox = createBindMountSandboxProvider({
         ...inner,
-        // The project mounts (e.g. the pnpm store) are added by docker itself, after these.
+        // Project.mounts are added by docker itself, after these.
         create: (opts) => create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] }),
       });
 
       const result = await worktree.run({
-        agent: claudeCode(MODEL, { effort: 'high', env: { CLAUDE_CODE_OAUTH_TOKEN: token } }),
+        // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
+        agent: claudeCode(MODEL, { effort: 'high', env: { CLAUDE_CODE_OAUTH_TOKEN: token }, captureSessions: false }),
         // No .beads, no ssh, no push credentials, and no host git dir: the clone's .git is its own.
         sandbox,
         // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
