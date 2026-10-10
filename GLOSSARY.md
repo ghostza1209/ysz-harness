@@ -2,8 +2,20 @@
 
 **Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), identified by its local repo. Each Project keeps its own Ticket queue.
 
+**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from.
+_Avoid_: sandcastle setup, adding a repo.
+
+**Smoke check**: An agent-free trial of a Project's sandbox: its install and a bounded check run on a fresh clone. Passing it is required for Onboarding, but is not Onboarding by itself.
+_Avoid_: dry run, test run.
+
+**Check service**: A Project's running dev service whose image runs the agent's checks, for a stack the sandbox can't run.
+_Avoid_: checkContainer (in prose), php container.
+
 **Ticket**: One unit of work in a Project's own Beads queue. Work tracked elsewhere (e.g. Jira) is not a Ticket until it is brought into that queue.
 _Avoid_: issue, task, job.
+
+**Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
+_Avoid_: issues, beads list.
 
 **Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, with no open blockers, not claimed, and not opted out of ysz.
 
