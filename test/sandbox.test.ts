@@ -11,6 +11,13 @@ const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
 const execFileAsync = promisify(execFile);
 
+it('keeps the agent prompts free of !`…`, which sandcastle runs as a shell command', () => {
+  for (const role of ['implement', 'review']) {
+    const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+    assert.deepEqual(prompt.match(/!`[^`]+`/g), null, role);
+  }
+});
+
 it('reads COMPLETE as complete', () => {
   assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete' });
 });
