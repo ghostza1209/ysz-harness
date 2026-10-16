@@ -241,7 +241,7 @@ h2 {
 }
 
 .stack.runs {
-  grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr));
 }
 
 /* A long queue scrolls in place so History stays in reach; the padding keeps the cards' hover glow inside the clip. */
