@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import type { BeadsGateway, Ticket } from '../src/beads';
+import type { BeadsGateway, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
 import type { HostSteps } from '../src/host';
 import type { Project } from '../src/projects';
@@ -38,6 +38,9 @@ let killError: Error | undefined;
 let markError: Error | undefined;
 /** Holds showContext open (a Run in the claimed state) until resolved. */
 let contextGate: Promise<void> | undefined;
+/** The In review blocker showContext reports, and the context each prepare was given. */
+let inReviewBlocker: TicketContext['inReviewBlocker'];
+let preparedContexts: TicketContext[];
 /** The sandbox containers the orchestrator was asked to remove (by clone dir), and the error stop() fails with. */
 let stops: string[];
 let stopError: Error | undefined;
@@ -99,7 +102,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [] };
+    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -148,8 +151,9 @@ const fakeHost: HostSteps = {
     preflights.push(project.name);
     if (failingPreflights.has(project.name)) throw new Error('compose php is not running');
   },
-  async prepare(project, ticketId) {
+  async prepare(project, ticketId, context) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
+    preparedContexts.push(context);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
@@ -197,6 +201,8 @@ beforeEach(() => {
   killError = undefined;
   markError = undefined;
   contextGate = undefined;
+  inReviewBlocker = null;
+  preparedContexts = [];
   stops = [];
   stopError = undefined;
   claimed = [];
@@ -605,6 +611,34 @@ describe('a happy-path Run', () => {
     await o.whenIdle();
     const [run] = o.runs().history;
     assert.deepEqual([run.startedAt, run.endedAt], [Date.parse('2026-10-08T12:00:00Z'), Date.parse('2026-10-08T12:01:30Z')]);
+  });
+});
+
+describe('a Run stacked on an In review blocker', () => {
+  const inReviewRun = (project: string, ticketId: string, prUrl: string) =>
+    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl });
+
+  it("hands prepare the blocker with its Project's In review PR", async () => {
+    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2' });
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it('fails the Run before any clone, releasing the Ticket, when no In review Run holds the blocker', async () => {
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [['failed', 'blocker tv0 is In review, but no In review Run has its PR to stack on']]);
   });
 });
 

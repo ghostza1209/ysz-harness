@@ -292,9 +292,70 @@ esac
     assert.deepEqual((context.ticket.comments as { text: string }[]).map((c) => c.text), ['remember the edge case']);
     assert.deepEqual([context.parent?.title, context.parent?.description], ['the epic', 'epic body']);
     assert.deepEqual(context.closedBlockers, [{ id: ids.doneBlocker, title: 'finished first', closeReason: 'shipped in abc123' }]);
+    assert.equal(context.inReviewBlocker, null);
   });
 
   it('shows a Ticket without a parent as parent null', async () => {
     assert.equal((await createBeadsGateway().showContext(project, ids.ready)).parent, null);
+  });
+});
+
+describe('Beads gateway with In review blockers, against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const ids: Record<string, string> = {};
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  async function create(key: string, title: string, ...flags: string[]) {
+    ids[key] = (await bd('create', title, '--silent', ...flags)).stdout.trim();
+  }
+  /** A Ticket a Run took to In review: in_progress, the Orchestrator's, labelled in-review. */
+  async function inReview(key: string, title: string) {
+    await create(key, title, '-l', 'ready-for-agent');
+    await bd('--actor', 'orchestrator', 'update', ids[key], '--claim');
+    await bd('update', ids[key], '--add-label', 'in-review');
+  }
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'beads-stack-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+    await inReview('reviewA', 'PR open A');
+    await inReview('reviewB', 'PR open B');
+    await create('done', 'merged long ago');
+    await bd('close', ids.done, '-r', 'done');
+    await create('working', 'a Run is still on it', '-l', 'ready-for-agent');
+    await bd('--actor', 'orchestrator', 'update', ids.working, '--claim');
+
+    await create('stacked', 'on A', '-l', 'ready-for-agent');
+    await bd('dep', 'add', ids.stacked, ids.reviewA);
+    await bd('dep', 'add', ids.stacked, ids.done);
+    await create('twoReviews', 'on A and B', '-l', 'ready-for-agent');
+    await bd('dep', 'add', ids.twoReviews, ids.reviewA);
+    await bd('dep', 'add', ids.twoReviews, ids.reviewB);
+    await create('onWorking', 'on a Run without a PR', '-l', 'ready-for-agent');
+    await bd('dep', 'add', ids.onWorking, ids.working);
+    await create('skipped', 'opted out, on A', '-l', 'ready-for-agent,orchestrator:skip');
+    await bd('dep', 'add', ids.skipped, ids.reviewA);
+    await create('unlabelled', 'not for agents, on A');
+    await bd('dep', 'add', ids.unlabelled, ids.reviewA);
+  });
+
+  after(() => rm(dir, { recursive: true, force: true }));
+
+  it('lists a Ticket whose only unclosed blocker is In review, and not one with two or with a blocker still being worked', async () => {
+    const tickets = await createBeadsGateway().listReady(project);
+    assert.deepEqual(
+      tickets.map(({ id, title, priority }) => ({ id, title, priority })),
+      [{ id: ids.stacked, title: 'on A', priority: 2 }],
+    );
+    assert.match(tickets[0].createdAt, /^\d{4}-\d\d-\d\dT/);
+  });
+
+  it('shows the In review blocker of a Ticket stacked on it', async () => {
+    const context = await createBeadsGateway().showContext(project, ids.stacked);
+    assert.deepEqual(context.inReviewBlocker, { id: ids.reviewA, title: 'PR open A' });
+    assert.deepEqual(context.closedBlockers.map((b) => b.id), [ids.done]);
   });
 });

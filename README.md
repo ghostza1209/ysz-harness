@@ -14,6 +14,7 @@
 2. When a slot is free (at most one Run per Project), ysz claims the Ticket and clones the repo on `agent/<ticket-id>`.
 3. The **Implement agent** works the Ticket in a sandbox; the **Review agent** then reviews and corrects it. A failed Attempt is retried once.
 4. The host pushes the branch and opens a PR against the Project's `baseBranch`. The bead gets a comment with the link and the `in-review` label.
+   A Ticket whose only unclosed blocker is `In review` does not wait for that merge: its Run clones the blocker's `agent/<id>` branch and opens a stacked PR onto it (`gh stack link`, needs the `gh-stack` extension). See [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md).
 5. If the agent needs information, the bead is handed back with a comment and the `needs-info` label.
 
 ## Requirements
@@ -54,7 +55,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | Resume a Run stuck in a host step | **Retry host step** on its card |
 | Read what a Run did | **Log** in the History list |
 
-After a Run ends `In review`, review and merge the PR yourself, then close the bead.
+After a Run ends `In review`, review and merge the PR yourself: ysz closes the bead once it sees the merge. When a stack falls behind `baseBranch`, press **Rebase stack** on the PR.
 
 ## Development
 

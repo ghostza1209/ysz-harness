@@ -13,18 +13,25 @@ export interface Ticket {
   createdAt: string;
 }
 
-/** What the agent gets in .orchestrator/ticket.json: the bead as bd prints it, its parent epic and the closed blockers. */
+/**
+ * What the agent gets in .orchestrator/ticket.json: the bead as bd prints it, its parent epic, the closed blockers,
+ * and the In review blocker the Run stacks on (its PR url added by the Orchestrator).
+ */
 export interface TicketContext {
   ticket: Record<string, unknown>;
   parent: Record<string, unknown> | null;
   closedBlockers: { id: string; title: string; closeReason: string }[];
+  inReviewBlocker: { id: string; title: string; prUrl?: string } | null;
 }
 
 /** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
 export const ORCHESTRATOR = 'orchestrator';
 
 export interface BeadsGateway {
-  /** Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no open blockers, no unclosed children. */
+  /**
+   * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no unclosed children, and every
+   * blocker closed except at most one In review.
+   */
   listReady(project: Project): Promise<Ticket[]>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
@@ -57,6 +64,23 @@ export interface BeadsGateway {
    */
   prClosed(project: Project, id: string, prUrl: string): Promise<boolean>;
 }
+
+/** The fields of a bead as `bd list --json` prints it that the gateway reads. */
+interface Bead {
+  id: string;
+  title: string;
+  priority: number;
+  created_at: string;
+  status: string;
+  assignee?: string;
+  labels?: string[] | null;
+  parent?: string;
+  dependencies?: { depends_on_id: string; type: string }[];
+}
+
+/** A Run left it In review: in_progress, the Orchestrator's, labelled in-review. */
+const isInReview = (b: Pick<Bead, 'status' | 'assignee' | 'labels'>) =>
+  b.status === 'in_progress' && b.assignee === ORCHESTRATOR && !!b.labels?.includes('in-review');
 
 export interface BeadsOptions {
   bin?: string;
@@ -95,8 +119,16 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
         // bd ready ignores parent-child links, so a parent would compete with its own children: it waits until they all close.
         bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']),
       ]);
-      const parents = new Set((JSON.parse(unclosed) as { parent?: string }[]).map((i) => i.parent));
-      const issues: { id: string; title: string; priority: number; created_at: string }[] = JSON.parse(out);
+      const beads: Bead[] = JSON.parse(unclosed);
+      const byId = new Map(beads.map((b) => [b.id, b]));
+      const parents = new Set(beads.map((b) => b.parent));
+      // bd ready counts an In review blocker as open; a Ticket whose only unclosed blocker is one stacks on its PR.
+      const stacked = beads.filter((b) => {
+        if (b.status !== 'open' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
+        const blockers = (b.dependencies ?? []).filter((d) => d.type === 'blocks').flatMap((d) => byId.get(d.depends_on_id) ?? []);
+        return blockers.length === 1 && isInReview(blockers[0]);
+      });
+      const issues: { id: string; title: string; priority: number; created_at: string }[] = [...JSON.parse(out), ...stacked];
       return issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
     },
 
@@ -154,7 +186,8 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       const closedBlockers = (ticket.dependencies ?? [])
         .filter((d: { dependency_type: string; status: string }) => d.dependency_type === 'blocks' && d.status === 'closed')
         .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
-      return { ticket, parent, closedBlockers };
+      const reviewing = (ticket.dependencies ?? []).find((d: Bead & { dependency_type: string }) => d.dependency_type === 'blocks' && isInReview(d));
+      return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null };
     },
 
     async markInReview(project, id, prUrl) {

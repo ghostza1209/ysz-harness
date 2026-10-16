@@ -16,8 +16,10 @@ const execFileAsync = promisify(execFile);
 export interface Prepared {
   branch: string;
   dir: string;
-  /** The origin/<baseBranch> sha the clone was made at. */
+  /** The sha the clone was made at: the tip of origin/<baseBranch>, or of the stacked-on branch. */
   base: string;
+  /** The In review blocker's branch and PR the clone starts on, which the PR then targets. Absent: baseBranch. */
+  stack?: { branch: string; prUrl: string };
   /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
   key: string;
 }
@@ -25,12 +27,16 @@ export interface Prepared {
 export interface HostSteps {
   /** Run the Project's preflight command in its repo. Throws if it fails or times out; passes when the Project has none. */
   preflight(project: Project): Promise<void>;
-  /** A fresh clone on `agent/<ticket-id>` at the just-fetched origin/<baseBranch>, with the Ticket context in place. */
+  /**
+   * A fresh clone on `agent/<ticket-id>` with the Ticket context in place, at the just-fetched origin/<baseBranch>,
+   * or at the In review blocker's `agent/<id>` when the context names one with its PR.
+   */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
-  /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over origin/<baseBranch>. */
+  /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over what it was cloned onto. */
   collect(project: Project, prepared: Prepared, signal?: AbortSignal): Promise<{ tip: string; commits: number }>;
   /**
-   * Bring the agent's branch back into the Project repo, push it and open the PR against baseBranch. Returns the PR URL.
+   * Bring the agent's branch back into the Project repo, push it and open the PR against what it was cloned onto, then
+   * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). Returns the PR URL.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
@@ -183,6 +189,11 @@ export function prTitleAndBody(output: string, key: string, ticketTitle: string)
   return { title: `${m[1]}${m[2] ?? ''}: ${key} ${m[3]}`, body: rest.join('\n').trim() };
 }
 
+/** The branch a Run's clone was made on, which its PR targets. */
+const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? project.baseBranch;
+
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 const clip = (s: string) => (s.length > PROMPT_GIT_CHARS ? `${s.slice(0, PROMPT_GIT_CHARS)}\n[truncated]` : s);
 
 export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostSteps {
@@ -194,7 +205,9 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
     async prepare(project, ticketId, context, signal) {
       const { run, text } = within(signal);
       const repo = project.repoPath;
-      const base = project.baseBranch;
+      const blocker = context.inReviewBlocker;
+      const stack = blocker?.prUrl ? { branch: `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
+      const base = stack?.branch ?? project.baseBranch;
       const branch = `agent/${ticketId}`;
 
       await run('git', ['fetch', 'origin', base], repo);
@@ -226,12 +239,12 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha, key: ticketKey(ticketId, context) };
+      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }) };
     },
 
     async collect(project, prepared, signal) {
       const tip = await fetchBack(project, prepared, undefined, signal);
-      const commits = Number(await within(signal).text('git', ['rev-list', '--count', `origin/${project.baseBranch}..${prepared.branch}`], project.repoPath));
+      const commits = Number(await within(signal).text('git', ['rev-list', '--count', `origin/${onto(project, prepared)}..${prepared.branch}`], project.repoPath));
       return { tip, commits };
     },
 
@@ -239,7 +252,8 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const { run, text } = within(signal);
       const repo = project.repoPath;
       const { branch } = prepared;
-      const range = `origin/${project.baseBranch}..${branch}`;
+      const base = onto(project, prepared);
+      const range = `origin/${base}..${branch}`;
       await fetchBack(project, prepared, tip, signal);
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
       // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
@@ -253,7 +267,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       await run('git', ['push', '-u', 'origin', branch], repo);
 
       const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));
-      const diff = clip(await text('git', ['diff', `origin/${project.baseBranch}...${branch}`], repo));
+      const diff = clip(await text('git', ['diff', `origin/${base}...${branch}`], repo));
       // In an empty dir with only user settings and the Skill tool: the change is agent-written text, so it gets nothing to act on.
       const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
       try {
@@ -261,7 +275,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         const output = await text(
           'claude',
           [
-            '-p', PR_BODY_PROMPT(ticket, project.baseBranch, log, diff),
+            '-p', PR_BODY_PROMPT(ticket, base, log, diff),
             '--model', model, '--effort', 'high',
             '--setting-sources', 'user', '--strict-mcp-config',
             '--tools', 'Skill', '--allowedTools', 'Skill',
@@ -274,15 +288,26 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         if (!body) throw new Error('claude -p returned an empty PR body');
         writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
         // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
-        step(`Opening the PR against ${project.baseBranch}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
+        step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
         const env = await ghEnv(project);
         const out = await text(
           'gh',
-          ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', title, '--body-file', join(tmp, 'body.md')],
+          ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md')],
           repo,
           { env },
         );
-        return out.split('\n').pop()!;
+        const prUrl = out.split('\n').pop()!;
+        if (prepared.stack) {
+          // The PR already targets the blocker's branch; the GitHub stack adds the stack map and retargets it once the blocker merges.
+          // --base is the blocker's own base: any other, and gh stack link retargets the blocker's PR onto it. A blocker already
+          // in a stack fails the link (it would drop that stack's upper PRs), so a second dependent stays a plain PR.
+          const blocker = prepared.stack.prUrl;
+          step(`Stacking it on ${blocker}`);
+          await text('gh', ['pr', 'view', blocker, '--json', 'baseRefName'], repo, { env })
+            .then((out) => text('gh', ['stack', 'link', '--base', JSON.parse(out).baseRefName, blocker, prUrl], repo, { env }))
+            .catch((err) => step(`Could not stack it on ${blocker}, so it stays a plain PR onto ${base}: ${message(err)}`));
+        }
+        return prUrl;
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

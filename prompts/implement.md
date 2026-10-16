@@ -2,7 +2,7 @@
 
 You are an autonomous coding agent. Implement exactly one Ticket in this repository, then stop.
 
-The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first. It holds the Ticket with its description, acceptance criteria and comments, its parent epic, and the blockers that are already closed together with why they closed. Treat the acceptance criteria as the definition of done.
+The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first. It holds the Ticket with its description, acceptance criteria and comments, its parent epic, and the blockers that are already closed together with why they closed. When `inReviewBlocker` is set, this branch starts on that blocker's work, whose PR is still awaiting review: build on its code rather than redo it. Treat the acceptance criteria as the definition of done.
 
 {{PREVIOUS_ATTEMPT}}
 ## Workflow

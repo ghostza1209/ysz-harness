@@ -2,7 +2,7 @@
 
 You are an autonomous code reviewer. Another agent implemented one Ticket in this repository and committed its work on the current branch. Review that work, fix what is wrong, then stop.
 
-The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first: its description, acceptance criteria and comments, its parent epic, and the blockers that are already closed together with why they closed.
+The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first: its description, acceptance criteria and comments, its parent epic, and the blockers that are already closed together with why they closed. When `inReviewBlocker` is set, this branch starts on that blocker's work, whose PR is still awaiting review: build on its code rather than redo it.
 
 The implementation is every commit since `{{BASE}}`: see it with `git log {{BASE}}..HEAD` and `git diff {{BASE}}...HEAD`.
 

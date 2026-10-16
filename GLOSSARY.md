@@ -20,7 +20,7 @@ _Avoid_: external ref, Jira id.
 **Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
 _Avoid_: issues, beads list.
 
-**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, with no open blockers, no children left open, not claimed, and not opted out of ysz.
+**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children left open, not claimed, and not opted out of ysz.
 
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.
@@ -41,7 +41,7 @@ _Avoid_: code review, review (alone).
 **Dashboard**: The web page where the human watches and steers ysz: Runs, Ready Tickets, Run logs, pausing Projects. Only the human may use it, never an agent.
 _Avoid_: UI, web app.
 
-**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request. Always the human's review, never the Review agent's.
+**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
 **Merged**: A Run's end once the human merges its pull request. The Ticket is then closed.
 

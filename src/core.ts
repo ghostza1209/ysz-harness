@@ -187,8 +187,18 @@ export function createOrchestrator(deps: {
     const { signal } = control.ctl;
     try {
       const context = await beads.showContext(project, ticket.id);
+      const blocker = context.inReviewBlocker;
+      if (blocker) {
+        // The Run stacks on the blocker's PR, which only its In review Run knows.
+        const prUrl = store.inReview().find((r) => r.project === project.name && r.ticketId === blocker.id)?.prUrl;
+        if (!prUrl) throw new Error(`blocker ${blocker.id} is In review, but no In review Run has its PR to stack on`);
+        context.inReviewBlocker = { ...blocker, prUrl };
+      }
 
-      /** One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch. A kill throws out of it. */
+      /**
+       * One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch, or of the
+       * In review blocker's branch. A kill throws out of it.
+       */
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
         store.updateRun(runId, { state: 'claimed', attempt: n });
