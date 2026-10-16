@@ -580,14 +580,13 @@ export function App() {
                         <span className="tag">{q.project}</span>
                         <span className={`tag prio p${q.priority}`}>P{q.priority}</span>
                         <Copy text={q.id} />
-                        <span className="grow" />
-                        <span className="mute" title={t.ageTitle}>
-                          {ago(q.ageMs, t)}
-                        </span>
                       </div>
                       <div className="title">{q.title}</div>
                       <div className="row">
                         <span className={`mute grow ${q.runNow ? 'next' : ''}`}>{q.runNow ? t.runNowNext : (t.wait[q.waitReason] ?? q.waitReason)}</span>
+                        <span className="mute" title={t.ageTitle}>
+                          {ago(q.ageMs, t)}
+                        </span>
                         {!q.runNow && q.waitReason !== 'not onboarded' && (
                           <button className="small" onClick={() => runNow(q)}>
                             {t.runNow}

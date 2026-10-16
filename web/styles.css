@@ -252,22 +252,10 @@ h2 {
   margin: -4px -8px 0 -4px;
 }
 
-/* One line: a long id shortens instead of pushing the age onto its own row. The minmax(0) tracks let it shrink. */
+/* The minmax(0) tracks let a card shrink to the column instead of stretching it. */
 .stack.queue,
 .card.queue {
   grid-template-columns: minmax(0, 1fr);
-}
-
-.card.queue > .row:first-child {
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-
-.card.queue .copy,
-.card.queue .copy code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Summary strip: Run counts and per-Project pause switches */
