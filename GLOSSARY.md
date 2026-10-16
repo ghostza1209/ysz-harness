@@ -20,7 +20,7 @@ _Avoid_: external ref, Jira id.
 **Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
 _Avoid_: issues, beads list.
 
-**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, with no open blockers, not claimed, and not opted out of ysz.
+**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, with no open blockers, no children left open, not claimed, and not opted out of ysz.
 
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.

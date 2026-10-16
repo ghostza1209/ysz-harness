@@ -32,6 +32,9 @@ describe('Beads gateway against real bd', () => {
     await bd('dep', 'add', ids.blocked, ids.blocker);
     await create('assigned', 'claimed by someone', '-l', 'ready-for-agent', '-a', 'someone');
     await create('unlabelled', 'no label');
+    await create('parent', 'split into children');
+    await create('child', 'open child', '--parent', ids.parent);
+    await bd('update', ids.parent, '--add-label', 'ready-for-agent');
   });
 
   after(() => rm(dir, { recursive: true, force: true }));
@@ -49,6 +52,12 @@ describe('Beads gateway against real bd', () => {
     await bd('close', ids.blocker, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).map((t) => t.id).sort();
     assert.deepEqual(found, [ids.blocked, ids.ready].sort());
+  });
+
+  it('holds a parent back until every child is closed', async () => {
+    await bd('close', ids.child, '-r', 'done');
+    const found = (await createBeadsGateway().listReady(project)).map((t) => t.id).sort();
+    assert.deepEqual(found, [ids.blocked, ids.parent, ids.ready].sort());
   });
 
   it('kills a bd call that runs past the timeout', async () => {

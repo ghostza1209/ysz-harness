@@ -24,7 +24,7 @@ export interface TicketContext {
 export const ORCHESTRATOR = 'orchestrator';
 
 export interface BeadsGateway {
-  /** Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no open blockers. */
+  /** Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no open blockers, no unclosed children. */
   listReady(project: Project): Promise<Ticket[]>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
@@ -90,12 +90,14 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
 
   return {
     async listReady(project) {
-      const out = await bd([
-        '--readonly', '-C', project.repoPath,
-        'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '-u', '-n', '0', '--json',
+      const [out, unclosed] = await Promise.all([
+        bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '-u', '-n', '0', '--json']),
+        // bd ready ignores parent-child links, so a parent would compete with its own children: it waits until they all close.
+        bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']),
       ]);
+      const parents = new Set((JSON.parse(unclosed) as { parent?: string }[]).map((i) => i.parent));
       const issues: { id: string; title: string; priority: number; created_at: string }[] = JSON.parse(out);
-      return issues.map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      return issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
     },
 
     async claim(project, id) {
