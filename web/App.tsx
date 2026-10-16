@@ -561,7 +561,7 @@ export function App() {
                   {t.readyQueue} <span className="count">{view.ready.length}</span>
                 </h2>
                 {view.ready.length === 0 && <Empty icon="☰" title={t.noReady} hint={t.noReadyHint} />}
-                <div className="stack">
+                <div className="stack queue">
                   {view.ready.map((q, i) => (
                     <article className="card queue" key={`${q.project}/${q.id}`}>
                       <div className="row">
