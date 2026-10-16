@@ -22,6 +22,7 @@ const orchestrator = {
     actions.push(`kill ${id}`);
   },
   retryHostStep: async (id: number) => void actions.push(`retry ${id}`),
+  requeue: async (id: number) => void actions.push(`requeue ${id}`),
   cleanUp: async (id: number) => void actions.push(`cleanup ${id}`),
   setPaused: (project: string, paused: boolean) => void actions.push(`${paused ? 'pause' : 'resume'} ${project}`),
   runNow: (project: string, id: string) => {
@@ -196,8 +197,8 @@ it('stops reading the log once the client disconnects', async () => {
 
 it('runs a Run control posted from the dashboard itself', async () => {
   actions.length = 0;
-  for (const action of ['kill', 'retry', 'cleanup']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
-  assert.deepEqual(actions, ['kill 7', 'retry 7', 'cleanup 7']);
+  for (const action of ['kill', 'retry', 'requeue', 'cleanup']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
+  assert.deepEqual(actions, ['kill 7', 'retry 7', 'requeue 7', 'cleanup 7']);
 });
 
 it('runs pause, resume and Run now posted from the dashboard itself, decoding the names', async () => {

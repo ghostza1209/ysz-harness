@@ -53,6 +53,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |
 | Stop a live Run | **Kill** on its card: the Ticket gets `orchestrator:skip` |
 | Resume a Run stuck in a host step | **Retry host step** on its card |
+| Send a failed Run's Ticket back to the Ready queue | **Retry** on its History row |
 | Read what a Run did | **Log** in the History list |
 
 After a Run ends `In review`, review and merge the PR yourself: ysz closes the bead once it sees the merge. When a stack falls behind `baseBranch`, press **Rebase stack** on the PR.

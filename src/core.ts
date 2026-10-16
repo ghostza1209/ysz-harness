@@ -64,6 +64,8 @@ export interface Orchestrator {
   recover(): Promise<string[]>;
   /** Resume a needs-attention Run from the host step that failed. Needs a free slot. Resolves once started, not finished. */
   retryHostStep(runId: number): Promise<void>;
+  /** Retry a failed Run: put its Ticket back in the Ready queue for a new Run. Only the Ticket's newest Run; the row stays failed. */
+  requeue(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
   cleanUp(runId: number): Promise<void>;
   /**
@@ -482,6 +484,13 @@ export function createOrchestrator(deps: {
       if (busy.length >= SLOTS_TOTAL || busy.includes(run.project)) throw new Error('No free slot for this Project yet; retry when a Run finishes');
       control.parked = undefined;
       track(control, finish(runId, control, job)); // takes the slot synchronously
+    },
+
+    async requeue(runId) {
+      const run = store.getRun(runId);
+      if (run?.state !== 'failed' || store.lastRunState(run.project, run.ticketId) !== 'failed') throw new Error(`Run ${runId} has no failure to retry`);
+      await beads.requeue(byName.get(run.project)!, run.ticketId);
+      failed.delete(key(run.project, run.ticketId));
     },
 
     async cleanUp(runId) {

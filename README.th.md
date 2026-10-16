@@ -53,6 +53,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |
+| ส่ง Ticket ของ Run ที่ล้มเหลวกลับเข้าคิว Ready | กด **ลองใหม่** ในแถวของมันใน History |
 | ดูว่า Run ทำอะไรไปบ้าง | กด **Log** ในรายการ History |
 
 เมื่อ Run จบที่สถานะ `In review` ให้รีวิวและ merge PR เอง ysz จะปิด bead ให้เมื่อเห็นว่า merge แล้ว ถ้า stack ตามหลัง `baseBranch` ให้กด **Rebase stack** ที่หน้า PR

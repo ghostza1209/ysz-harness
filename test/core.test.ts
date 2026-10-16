@@ -88,6 +88,9 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (failError) throw failError;
     writes.push(`fail ${project.name}/${id}: ${reason}`);
   },
+  async requeue(project, id) {
+    writes.push(`requeue ${project.name}/${id}`);
+  },
   async kill(project, id, reason) {
     if (killError) throw killError;
     writes.push(`kill ${project.name}/${id}: ${reason}`);
@@ -1109,6 +1112,50 @@ describe('Kill', () => {
     await o.tick();
     await flush();
     assert.deepEqual(writes.filter((w) => w.startsWith('claim')), ['claim thaivis/tv1', 'claim thaivis/tv2']);
+  });
+});
+
+describe('Retry a failed Run', () => {
+  async function failedRun() {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+
+  it('puts the Ticket back in the Ready Queue and keeps the failed row as it was', async () => {
+    const o = await failedRun();
+    const [before] = o.runs().history;
+    writes = [];
+
+    await o.requeue(before.id);
+
+    assert.deepEqual(writes, ['requeue thaivis/tv1']);
+    assert.deepEqual(o.runs().history, [before]);
+  });
+
+  it('lets a Ticket whose hand-back failed be picked again', async () => {
+    failError = new Error('bd timed out');
+    const o = await failedRun();
+    await o.requeue(o.runs().history[0].id);
+    await o.poll();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1', 'requeue thaivis/tv1', 'claim thaivis/tv1', 'release thaivis/tv1']);
+  });
+
+  it('refuses a Run that did not fail, or whose Ticket has a newer Run, and writes nothing', async () => {
+    const o = await failedRun();
+    const [old] = o.runs().history;
+    writes = [];
+    for (const state of ['needs-attention', 'in-review', 'killed'] as const) {
+      await assert.rejects(o.requeue(startRun('fazwaz', state)), /no failure to retry/);
+    }
+    store.insertRun({ project: 'thaivis', ticketId: 'tv1', title: 'again', state: 'in-review', startedAt: now });
+    await assert.rejects(o.requeue(old.id), /no failure to retry/);
+    assert.deepEqual(writes, []);
   });
 });
 

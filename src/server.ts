@@ -67,7 +67,7 @@ async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: 
 /** A year: the token lives in data/ across restarts, so the cookie can too. */
 const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
 
-/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
   // An empty token would match a missing cookie.
   if (!token) throw new Error('the Dashboard needs a token');
@@ -120,10 +120,15 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
     }
 
     const post = ((): (() => unknown) | undefined => {
-      const run = /^\/api\/runs\/(\d+)\/(kill|retry|cleanup)$/.exec(path);
+      const run = /^\/api\/runs\/(\d+)\/(kill|retry|requeue|cleanup)$/.exec(path);
       if (run) {
         const runId = Number(run[1]);
-        return { kill: () => orchestrator.kill(runId), retry: () => orchestrator.retryHostStep(runId), cleanup: () => orchestrator.cleanUp(runId) }[run[2] as 'kill'];
+        return {
+          kill: () => orchestrator.kill(runId),
+          retry: () => orchestrator.retryHostStep(runId),
+          requeue: () => orchestrator.requeue(runId),
+          cleanup: () => orchestrator.cleanUp(runId),
+        }[run[2] as 'kill'];
       }
       const pause = /^\/api\/projects\/([^/]+)\/(pause|resume)$/.exec(path);
       if (pause) return () => orchestrator.setPaused(decodeURIComponent(pause[1]), pause[2] === 'pause');

@@ -106,6 +106,8 @@ export const en = {
   log: 'Log',
   cleanUp: 'Clean up',
   cleanedUp: (id: string) => `Cleaned up ${id}`,
+  requeue: 'Retry',
+  requeued: (id: string) => `${id} is back in the queue: a new Run takes it once it is Ready`,
   dismiss: 'Dismiss',
 
   logView: 'Log view',
@@ -145,7 +147,7 @@ export const en = {
     },
     history: {
       title: 'History',
-      body: 'Ended Runs and Runs In review, newest first. Filter by state or Project, search, open the PR or the log, and Clean up a failed Run’s clone.',
+      body: 'Ended Runs and Runs In review, newest first. Filter by state or Project, search, open the PR or the log, Retry a failed Run, and Clean up a failed Run’s clone.',
     },
     prefs: { title: 'Preferences', body: 'Language, sound, light or dark theme, this tour again, and whether the Dashboard is connected to ysz.' },
   } satisfies Record<string, Step | string>,
@@ -248,6 +250,8 @@ export const th: Dict = {
   log: 'Log',
   cleanUp: 'ลบ clone',
   cleanedUp: (id) => `ลบ clone ของ ${id} แล้ว`,
+  requeue: 'ลองใหม่',
+  requeued: (id) => `ใส่ ${id} กลับเข้าคิวแล้ว Run ใหม่จะหยิบไปเมื่อ Ticket พร้อม (Ready)`,
   dismiss: 'ปิด',
 
   logView: 'มุมมอง log',
@@ -287,7 +291,7 @@ export const th: Dict = {
     },
     history: {
       title: 'ประวัติ',
-      body: 'Run ที่จบแล้วและ Run ที่ In review ใหม่สุดอยู่บน กรองตามสถานะหรือ Project, ค้นหา, เปิด PR หรือ log และลบ clone ของ Run ที่ล้มเหลว',
+      body: 'Run ที่จบแล้วและ Run ที่ In review ใหม่สุดอยู่บน กรองตามสถานะหรือ Project, ค้นหา, เปิด PR หรือ log, ลองใหม่ หรือลบ clone ของ Run ที่ล้มเหลว',
     },
     prefs: { title: 'การตั้งค่า', body: 'ภาษา, เสียง, ธีมสว่างหรือมืด, เปิดทัวร์นี้อีกครั้ง และสถานะการเชื่อมต่อกับ ysz' },
   },

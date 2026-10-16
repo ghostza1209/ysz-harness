@@ -385,7 +385,7 @@ export function App() {
     toast(failed.length ? (resume ? t.couldNotResume(names) : t.couldNotPause(names)) : resume ? t.resumedAll : t.pausedAll, failed.length > 0);
     await load();
   };
-  const act = (r: RunRow, action: 'kill' | 'retry' | 'cleanup', done: (id: string) => string) => post(`/api/runs/${r.id}/${action}`, done(r.ticketId));
+  const act = (r: RunRow, action: 'kill' | 'retry' | 'requeue' | 'cleanup', done: (id: string) => string) => post(`/api/runs/${r.id}/${action}`, done(r.ticketId));
   const kill = (r: RunRow) => {
     if (window.confirm(t.killConfirm(r.ticketId))) void act(r, 'kill', t.killed);
   };
@@ -407,6 +407,17 @@ export function App() {
         (!q || r.ticketId.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
     );
   }, [history, filter, project, query]);
+  /** Failed Runs a Retry may re-queue: only each Ticket's newest Run, and none of a Ticket that has a live Run. */
+  const retryable = useMemo(() => {
+    const seen = new Set(view?.runs.live.map((r) => `${r.project}/${r.ticketId}`));
+    const ids = new Set<number>();
+    for (const r of history) {
+      const k = `${r.project}/${r.ticketId}`;
+      if (!seen.has(k) && r.state === 'failed') ids.add(r.id);
+      seen.add(k);
+    }
+    return ids;
+  }, [view, history]);
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
@@ -655,6 +666,11 @@ export function App() {
                               <path d="M3 4.5 6.5 8 3 11.5M8.5 11.5H13" />
                             </svg>
                             {t.log}
+                          </button>
+                        )}
+                        {retryable.has(r.id) && (
+                          <button className="small" onClick={() => void act(r, 'requeue', t.requeued)}>
+                            {t.requeue}
                           </button>
                         )}
                         {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (

@@ -174,6 +174,24 @@ describe('Beads gateway against real bd', () => {
     assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.failing));
   });
 
+  it('re-queues a failed Ticket: needs-info dropped, ready-for-agent back, Ready again', async () => {
+    await create('requeued', 'failed then retried', '-l', 'ready-for-agent,keep-me');
+    await createBeadsGateway().claim(project, ids.requeued);
+    await createBeadsGateway().fail(project, ids.requeued, 'the agent made no commits');
+
+    await createBeadsGateway().requeue(project, ids.requeued);
+
+    const { labels, ...rest } = await state(ids.requeued);
+    assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'ready-for-agent'] });
+    assert.ok((await createBeadsGateway().listReady(project)).some((t) => t.id === ids.requeued));
+  });
+
+  it('re-queues a Ticket that was only released, never labelled needs-info', async () => {
+    await create('released', 'released on a failure', '-l', 'ready-for-agent');
+    await createBeadsGateway().requeue(project, ids.released);
+    assert.deepEqual(await state(ids.released), { status: 'open', assignee: '', labels: ['ready-for-agent'] });
+  });
+
   it('leaves the Ticket claimed when the failed hand-back cannot even comment', async () => {
     await create('unfailable', 'cannot fail', '-l', 'ready-for-agent');
     await createBeadsGateway().claim(project, ids.unfailable);
