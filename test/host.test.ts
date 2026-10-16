@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createHostSteps } from '../src/host';
+import { createHostSteps, prTitleAndBody, ticketKey } from '../src/host';
 import type { Project } from '../src/projects';
 
 /** These tests drive real git against a throwaway origin and Project repo, with fake `claude` and `gh` on PATH. */
@@ -66,7 +66,7 @@ describe('host steps against real git', () => {
     const bin = join(root, 'bin');
     mkdirSync(bin);
     script(join(bin, 'claude'), `pwd > ${log}/claude.cwd\nprintf '%s\\n' "$@" > ${log}/claude.argv\necho 'the PR body'`);
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none}" > ${log}/gh.token\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.body; shift; done\necho https://example.test/pull/1`);
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none}" > ${log}/gh.token\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.body; [ "$1" = --title ] && printf '%s' "$2" > ${log}/gh.title; shift; done\necho https://example.test/pull/1`);
     process.env.PATH = `${bin}:${savedPath}`;
   });
 
@@ -229,6 +229,23 @@ describe('host steps against real git', () => {
     }
   });
 
+  it('titles the PR as a Conventional Commit naming the Ticket by its Jira key, and keeps the rest as the body', async () => {
+    const prepared = await host.prepare(project, 't-16', { ...context, ticket: { id: 't-16', external_ref: 'jira-OP-7' } });
+    commit(join(prepared.dir, 'repo'), 'd.txt', 'd');
+    const bin = join(root, 'bin-title');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'claude'), `printf 'feat(api): run the checks\\n\\n## Summary\\nthe body\\n'`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await host.publish(project, ticket('t-16'), prepared);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'feat(api): OP-7 run the checks');
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
+  });
+
   it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
     const prepared = await host.prepare(project, 't-14', context);
     const clone = join(prepared.dir, 'repo');
@@ -252,6 +269,7 @@ describe('host steps against real git', () => {
 
     assert.equal(git(origin, 'rev-parse', 'agent/t-15'), git(clone, 'rev-parse', 'HEAD'));
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
+    assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'chore: t-15 a ticket');
   });
 
   it('refuses a branch with no commits', async () => {
@@ -415,5 +433,26 @@ describe('host steps against real git', () => {
     assert.equal(realRepoGitState(), before);
     assert.equal(git(origin, 'branch', '--list', branch), '');
     assert.equal(existsSync(join(log, 'claude.cwd')), false);
+  });
+});
+
+describe('PR title', () => {
+  it('names a Ticket by its own Jira key, else its parent epic\'s, else its own id', () => {
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [] });
+    assert.equal(key({ external_ref: 'jira-OP-7' }, { external_ref: 'jira-OP-1' }), 'OP-7');
+    assert.equal(key({}, { external_ref: 'jira-OP-1' }), 'OP-1');
+    assert.equal(key({ external_ref: 'gh-12' }, null), 't-9');
+    assert.equal(key({}, {}), 't-9');
+  });
+
+  it('puts the key before the subject of a Conventional Commit first line, with or without a scope', () => {
+    assert.deepEqual(prTitleAndBody('fix(chat): render the badge\n\nbody', 'OP-2', 'Render it'), { title: 'fix(chat): OP-2 render the badge', body: 'body' });
+    assert.deepEqual(prTitleAndBody('refactor: drop ClaimTypeEnum\n\nbody', 'OP-2', 'Drop it'), { title: 'refactor: OP-2 drop ClaimTypeEnum', body: 'body' });
+  });
+
+  it('falls back to chore and the Ticket title, keeping the whole output as the body, when the first line is no Conventional Commit', () => {
+    for (const output of ['## Summary\nbody', 'feature: add x\n\nbody', 'feat!: drop the API\n\nbody', 'Feat: add x\n\nbody']) {
+      assert.deepEqual(prTitleAndBody(output, 'OP-2', 'Add x'), { title: 'chore: OP-2 Add x', body: output }, output);
+    }
   });
 });

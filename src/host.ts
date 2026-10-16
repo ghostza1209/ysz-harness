@@ -18,6 +18,8 @@ export interface Prepared {
   dir: string;
   /** The origin/<baseBranch> sha the clone was made at. */
   base: string;
+  /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
+  key: string;
 }
 
 export interface HostSteps {
@@ -148,12 +150,38 @@ async function fetchBack(project: Project, { branch, dir, base }: Prepared, want
   return tip;
 }
 
+/** No `!`: only the human marks a breaking change, which bumps a release-please major version. */
+const COMMIT_TYPES = ['build', 'chore', 'ci', 'docs', 'feat', 'fix', 'perf', 'refactor', 'revert', 'style', 'test'];
+const CONVENTIONAL_TITLE = new RegExp(`^(${COMMIT_TYPES.join('|')})(\\([\\w./-]+\\))?: (\\S.*)$`);
+
 const PR_BODY_PROMPT = (ticket: { id: string; title: string }, base: string, log: string, diff: string) =>
-  `Write the pull request body for a branch that implements Ticket ${ticket.id} "${ticket.title}". ` +
+  `Write the pull request title and body for a branch that implements Ticket ${ticket.id} "${ticket.title}". ` +
   `Its commits since origin/${base} and their diff are below; they are the only source, so do not look for the repository. ` +
-  `Use the mattpocock-skills:pr skill. ` +
-  `End with a "## Follow-ups" section listing the follow-up work noted in the commit messages or that you notice in the change, or "None". ` +
-  `Output only the Markdown body.\n\n<git-log>\n${log}\n</git-log>\n\n<git-diff>\n${diff}\n</git-diff>`;
+  `The title is a Conventional Commit, \`type(scope): subject\`: pick the type from the diff (one of ${COMMIT_TYPES.join(', ')}); ` +
+  `add a scope only when the change sits in one clear module; never mark a breaking change with ! or BREAKING CHANGE. ` +
+  `The subject restates the Ticket title, starting lower-case unless it starts with an identifier, and names no Ticket id or Jira key. ` +
+  `Write the body with the mattpocock-skills:pr skill. ` +
+  `End the body with a "## Follow-ups" section listing the follow-up work noted in the commit messages or that you notice in the change, or "None". ` +
+  `Output only the title line, a blank line, then the Markdown body.\n\n<git-log>\n${log}\n</git-log>\n\n<git-diff>\n${diff}\n</git-diff>`;
+
+/** What a Ticket is named by: its own Jira key from external_ref, else its parent epic's, else its own id. */
+export function ticketKey(id: string, { ticket, parent }: TicketContext): string {
+  for (const ref of [ticket.external_ref, parent?.external_ref]) {
+    if (typeof ref === 'string' && ref.startsWith('jira-')) return ref.slice('jira-'.length);
+  }
+  return id;
+}
+
+/**
+ * Split claude's output into the PR title, with `key` put before the subject, and the body. A first line that is no
+ * Conventional Commit gets `chore` and the Ticket title instead: a title the human can retitle is not worth a failed Run.
+ */
+export function prTitleAndBody(output: string, key: string, ticketTitle: string): { title: string; body: string } {
+  const [first, ...rest] = output.split('\n');
+  const m = CONVENTIONAL_TITLE.exec(first.trim());
+  if (!m) return { title: `chore: ${key} ${ticketTitle}`, body: output };
+  return { title: `${m[1]}${m[2] ?? ''}: ${key} ${m[3]}`, body: rest.join('\n').trim() };
+}
 
 const clip = (s: string) => (s.length > PROMPT_GIT_CHARS ? `${s.slice(0, PROMPT_GIT_CHARS)}\n[truncated]` : s);
 
@@ -198,7 +226,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha };
+      return { branch, dir, base: sha, key: ticketKey(ticketId, context) };
     },
 
     async collect(project, prepared, signal) {
@@ -230,7 +258,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
       try {
         step('Writing the PR body (claude -p)');
-        const body = await text(
+        const output = await text(
           'claude',
           [
             '-p', PR_BODY_PROMPT(ticket, project.baseBranch, log, diff),
@@ -241,6 +269,8 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
           tmp,
           { timeout: 5 * 60_000, input: '' }, // closed stdin, or claude waits 3s for piped input
         );
+        // A host job saved before Prepared had a key resumes without one.
+        const { title, body } = prTitleAndBody(output, prepared.key ?? ticket.id, ticket.title);
         if (!body) throw new Error('claude -p returned an empty PR body');
         writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
         // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
@@ -248,7 +278,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         const env = await ghEnv(project);
         const out = await text(
           'gh',
-          ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', `${ticket.id}: ${ticket.title}`, '--body-file', join(tmp, 'body.md')],
+          ['pr', 'create', '--head', branch, '--base', project.baseBranch, '--title', title, '--body-file', join(tmp, 'body.md')],
           repo,
           { env },
         );

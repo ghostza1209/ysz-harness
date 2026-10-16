@@ -14,6 +14,9 @@ _Avoid_: checkContainer (in prose), php container.
 **Ticket**: One unit of work in a Project's own Beads queue. Work tracked elsewhere (e.g. Jira) is not a Ticket until it is brought into that queue.
 _Avoid_: issue, task, job.
 
+**Jira key**: The key of the Jira issue a Ticket was brought in from (e.g. OP-2522). Not every Ticket has one.
+_Avoid_: external ref, Jira id.
+
 **Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
 _Avoid_: issues, beads list.
 

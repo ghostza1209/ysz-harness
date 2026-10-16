@@ -152,7 +152,7 @@ const fakeHost: HostSteps = {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40) };
+    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
   },
   async collect(_project, { dir }) {
     hostSteps.push(`collect ${dir}`);

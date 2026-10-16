@@ -97,7 +97,7 @@ export function teeCommand(handle: SandboxHandle, command: string, logPath: stri
 export function createSandboxRunner(root: string): SandboxRunner {
   async function runAgent(
     role: 'implement' | 'review',
-    { project, runId, attempt, branch, dir, signal }: AgentRequest,
+    { project, runId, attempt, branch, dir, key, signal }: AgentRequest,
     promptArgs: Record<string, string>,
   ): Promise<AgentResult> {
     signal.throwIfAborted();
@@ -137,7 +137,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
         sandbox,
         // sandcastle resolves promptFile against process.cwd(), so it must be absolute.
         promptFile: join(root, `prompts/${role}.md`),
-        promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, ...promptArgs },
+        promptArgs: { CHECK_HINT: project.checkHint ?? "Run the repo's own lint and unit-test commands.", TICKET_JSON, KEY: key, ...promptArgs },
         completionSignal: [COMPLETE, NEEDS_INFO],
         idleTimeoutSeconds: 600,
         signal,
