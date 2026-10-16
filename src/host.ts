@@ -18,7 +18,7 @@ export interface Prepared {
   dir: string;
   /** The sha the clone was made at: the tip of origin/<baseBranch>, or of the stacked-on branch. */
   base: string;
-  /** The In review blocker's branch and PR the clone starts on, which the PR then targets. Absent: baseBranch. */
+  /** The In review blocker's branch and PR the clone starts on, which the PR then targets unless the blocker merged meanwhile. Absent: baseBranch. */
   stack?: { branch: string; prUrl: string };
   /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
   key: string;
@@ -36,7 +36,9 @@ export interface HostSteps {
   collect(project: Project, prepared: Prepared, signal?: AbortSignal): Promise<{ tip: string; commits: number }>;
   /**
    * Bring the agent's branch back into the Project repo, push it and open the PR against what it was cloned onto, then
-   * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). Returns the PR URL.
+   * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). A blocker PR that merged meanwhile
+   * has the agent's commits replayed onto its base instead, which the PR then targets, unstacked; one that cannot be
+   * read fails the publish. Returns the PR URL.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
@@ -244,17 +246,32 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
 
     async collect(project, prepared, signal) {
       const tip = await fetchBack(project, prepared, undefined, signal);
-      const commits = Number(await within(signal).text('git', ['rev-list', '--count', `origin/${onto(project, prepared)}..${prepared.branch}`], project.repoPath));
+      const commits = Number(await within(signal).text('git', ['rev-list', '--count', `${prepared.base}..${prepared.branch}`], project.repoPath));
       return { tip, commits };
     },
 
     async publish(project, ticket, prepared, { tip, reviewSkipped, signal, log: step = () => {} } = {}) {
       const { run, text } = within(signal);
       const repo = project.repoPath;
-      const { branch } = prepared;
-      const base = onto(project, prepared);
-      const range = `origin/${base}..${branch}`;
+      const { branch, stack } = prepared;
+      const env = await ghEnv(project);
+      const blocker = stack && JSON.parse(await text('gh', ['pr', 'view', stack.prUrl, '--json', 'state,baseRefName'], repo, { env }));
+      const merged = stack && blocker.state === 'MERGED';
+      const base = merged ? blocker.baseRefName : onto(project, prepared);
+      // The sha, not origin/<base>: a stacked-on blocker that merged meanwhile has its branch deleted and pruned.
+      let from = prepared.base;
       await fetchBack(project, prepared, tip, signal);
+      if (merged) {
+        // Its squash commit is not the blocker's commits, so only the agent's own move onto the blocker's base.
+        step(`${stack.prUrl} merged meanwhile: replaying ${branch} onto ${base}`);
+        await run('git', ['fetch', 'origin', base], repo);
+        const onBase = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);
+        await run('git', ['replay', '--ref-action=update', '--onto', onBase, `${from}..${branch}`], repo).catch((err) => {
+          throw new Error(`${stack.prUrl} merged meanwhile and ${branch} does not replay onto ${base}: ${message(err)}`);
+        });
+        from = onBase;
+      }
+      const range = `${from}..${branch}`;
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
       // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
       // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
@@ -264,10 +281,11 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const secret = project.copyToWorktree?.find((file) => touched.includes(file.toLowerCase()));
       if (secret) throw new Error(`refusing to push: ${secret} is committed on the branch`);
       step(`Pushing ${branch} to origin`);
-      await run('git', ['push', '-u', 'origin', branch], repo);
+      // A Retry replays again onto a newer base, so it overwrites its own earlier push: no PR was opened from it yet.
+      await run('git', ['push', '-u', ...(merged ? ['--force-with-lease'] : []), 'origin', branch], repo);
 
       const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));
-      const diff = clip(await text('git', ['diff', `origin/${base}...${branch}`], repo));
+      const diff = clip(await text('git', ['diff', range], repo));
       // In an empty dir with only user settings and the Skill tool: the change is agent-written text, so it gets nothing to act on.
       const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
       try {
@@ -289,7 +307,6 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
         // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
         step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
-        const env = await ghEnv(project);
         const out = await text(
           'gh',
           ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md')],
@@ -297,15 +314,13 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
           { env },
         );
         const prUrl = out.split('\n').pop()!;
-        if (prepared.stack) {
+        if (stack && !merged) {
           // The PR already targets the blocker's branch; the GitHub stack adds the stack map and retargets it once the blocker merges.
           // --base is the blocker's own base: any other, and gh stack link retargets the blocker's PR onto it. A blocker already
           // in a stack fails the link (it would drop that stack's upper PRs), so a second dependent stays a plain PR.
-          const blocker = prepared.stack.prUrl;
-          step(`Stacking it on ${blocker}`);
-          await text('gh', ['pr', 'view', blocker, '--json', 'baseRefName'], repo, { env })
-            .then((out) => text('gh', ['stack', 'link', '--base', JSON.parse(out).baseRefName, blocker, prUrl], repo, { env }))
-            .catch((err) => step(`Could not stack it on ${blocker}, so it stays a plain PR onto ${base}: ${message(err)}`));
+          step(`Stacking it on ${stack.prUrl}`);
+          await text('gh', ['stack', 'link', '--base', blocker.baseRefName, stack.prUrl, prUrl], repo, { env })
+            .catch((err) => step(`Could not stack it on ${stack.prUrl}, so it stays a plain PR onto ${base}: ${message(err)}`));
         }
         return prUrl;
       } finally {

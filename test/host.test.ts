@@ -226,14 +226,54 @@ describe('host steps against real git', () => {
       process.env.PATH = path;
     }
     const calls = readFileSync(join(log, 'gh.stack'), 'utf8').trim().split('\n');
-    assert.match(calls[0], /^pr create --head agent\/t-st --base agent\/t-a /);
+    assert.equal(calls[0], 'pr view https://example.test/pull/7 --json state,baseRefName');
+    assert.match(calls[1], /^pr create --head agent\/t-st --base agent\/t-a /);
     // The blocker's own base, or gh stack link retargets the blocker's PR onto the repo's default branch.
-    assert.equal(calls[1], 'pr view https://example.test/pull/7 --json baseRefName');
     assert.equal(calls[2], 'stack link --base release https://example.test/pull/7 https://example.test/pull/8');
     assert.equal(lines.at(-2), 'Opening the PR against agent/t-a');
     assert.equal(lines.at(-1), 'Stacking it on https://example.test/pull/7');
     assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /since origin\/agent\/t-a/);
     assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the blocker change/);
+  });
+
+  it('moves a stacked Run whose blocker squash-merged meanwhile onto the blocker base, with only its own commits, and stacks nothing', async () => {
+    const other = join(root, 'other-stack-merged');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-m');
+    commit(other, 'blocker-m.txt', 'the merged blocker change');
+    git(other, 'push', '-q', 'origin', 'agent/t-m');
+    const prepared = await host.prepare(project, 't-sm', { ...context, inReviewBlocker: { id: 't-m', title: 'm', prUrl: 'https://example.test/pull/11' } });
+    commit(join(prepared.dir, 'repo'), 'sm.txt', 'sm');
+    // The squash merge: develop gets the blocker change as a new commit, the branch is deleted on origin and pruned here.
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', '--squash', 'agent/t-m');
+    git(other, 'commit', '-q', '-m', 'the squash commit');
+    git(other, 'push', '-q', 'origin', 'develop', ':agent/t-m');
+    git(repo, 'update-ref', '-d', 'refs/remotes/origin/agent/t-m');
+
+    assert.equal((await host.collect(project, prepared)).commits, 1);
+
+    const bin = join(root, 'bin-stack-merged');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho "$*" >> ${log}/gh.merged\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\n[ "$1" = pr ] && echo https://example.test/pull/12\nexit 0`);
+    // The first publish pushes, then gets an empty PR body; its Retry replays onto a develop that moved on since.
+    script(join(bin, 'claude'), `printf '%s\\n' "$@" > ${log}/claude.argv\n[ -f ${log}/claude.once ] && echo 'the PR body'\ntouch ${log}/claude.once`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.publish(project, ticket('t-sm'), prepared), /empty PR body/);
+      commit(other, 'later.txt', 'later');
+      git(other, 'push', '-q', 'origin', 'develop');
+      assert.equal(await host.publish(project, ticket('t-sm'), prepared), 'https://example.test/pull/12');
+    } finally {
+      process.env.PATH = path;
+    }
+    const calls = readFileSync(join(log, 'gh.merged'), 'utf8').trim().split('\n');
+    assert.equal(calls.length, 3);
+    assert.match(calls[2], /^pr create --head agent\/t-sm --base develop /);
+    assert.equal(git(origin, 'rev-parse', 'agent/t-sm~1'), git(other, 'rev-parse', 'develop'));
+    assert.equal(git(origin, 'log', '--format=%s', 'develop..agent/t-sm'), 'add sm.txt');
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the merged blocker change/);
   });
 
   it('still returns the PR when linking the stack fails, and logs why', async () => {

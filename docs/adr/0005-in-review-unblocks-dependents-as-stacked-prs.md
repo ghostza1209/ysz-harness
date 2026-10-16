@@ -11,6 +11,7 @@ A dependent's clone starts at the blocker's `agent/<id>` branch rather than `ori
 - GitHub stacks are linear, so only the first dependent of a blocker joins its stack. A probe on 2026-10-16 showed that linking a second PR onto a blocker that is already in a stack fails with "this would remove #N from the stack", and changes nothing. Later dependents stay plain PRs onto the blocker's branch, and GitHub retargets them when that branch is deleted after the merge. FazWaz/PopDeal deletes merged head branches.
 - `gh stack link` retargets the bottom PR onto its `--base`, which defaults to the repository's default branch. ysz therefore passes the blocker PR's own base.
 - A blocker branch cut before another blocker merged lacks that blocker's code until the human rebases the stack. ysz never force-pushes a branch whose PR the human is reviewing.
+- A blocker can merge while its dependent's Run is still going, and then its branch is gone. ysz reads the blocker PR's state before pushing, and if it merged, `git replay`s only the agent's commits onto the blocker's base and opens a plain PR there. A conflict fails the Run.
 - When a blocker ends PR closed, its unclaimed dependents stop being Ready on their own, because the blocker is open again. Dependents that are already running or In review are left alone. The human finds the broken stack while reviewing.
 - Parents still wait for their children to close: an In review child does not unblock its parent.
 
