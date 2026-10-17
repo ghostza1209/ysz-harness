@@ -1,7 +1,8 @@
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, type Dict, type Lang } from './i18n';
-import { parseLog, type LogBlock } from './logView';
+import { epicOf, groupRuns, type GroupBy } from './history';
+import { parseLog, splitLog, type LogBlock } from './logView';
 import { muted, play, setMuted, stageCue } from './sound';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
@@ -9,11 +10,13 @@ import type { RunRow, RunState } from '../src/store';
 export interface State {
   slots: { used: number; total: number };
   ready: QueueItem[];
-  runs: { live: RunRow[]; history: RunRow[] };
+  runs: { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
   projects: ProjectStatus[];
 }
 
 const REFRESH_MS = 5_000;
+/** History rows shown at first and added by each Show more; each also fetches this many more past the first 50. */
+const PAGE = 20;
 
 const T = createContext<Dict>(en);
 const useT = () => useContext(T);
@@ -25,6 +28,15 @@ function savedLang(): Lang {
     if (l === 'en' || l === 'th') return l;
   } catch {}
   return navigator.language.startsWith('th') ? 'th' : 'en';
+}
+
+/** A choice last picked here from `options`, else the first. */
+function saved<O extends string>(key: string, options: readonly O[]): O {
+  try {
+    const v = localStorage.getItem(key) as O;
+    if (options.includes(v)) return v;
+  } catch {}
+  return options[0];
 }
 
 /** Flips light/dark and remembers it; until clicked, the OS setting decides. */
@@ -118,10 +130,10 @@ function LogTail({ runId, now }: { runId: number; now: number }) {
   const blocks = useMemo(() => parseLog(text), [text]);
   const box = useRef<HTMLDivElement>(null);
   // Follow the tail only while the reader sits at the bottom; scrolling up to read stops it.
-  const follow = useRef(true);
+  const [follow, setFollow] = useState(true);
   useEffect(() => {
-    if (follow.current) box.current?.scrollTo({ top: box.current.scrollHeight });
-  }, [text]);
+    if (follow) box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [text, follow]);
   useEffect(() => {
     if (runId < 0) return;
     const source = new EventSource(`/api/runs/${runId}/log/stream`);
@@ -134,28 +146,79 @@ function LogTail({ runId, now }: { runId: number; now: number }) {
     return () => source.close();
   }, [runId]);
   return (
-    <div
-      className="log"
-      ref={box}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      }}
-    >
-      {blocks.length ? (
-        // Only a running step reads the clock, so the per-second tick re-renders just that block.
-        blocks.map((b, i) => <Block b={b} now={b.kind === 'step' && b.since !== undefined ? now : 0} key={i} />)
-      ) : (
-        <span className="waiting">{t.waitingForAgent}</span>
+    <div className="tail">
+      <div
+        className="log"
+        ref={box}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 24);
+        }}
+      >
+        {/* Pushed to the bottom of the box, so a short tail reads like a terminal. */}
+        <div className="tail-body">
+          {blocks.length ? (
+            // Only a running step reads the clock, so the per-second tick re-renders just that block.
+            blocks.map((b, i) => <Block b={b} now={b.kind === 'step' && b.since !== undefined ? now : 0} key={i} />)
+          ) : (
+            <span className="waiting">{t.waitingForAgent}</span>
+          )}
+        </div>
+      </div>
+      {!follow && (
+        <button className="small jump" onClick={() => setFollow(true)}>
+          ↓ {t.jumpToLatest}
+        </button>
       )}
     </div>
   );
 }
 
-/** A Run's whole log in a modal: formatted like the live tail, or raw to read and copy as is. */
+const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+
+/** Each agent's context window and tokens, in the order they ran, then the Run's total tokens. Older Runs have none. */
+function Usage({ usage, brief }: { usage: RunRow['usage']; brief?: boolean }) {
+  const t = useT();
+  const parts = Object.entries(usage).sort(([a], [b]) => a.localeCompare(b));
+  if (!parts.length) return null;
+  const attempts = parts.some(([name]) => name.startsWith('attempt2-'));
+  // Compact rows: the total alone, each agent's share in its tooltip.
+  if (brief)
+    return (
+      <span className="usage mute" title={parts.map(([name, u]) => `${partLabel(name, attempts)} ${compact.format(u.context)} ${t.ctx} · ${compact.format(u.tokens)} ${t.tok}`).join('\n')}>
+        {t.total} <b>{compact.format(parts.reduce((sum, [, u]) => sum + u.tokens, 0))}</b> {t.tok}
+      </span>
+    );
+  return (
+    <div className="usage mute">
+      {parts.map(([name, u]) => (
+        <span key={name}>
+          {partLabel(name, attempts)} <b>{compact.format(u.context)}</b> {t.ctx} · {compact.format(u.tokens)} {t.tok}
+        </span>
+      ))}
+      <span>
+        {t.total} <b>{compact.format(parts.reduce((sum, [, u]) => sum + u.tokens, 0))}</b> {t.tok}
+      </span>
+    </div>
+  );
+}
+
+/** A log part's name (`attempt2-review`, `host`) as its stage on the stage bar, with its Attempt once there are two. */
+const partLabel = (name: string, attempts: boolean) => {
+  const m = /^attempt(\d+)-(implement|review)$/.exec(name);
+  if (!m) return STAGE_NAMES.host;
+  const stage = m[2] === 'review' ? STAGE_NAMES['agent-review'] : STAGE_NAMES.agent;
+  return attempts ? `${stage} · ${m[1]}` : stage;
+};
+
+/** A Run's whole log in a modal, one stage at a time or all of it: formatted like the live tail, or raw to read and copy as is. */
 function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
   const t = useT();
-  const [text, setText] = useState<string | null>(null);
+  const [parts, setParts] = useState<{ name: string; text: string }[] | null>(null);
+  // Which part shows; -1 is all of them.
+  const [at, setAt] = useState(0);
+  const text = useMemo(() => parts && (at < 0 ? parts.map((p) => p.text).join('') : (parts[at]?.text ?? '')), [parts, at]);
+  const attempts = !!parts?.some((p) => p.name.startsWith('attempt2-'));
   const [error, setError] = useState<string | null>(null);
   const [raw, setRaw] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -166,8 +229,10 @@ function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
     ref.current?.showModal();
     const ctl = new AbortController();
     fetch(`/api/runs/${run.id}/log`, { signal: ctl.signal })
-      .then((res) => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then(setText)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setParts(splitLog(res.headers.get('x-log-parts') ?? '', new Uint8Array(await res.arrayBuffer())));
+      })
       .catch((e: Error) => e.name !== 'AbortError' && setError(e.message));
     return () => ctl.abort();
   }, [run.id]);
@@ -200,6 +265,21 @@ function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
           ✕
         </button>
       </div>
+      {parts && parts.length > 1 && (
+        <ol className="stages pick" aria-label={t.logStages}>
+          {[...parts.map((p) => partLabel(p.name, attempts)), t.allStages].map((name, i) => {
+            const n = i < parts.length ? i : -1;
+            return (
+              <li key={i} className={n === at ? 'on' : 'done'}>
+                <button aria-pressed={n === at} onClick={() => setAt(n)}>
+                  <span />
+                  {name}
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
       <div className="log">
         {error ? (
           <span className="log-step bad">{t.logFailed(error)}</span>
@@ -236,6 +316,12 @@ const ago = (ms: number, t: Dict) => {
 };
 /** A stage's name for the states on the stage bar, so pills and bar agree. */
 const label = (state: string) => STAGE_NAMES[state as keyof typeof STAGE_NAMES] ?? state.replace('-', ' ');
+/** How many of `runs` are in each state, in the order the states first show up. */
+const stateCounts = (runs: RunRow[]) => {
+  const n = new Map<string, number>();
+  for (const r of runs) n.set(r.state, (n.get(r.state) ?? 0) + 1);
+  return [...n];
+};
 const prNumber = (url: string) => url.match(/\/pull\/(\d+)/)?.[1];
 
 /** A live Run's path to a PR. needs-attention is a stuck host step. */
@@ -301,6 +387,8 @@ const FILTERS = {
   'pr-closed': (s: string) => s === 'pr-closed',
   failed: (s: string) => s === 'failed' || s === 'interrupted',
   killed: (s: string) => s === 'killed',
+  // Lists the archived Runs instead of the history.
+  archived: () => true,
 };
 
 /** The error a 401 from /api/state stands for: this browser has no Dashboard cookie. */
@@ -310,12 +398,20 @@ export function App() {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // The controls whose POST is still in flight, by URL.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [now, setNow] = useState(Date.now());
   const [filter, setFilter] = useState<keyof typeof FILTERS>('all');
   const [project, setProject] = useState('');
   const [query, setQuery] = useState('');
   const [logRun, setLogRun] = useState<RunRow | null>(null);
   const [lang, setLang] = useState(savedLang);
+  const [group, setGroup] = useState<GroupBy>(() => saved('historyGroup', ['none', 'epic', 'day'] as const));
+  const [density, setDensity] = useState(() => saved('historyDensity', ['comfortable', 'compact'] as const));
+  // History rows shown ungrouped; Show more raises it and the Runs fetched alike.
+  const [visible, setVisible] = useState(PAGE);
+  // A ref, since the poll's `load` is the first render's.
+  const limit = useRef(50);
   // The sample state shown while the tour runs; real polling carries on underneath.
   const [demo, setDemo] = useState<State | null>(null);
   const t = dicts[lang];
@@ -323,7 +419,7 @@ export function App() {
   const seen = useRef<Map<number, RunState> | null>(null);
 
   const load = () =>
-    fetch('/api/state')
+    fetch(`/api/state?limit=${limit.current}`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(res.status === 401 ? SIGNED_OUT : `HTTP ${res.status}`))))
       .then((s: State) => {
         const runs = [...s.runs.live, ...s.runs.history];
@@ -341,6 +437,13 @@ export function App() {
       localStorage.setItem('lang', lang);
     } catch {}
   }, [lang]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('historyGroup', group);
+      localStorage.setItem('historyDensity', density);
+    } catch {}
+  }, [group, density]);
 
   // Starts once the sample state has rendered, so every step's element exists.
   useEffect(() => {
@@ -368,13 +471,19 @@ export function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 8000 : 3500);
   };
 
-  /** A control: POST it, toast the outcome (or why the server refused), and refresh. */
+  /** A control: POST it (marked busy until the refresh lands), toast the outcome (or why the server refused), and refresh. */
   const post = async (url: string, done: string) => {
+    setBusy((b) => new Set(b).add(url));
     const res = await fetch(url, { method: 'POST' }).catch((e: Error) => e);
     if (res instanceof Error) toast(res.message, true);
     else if (res.ok) toast(done);
     else toast(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `HTTP ${res.status}`, true);
     await load();
+    setBusy((b) => {
+      const next = new Set(b);
+      next.delete(url);
+      return next;
+    });
   };
   /** Pause every picking Project, or resume all once every one is paused: one POST each, one toast. */
   const pauseAll = async (resume: boolean) => {
@@ -385,9 +494,18 @@ export function App() {
     toast(failed.length ? (resume ? t.couldNotResume(names) : t.couldNotPause(names)) : resume ? t.resumedAll : t.pausedAll, failed.length > 0);
     await load();
   };
-  const act = (r: RunRow, action: 'kill' | 'retry' | 'requeue' | 'cleanup', done: (id: string) => string) => post(`/api/runs/${r.id}/${action}`, done(r.ticketId));
+  type Action = 'kill' | 'retry' | 'requeue' | 'cleanup' | 'delete' | 'archive' | 'unarchive';
+  const act = (r: RunRow, action: Action, done: (id: string) => string) => post(`/api/runs/${r.id}/${action}`, done(r.ticketId));
+  /** A Run control's button props: disabled, with animated dots after its label, while its POST is in flight. */
+  const pending = (r: RunRow, action: Action, className: string) => {
+    const on = busy.has(`/api/runs/${r.id}/${action}`);
+    return { disabled: on, 'aria-busy': on, className: on ? `${className} waiting` : className };
+  };
   const kill = (r: RunRow) => {
     if (window.confirm(t.killConfirm(r.ticketId))) void act(r, 'kill', t.killed);
+  };
+  const remove = (r: RunRow) => {
+    if (window.confirm(t.deleteConfirm(r.ticketId))) void act(r, 'delete', t.deleted);
   };
   const runNow = (q: QueueItem) => {
     if (window.confirm(t.runNowConfirm(q.id, q.project)))
@@ -398,15 +516,16 @@ export function App() {
   const shownError = demo ? null : error;
   const slots = view?.slots ?? { used: 0, total: 2 };
   const history = view?.runs.history ?? [];
+  const archived = view?.runs.archived ?? [];
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return history.filter(
+    return (filter === 'archived' ? archived : history).filter(
       (r) =>
         FILTERS[filter](r.state) &&
         (!project || r.project === project) &&
         (!q || r.ticketId.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
     );
-  }, [history, filter, project, query]);
+  }, [history, archived, filter, project, query]);
   /** Failed Runs a Retry may re-queue: only each Ticket's newest Run, and none of a Ticket that has a live Run. */
   const retryable = useMemo(() => {
     const seen = new Set(view?.runs.live.map((r) => `${r.project}/${r.ticketId}`));
@@ -418,6 +537,95 @@ export function App() {
     }
     return ids;
   }, [view, history]);
+  // Fewer than asked for means the server has no more.
+  const more = (group === 'none' && shown.length > visible) || (filter === 'archived' ? archived : history).length >= limit.current;
+  const showMore = () => {
+    setVisible((v) => v + PAGE);
+    limit.current += PAGE;
+    void load();
+  };
+  const dayOf = (ms: number) => new Date(ms).toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const dayLabel = (ms: number) =>
+    dayOf(ms) === dayOf(now)
+      ? t.today
+      : dayOf(ms) === yesterday.toDateString()
+        ? t.yesterday
+        : new Date(ms).toLocaleDateString(t === en ? [] : t.locale, { weekday: 'short', day: 'numeric', month: 'short' });
+  const row = (r: RunRow) => (
+    <div className="tr" key={r.id}>
+      <span className={`pill ${r.state}`}>{label(r.state)}</span>
+      <div className="what">
+        <div className="row">
+          <span className="tag">{r.project}</span>
+          <Copy text={r.ticketId} />
+          {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
+        </div>
+        <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
+          {r.title}
+        </div>
+        <Usage usage={r.usage} brief={density === 'compact'} />
+        {r.note && <div className="note">{r.note}</div>}
+      </div>
+      <div className="when">
+        <time title={new Date(r.endedAt ?? r.startedAt).toLocaleString(t === en ? [] : t.locale)}>
+          {ago(now - (r.endedAt ?? r.startedAt), t)}
+        </time>
+        <span className="mute">
+          {r.endedAt && <span title={t.duration}>{span(r.endedAt - r.startedAt, t)} · </span>}
+          <span className={r.attempt > 1 ? 'retried' : undefined}>{t.attempts(r.attempt)}</span>
+        </span>
+      </div>
+      <div className="links">
+        {r.prUrl && (
+          <a className="act pr" href={r.prUrl} target="_blank" rel="noreferrer" aria-label={`PR #${prNumber(r.prUrl) ?? '?'}`}>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="4" cy="3.5" r="1.75" />
+              <circle cx="4" cy="12.5" r="1.75" />
+              <circle cx="12" cy="12.5" r="1.75" />
+              <path d="M4 5.25v5.5M12 10.75V6.5a2 2 0 0 0-2-2H7.5m0 0L9.5 2.5m-2 2 2 2" />
+            </svg>
+            #{prNumber(r.prUrl) ?? '?'}
+            <span className="arrow">↗</span>
+          </a>
+        )}
+        {r.attempt > 0 && (
+          <button className="act" onClick={() => setLogRun(r)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 4.5 6.5 8 3 11.5M8.5 11.5H13" />
+            </svg>
+            {t.log}
+          </button>
+        )}
+        {retryable.has(r.id) && (
+          <button {...pending(r, 'requeue', 'small')} onClick={() => void act(r, 'requeue', t.requeued)}>
+            {t.requeue}
+          </button>
+        )}
+        {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+          <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
+            {t.cleanUp}
+          </button>
+        )}
+        {(r.state === 'failed' || r.state === 'interrupted' || r.state === 'killed') && (
+          <button {...pending(r, 'delete', 'small danger')} onClick={() => remove(r)}>
+            {t.delete}
+          </button>
+        )}
+        {(r.state === 'merged' || r.state === 'pr-closed') &&
+          (r.archivedAt ? (
+            <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
+              {t.unarchive}
+            </button>
+          ) : (
+            <button {...pending(r, 'archive', 'small')} onClick={() => void act(r, 'archive', t.archivedDone)}>
+              {t.archive}
+            </button>
+          ))}
+      </div>
+    </div>
+  );
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
@@ -529,6 +737,7 @@ export function App() {
                         <span className="tag">{r.project}</span>
                         <Copy text={r.ticketId} />
                         <span className="grow" />
+                        {r.model && <span className="tag" title={t.model}>{r.model}</span>}
                         <span className="mute">{r.attempt > 0 ? t.attempt(r.attempt) : t.starting}</span>
                       </div>
                       <div className="title">{r.title}</div>
@@ -541,6 +750,7 @@ export function App() {
                       <div className="mute">
                         {t.started(time(r.startedAt, t))} · <span className="elapsed">{span(now - r.startedAt, t)}</span>
                       </div>
+                      <Usage usage={r.usage} />
                       {r.state === 'needs-attention' ? (
                         <div className="note">{r.note}</div>
                       ) : (
@@ -554,11 +764,11 @@ export function App() {
                         )}
                         <span className="grow" />
                         {r.state === 'needs-attention' && (
-                          <button className="primary" onClick={() => void act(r, 'retry', t.retrying)}>
+                          <button {...pending(r, 'retry', 'primary')} onClick={() => void act(r, 'retry', t.retrying)}>
                             {t.retryHostStep}
                           </button>
                         )}
-                        <button className="danger" onClick={() => kill(r)}>
+                        <button {...pending(r, 'kill', 'danger')} onClick={() => kill(r)}>
                           {t.kill}
                         </button>
                       </div>
@@ -608,7 +818,7 @@ export function App() {
                 <div className="chips" role="group" aria-label={t.filterByState}>
                   {(Object.keys(FILTERS) as (keyof typeof FILTERS)[]).map((f) => (
                     <button key={f} className={`chip ${filter === f ? 'on' : ''}`} aria-pressed={filter === f} onClick={() => setFilter(f)}>
-                      {f === 'all' ? t.all : label(f)}
+                      {f === 'all' ? t.all : f === 'archived' ? t.archived : label(f)}
                     </button>
                   ))}
                 </div>
@@ -619,68 +829,57 @@ export function App() {
                   ))}
                 </select>
                 <input type="search" placeholder={t.searchPlaceholder} value={query} onChange={(e) => setQuery(e.target.value)} aria-label={t.searchLabel} />
+                <select value={group} onChange={(e) => setGroup(e.target.value as GroupBy)} aria-label={t.groupBy}>
+                  <option value="none">{t.noGrouping}</option>
+                  <option value="epic">{t.byEpic}</option>
+                  <option value="day">{t.byDay}</option>
+                </select>
+                <div className="chips">
+                  <button className={`chip ${density === 'compact' ? 'on' : ''}`} aria-pressed={density === 'compact'} onClick={() => setDensity(density === 'compact' ? 'comfortable' : 'compact')}>
+                    {t.compactRows}
+                  </button>
+                </div>
               </div>
-              {history.length === 0 ? (
+              {history.length === 0 && archived.length === 0 ? (
                 <Empty icon="↺" title={t.noRuns} hint={t.noRunsHint} />
               ) : shown.length === 0 ? (
                 <Empty icon="⌕" title={t.noMatches} hint={t.noMatchesHint} />
               ) : (
-                <div className="table">
-                  {shown.map((r) => (
-                    <div className="tr" key={r.id}>
-                      <span className={`pill ${r.state}`}>{label(r.state)}</span>
-                      <div className="what">
-                        <div className="row">
-                          <span className="tag">{r.project}</span>
-                          <Copy text={r.ticketId} />
-                        </div>
-                        <div className="title">{r.title}</div>
-                        {r.note && <div className="note">{r.note}</div>}
-                      </div>
-                      <div className="when">
-                        <time title={new Date(r.endedAt ?? r.startedAt).toLocaleString(t === en ? [] : t.locale)}>
-                          {ago(now - (r.endedAt ?? r.startedAt), t)}
-                        </time>
-                        <span className="mute">
-                          {r.endedAt && <span title={t.duration}>{span(r.endedAt - r.startedAt, t)} · </span>}
-                          <span className={r.attempt > 1 ? 'retried' : undefined}>{t.attempts(r.attempt)}</span>
-                        </span>
-                      </div>
-                      <div className="links">
-                        {r.prUrl && (
-                          <a className="act pr" href={r.prUrl} target="_blank" rel="noreferrer" aria-label={`PR #${prNumber(r.prUrl) ?? '?'}`}>
-                            <svg viewBox="0 0 16 16" aria-hidden="true">
-                              <circle cx="4" cy="3.5" r="1.75" />
-                              <circle cx="4" cy="12.5" r="1.75" />
-                              <circle cx="12" cy="12.5" r="1.75" />
-                              <path d="M4 5.25v5.5M12 10.75V6.5a2 2 0 0 0-2-2H7.5m0 0L9.5 2.5m-2 2 2 2" />
-                            </svg>
-                            #{prNumber(r.prUrl) ?? '?'}
-                            <span className="arrow">↗</span>
-                          </a>
-                        )}
-                        {r.attempt > 0 && (
-                          <button className="act" onClick={() => setLogRun(r)}>
-                            <svg viewBox="0 0 16 16" aria-hidden="true">
-                              <path d="M3 4.5 6.5 8 3 11.5M8.5 11.5H13" />
-                            </svg>
-                            {t.log}
-                          </button>
-                        )}
-                        {retryable.has(r.id) && (
-                          <button className="small" onClick={() => void act(r, 'requeue', t.requeued)}>
-                            {t.requeue}
-                          </button>
-                        )}
-                        {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
-                          <button className="small" onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
-                            {t.cleanUp}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                <div className={`table ${density}`}>
+                  {groupRuns(group === 'none' ? shown.slice(0, visible) : shown, group).map((g, i) =>
+                    g.key === null ? (
+                      g.runs.map(row)
+                    ) : (
+                      // Today's opens; every epic and older day starts folded.
+                      <details key={g.key} className="group" open={group === 'day' && i === 0}>
+                        <summary>
+                          {group === 'epic' ? (
+                            <>
+                              <span className="tag">{g.runs[0].project}</span>
+                              <b>{epicOf(g.runs[0].ticketId)}</b>
+                            </>
+                          ) : (
+                            <b>{dayLabel(g.runs[0].endedAt ?? g.runs[0].startedAt)}</b>
+                          )}
+                          <span className="count">{g.runs.length}</span>
+                          {stateCounts(g.runs).map(([s, n]) => (
+                            <span key={s} className={`pill ${s}`}>
+                              {n} {label(s)}
+                            </span>
+                          ))}
+                          <span className="grow" />
+                          {group === 'epic' && <time className="mute">{ago(now - (g.runs[0].endedAt ?? g.runs[0].startedAt), t)}</time>}
+                        </summary>
+                        {g.runs.map(row)}
+                      </details>
+                    ),
+                  )}
                 </div>
+              )}
+              {more && shown.length > 0 && (
+                <button className="more" onClick={showMore}>
+                  {t.showMore}
+                </button>
               )}
             </section>
           </>

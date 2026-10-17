@@ -83,3 +83,19 @@ function toBlocks([head, ...rest]: string[]): LogBlock[] {
   const sub = n < 0 ? rest : rest.slice(0, n);
   return [{ kind: 'step', text: head, sub }, ...message(rest.slice(sub.length))];
 }
+
+/**
+ * Cuts a full log into its files, by the `name=bytes,…` list the server sends as `x-log-parts`. Sizes are in bytes,
+ * so this splits the raw body before decoding: a multibyte character never straddles a cut.
+ */
+export function splitLog(header: string, body: Uint8Array): { name: string; text: string }[] {
+  const decoder = new TextDecoder();
+  let at = 0;
+  return header
+    .split(',')
+    .filter(Boolean)
+    .map((part) => {
+      const [name, size] = part.split('=');
+      return { name, text: decoder.decode(body.subarray(at, (at += Number(size)))) };
+    });
+}

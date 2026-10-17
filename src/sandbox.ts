@@ -7,6 +7,7 @@ import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import { startCheckServer } from './checks';
 import type { Prepared } from './host';
 import type { Project } from './projects';
+import type { AgentUsage } from './store';
 
 export const MODEL = 'claude-sonnet-5-5';
 export const TICKET_JSON = '.orchestrator/ticket.json';
@@ -18,7 +19,7 @@ export type AgentResult =
   | { outcome: 'stopped'; tail: string };
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
-type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal } & Prepared;
+type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void } & Prepared;
 
 export interface SandboxRunner {
   /** Whether the Project's sandbox image exists locally. Never throws: docker being unreachable counts as missing. */
@@ -72,6 +73,41 @@ export function agentResult({ completionSignal, stdout }: { completionSignal?: s
   return { outcome: 'complete' };
 }
 
+type Usage = { input_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number; output_tokens: number };
+const input = (u: Usage) => u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+
+/**
+ * Reads the agent's usage off its raw stream-json lines and reports each change. Claude repeats a message's usage on
+ * every content block, so messages count once by id. Their output_tokens fall short, so a result's modelUsage, the
+ * whole session's total with subagents, wins; a result's own usage does not add up to that, and a later one may be 0.
+ */
+export function usageTracker(onUsage: (usage: AgentUsage) => void): (line: string) => void {
+  const messages = new Map<string, number>();
+  let context = 0;
+  let tokens = 0;
+  return (line) => {
+    if (!line.startsWith('{"type":"assistant"') && !line.includes('"type":"result"')) return;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const prev = `${context}/${tokens}`;
+    if (event.type === 'assistant' && event.message?.usage) {
+      const u: Usage = event.message.usage;
+      // A subagent's messages cost tokens but live in its own context.
+      if (!event.parent_tool_use_id) context = input(u);
+      messages.set(event.message.id, input(u) + u.output_tokens);
+      tokens = [...messages.values()].reduce((a, b) => a + b, 0);
+    } else if (event.type === 'result' && event.modelUsage) {
+      const models: { inputTokens: number; cacheCreationInputTokens: number; cacheReadInputTokens: number; outputTokens: number }[] = Object.values(event.modelUsage);
+      tokens = models.reduce((sum, m) => sum + m.inputTokens + m.cacheCreationInputTokens + m.cacheReadInputTokens + m.outputTokens, 0);
+    }
+    if (`${context}/${tokens}` !== prev) onUsage({ context, tokens });
+  };
+}
+
 type CreateSandbox = Parameters<typeof createBindMountSandboxProvider>[0]['create'];
 type SandboxHandle = Awaited<ReturnType<CreateSandbox>>;
 
@@ -97,7 +133,7 @@ export function teeCommand(handle: SandboxHandle, command: string, logPath: stri
 export function createSandboxRunner(root: string): SandboxRunner {
   async function runAgent(
     role: 'implement' | 'review',
-    { project, runId, attempt, branch, dir, key, signal }: AgentRequest,
+    { project, runId, attempt, branch, dir, key, signal, onUsage }: AgentRequest,
     promptArgs: Record<string, string>,
   ): Promise<AgentResult> {
     signal.throwIfAborted();
@@ -114,6 +150,9 @@ export function createSandboxRunner(root: string): SandboxRunner {
     execFileSync('git', ['-c', 'user.name=ysz-harness', '-c', 'user.email=ysz-harness@localhost', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'decoy'], { cwd: decoy });
     const worktree = await createWorktree({ cwd: decoy, branchStrategy: { type: 'branch', branch } });
 
+    // Review mounts the clone implement left, node_modules included. Its store died with implement's container, so
+    // installing again re-downloads everything (1m48s-2m49s in Runs 12-14).
+    const installCommand = role === 'implement' ? project.installCommand : undefined;
     const inner = docker({ imageName: project.image, containerUid: project.containerUid, containerGid: project.containerGid });
     // docker's provider has create() at runtime; its public type hides it.
     const create = (inner as unknown as { create: CreateSandbox }).create;
@@ -121,7 +160,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
       ...inner,
       create: async (opts) => {
         const handle = await create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] });
-        return project.installCommand ? teeCommand(handle, project.installCommand, logPath) : handle;
+        return installCommand ? teeCommand(handle, installCommand, logPath) : handle;
       },
     });
 
@@ -129,6 +168,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
     const checks = project.checkContainer && (await startCheckServer({ ...project.checkContainer, clone: join(dir, 'repo') }));
     const env = { CLAUDE_CODE_OAUTH_TOKEN: token, ...(checks && { PHP_CHECK_URL: checks.url, PHP_CHECK_TOKEN: checks.token }) };
 
+    const track = onUsage && usageTracker(onUsage);
     try {
       const result = await worktree.run({
         // No session capture: it copies a sandbox-written transcript to a host path built from the stream's session id.
@@ -142,9 +182,9 @@ export function createSandboxRunner(root: string): SandboxRunner {
         idleTimeoutSeconds: 600,
         signal,
         name: `run-${runId}-attempt${attempt}-${role}`,
-        logging: { type: 'file', path: logPath },
-        hooks: project.installCommand
-          ? { sandbox: { onSandboxReady: [{ command: project.installCommand, timeoutMs: 600_000 }] } }
+        logging: { type: 'file', path: logPath, onAgentStreamEvent: track && ((e) => e.type === 'raw' && track(e.line)) },
+        hooks: installCommand
+          ? { sandbox: { onSandboxReady: [{ command: installCommand, timeoutMs: 600_000 }] } }
           : undefined,
       });
       return agentResult(result);

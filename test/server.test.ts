@@ -12,10 +12,12 @@ import { createHttpServer } from '../src/server';
 const POLL_MS = 20;
 const logDir = mkdtempSync(join(tmpdir(), 'server-logs-'));
 let liveIds: number[] = [];
+// The limit each runs() call got.
+const runLimits: (number | undefined)[] = [];
 const orchestrator = {
   slots: () => ({}),
   readyQueue: () => [],
-  runs: () => ({ live: liveIds.map((id) => ({ id })), history: [] }),
+  runs: (limit?: number) => (runLimits.push(limit), { live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
   kill: async (id: number) => {
     if (id === 13) throw new Error('docker rm failed');
@@ -24,6 +26,8 @@ const orchestrator = {
   retryHostStep: async (id: number) => void actions.push(`retry ${id}`),
   requeue: async (id: number) => void actions.push(`requeue ${id}`),
   cleanUp: async (id: number) => void actions.push(`cleanup ${id}`),
+  deleteRun: async (id: number) => void actions.push(`delete ${id}`),
+  setArchived: (id: number, archived: boolean) => void actions.push(`${archived ? 'archive' : 'unarchive'} ${id}`),
   setPaused: (project: string, paused: boolean) => void actions.push(`${paused ? 'pause' : 'resume'} ${project}`),
   runNow: (project: string, id: string) => {
     if (id === 'gone') throw new Error('gone is not in the Ready queue');
@@ -108,6 +112,12 @@ it('refuses every API route without the Dashboard cookie, as a sandbox sends it,
   assert.deepEqual(actions, []);
 });
 
+it('asks for the ?limit Runs the page wants, within 1..500, else the default', async () => {
+  runLimits.length = 0;
+  for (const q of ['', '?limit=120', '?limit=abc', '?limit=0', '?limit=-1', '?limit=99999']) assert.equal((await get(`/api/state${q}`)).status, 200);
+  assert.deepEqual(runLimits, [undefined, 120, undefined, undefined, undefined, 500]);
+});
+
 it('will not start without a token, which would let every request through', () => {
   assert.throws(() => createHttpServer(orchestrator, '/nonexistent', logs, ''));
 });
@@ -142,6 +152,7 @@ it("serves a finished Run's complete log as non-sniffable plain text", async () 
   assert.equal(res.status, 200);
   assert.equal(res.headers['content-type'], 'text/plain; charset=utf-8');
   assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  assert.equal(res.headers['x-log-parts'], 'attempt1-implement=31,attempt1-review=13');
   assert.equal(res.body, 'plan <script>alert(1)</script>\nreviewed ✓\n');
 });
 
@@ -197,8 +208,8 @@ it('stops reading the log once the client disconnects', async () => {
 
 it('runs a Run control posted from the dashboard itself', async () => {
   actions.length = 0;
-  for (const action of ['kill', 'retry', 'requeue', 'cleanup']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
-  assert.deepEqual(actions, ['kill 7', 'retry 7', 'requeue 7', 'cleanup 7']);
+  for (const action of ['kill', 'retry', 'requeue', 'cleanup', 'delete', 'archive', 'unarchive']) assert.equal((await post(`/api/runs/7/${action}`)).status, 200);
+  assert.deepEqual(actions, ['kill 7', 'retry 7', 'requeue 7', 'cleanup 7', 'delete 7', 'archive 7', 'unarchive 7']);
 });
 
 it('runs pause, resume and Run now posted from the dashboard itself, decoding the names', async () => {

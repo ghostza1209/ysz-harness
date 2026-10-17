@@ -1,6 +1,6 @@
 # Glossary
 
-**Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), identified by its local repo. Each Project keeps its own Ticket queue.
+**Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), known by a name that never changes, and worked in its local repo. Each Project keeps its own Ticket queue.
 
 **Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from.
 _Avoid_: sandcastle setup, adding a repo.

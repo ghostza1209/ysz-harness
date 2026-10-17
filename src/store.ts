@@ -11,6 +11,12 @@ const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];
 /** Runs the user can still act on: the slot holders and the ones waiting on a Retry or Kill. */
 const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 
+/** One agent's token use: `context` is its latest main-thread context window, `tokens` everything it read and wrote. */
+export interface AgentUsage {
+  context: number;
+  tokens: number;
+}
+
 export interface RunRow {
   id: number;
   project: string;
@@ -26,17 +32,23 @@ export interface RunRow {
   endedAt: number | null;
   /** The Run's disposable clone while it exists on disk; null once removed or before the first one. */
   cloneDir: string | null;
+  /** When the human archived the Run, hiding it from history; null while not archived. */
+  archivedAt: number | null;
+  /** The model the Run's agents ran on; null for Runs from before it was recorded. */
+  model: string | null;
+  /** Each agent's usage by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
+  usage: Record<string, AgentUsage>;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt' | 'cloneDir'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at',
 };
 
 export interface Store {
   /** Returns the new Run's id. */
-  insertRun(run: { project: string; ticketId: string; title: string; state: RunState; startedAt: number }): number;
+  insertRun(run: { project: string; ticketId: string; title: string; state: RunState; startedAt: number; model?: string }): number;
   updateRun(id: number, patch: RunPatch): void;
   /** Project name of every Run holding a slot (one entry per Run). */
   slotProjects(): string[];
@@ -44,9 +56,14 @@ export interface Store {
   liveRuns(): RunRow[];
   /** Runs waiting on the human's review of their PR, oldest first. */
   inReview(): RunRow[];
-  /** Runs that ended or wait in review, newest first. */
+  /** Runs that ended or wait in review, newest first; archived ones excepted. */
   history(limit: number): RunRow[];
+  /** Archived Runs, newest first. */
+  archived(limit: number): RunRow[];
   getRun(id: number): RunRow | undefined;
+  /** Record one agent's usage so far, under its log part name. */
+  setUsage(id: number, part: string, usage: AgentUsage): void;
+  deleteRun(id: number): void;
   /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
   setHostJob(id: number, job: string): void;
   hostJob(id: number): string | null;
@@ -83,14 +100,25 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 3) {
     db.exec('ALTER TABLE runs ADD COLUMN host_job TEXT; PRAGMA user_version = 3');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 4) {
+    db.exec('ALTER TABLE runs ADD COLUMN archived_at INTEGER; PRAGMA user_version = 4');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 5) {
+    db.exec('ALTER TABLE runs ADD COLUMN model TEXT; PRAGMA user_version = 5');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 6) {
+    db.exec('ALTER TABLE runs ADD COLUMN usage TEXT; PRAGMA user_version = 6');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
-  const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at) VALUES (?, ?, ?, ?, ?)');
+  const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at, model) VALUES (?, ?, ?, ?, ?, ?)');
   const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
   const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
-  const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC LIMIT ?`);
+  const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) AND archived_at IS NULL ORDER BY id DESC LIMIT ?`);
+  const shelved = db.prepare('SELECT * FROM runs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?');
   const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
+  const setUsage = db.prepare("UPDATE runs SET usage = json_set(coalesce(usage, '{}'), ?, json(?)) WHERE id = ?");
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
   const paused = db.prepare('SELECT project FROM paused_projects');
@@ -106,9 +134,12 @@ export function openStore(path: string): Store {
     startedAt: r.started_at as number,
     endedAt: r.ended_at as number | null,
     cloneDir: r.clone_dir as string | null,
+    archivedAt: r.archived_at as number | null,
+    model: r.model as string | null,
+    usage: JSON.parse((r.usage as string | null) ?? '{}'),
   });
   return {
-    insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt).lastInsertRowid),
+    insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),
     updateRun(id, patch) {
       const keys = Object.keys(patch) as (keyof RunPatch)[];
       db.prepare(`UPDATE runs SET ${keys.map((k) => `${COLUMNS[k]} = ?`).join(', ')} WHERE id = ?`).run(
@@ -120,10 +151,13 @@ export function openStore(path: string): Store {
     liveRuns: () => live.all(...LIVE_STATES).map(toRow),
     inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
+    archived: (limit) => shelved.all(limit).map(toRow),
     getRun: (id) => {
       const row = byId.get(id);
       return row && toRow(row);
     },
+    setUsage: (id, part, usage) => void setUsage.run(`$."${part}"`, JSON.stringify(usage), id),
+    deleteRun: (id) => void db.prepare('DELETE FROM runs WHERE id = ?').run(id),
     setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),
     hostJob: (id) => (db.prepare('SELECT host_job FROM runs WHERE id = ?').get(id)?.host_job as string | null | undefined) ?? null,
     lastRunState: (project, ticketId) =>

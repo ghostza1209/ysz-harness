@@ -2,7 +2,7 @@ import type { BeadsGateway, Ticket } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentResult, SandboxRunner } from './sandbox';
-import type { RunRow, Store } from './store';
+import type { AgentUsage, RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -36,8 +36,8 @@ export interface Orchestrator {
   tick(): Promise<void>;
   /** Resolves when no Run is in flight. */
   whenIdle(): Promise<void>;
-  /** Live Runs (those holding a slot, and needs-attention ones), and the history of ended ones (newest first). */
-  runs(): { live: RunRow[]; history: RunRow[] };
+  /** Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived ones (newest first). */
+  runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
   slots(): { used: number; total: number };
@@ -68,6 +68,13 @@ export interface Orchestrator {
   requeue(runId: number): Promise<void>;
   /** Remove the clone of a failed or killed Run. The history row stays. */
   cleanUp(runId: number): Promise<void>;
+  /**
+   * Delete a failed, interrupted or killed Run: its clone, its log, then its row. Rejects, keeping the row, if the clone
+   * could not be removed, or if the Run was killed but its Ticket never released: recover() needs the row to keep it skipped.
+   */
+  deleteRun(runId: number): Promise<void>;
+  /** Archive a merged or PR-closed Run out of the history, or bring it back. */
+  setArchived(runId: number, archived: boolean): void;
   /**
    * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
    * one closed unmerged ends it pr-closed and hands the bead back. A bead the human changed is left alone. endedAt keeps the
@@ -114,10 +121,14 @@ export function createOrchestrator(deps: {
   host: HostSteps;
   store: Store;
   clock: Clock;
+  /** The model the agents run on, recorded on each Run. */
+  model: string;
   /** Appends a line to a Run's log. */
   log?: (runId: number, line: string) => void;
+  /** Deletes a Run's log. */
+  removeLog?: (runId: number) => Promise<void>;
 }): Orchestrator {
-  const { projects, beads, sandbox, host, store, clock, log: logRun = () => {} } = deps;
+  const { projects, beads, sandbox, host, store, clock, model, log: logRun = () => {}, removeLog = async () => {} } = deps;
   const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
@@ -207,10 +218,11 @@ export function createOrchestrator(deps: {
         const prepared = await host.prepare(project, ticket.id, context, signal);
         store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
+        const usage = (role: string) => (u: AgentUsage) => store.setUsage(runId, `attempt${n}-${role}`, u);
         store.updateRun(runId, { state: 'agent' });
         let implemented: AgentResult;
         try {
-          implemented = await sandbox.implement({ ...req, previousAttemptSummary });
+          implemented = await sandbox.implement({ ...req, previousAttemptSummary, onUsage: usage('implement') });
         } catch (err) {
           signal.throwIfAborted();
           return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
@@ -234,7 +246,7 @@ export function createOrchestrator(deps: {
         store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
-          const reviewed = await sandbox.review(req);
+          const reviewed = await sandbox.review({ ...req, onUsage: usage('review') });
           signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
           if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
@@ -374,7 +386,7 @@ export function createOrchestrator(deps: {
         snapshot.tickets = snapshot.tickets.filter((t) => t.id !== next.id);
         runNowKeys.delete(key(next.project, next.id));
         if (!won) continue;
-        const runId = store.insertRun({ project: next.project, ticketId: next.id, title: next.title, state: 'claimed', startedAt: clock.now() });
+        const runId = store.insertRun({ project: next.project, ticketId: next.id, title: next.title, state: 'claimed', startedAt: clock.now(), model });
         const control: Control = { ctl: new AbortController() };
         controls.set(runId, control);
         track(control, execute(runId, project, next, control));
@@ -385,8 +397,8 @@ export function createOrchestrator(deps: {
       while (inFlight.size) await Promise.all(inFlight);
     },
 
-    runs() {
-      return { live: store.liveRuns(), history: store.history(50) };
+    runs(limit = 50) {
+      return { live: store.liveRuns(), history: store.history(limit), archived: store.archived(limit) };
     },
 
     async kill(runId) {
@@ -498,6 +510,25 @@ export function createOrchestrator(deps: {
       if ((run?.state !== 'failed' && run?.state !== 'killed') || !run.cloneDir) throw new Error(`Run ${runId} has no clone to clean up`);
       await host.removeClone({ dir: run.cloneDir });
       store.updateRun(runId, { cloneDir: null });
+    },
+
+    async deleteRun(runId) {
+      const run = store.getRun(runId);
+      if (run?.state !== 'failed' && run?.state !== 'interrupted' && run?.state !== 'killed') throw new Error(`Run ${runId} is not failed or killed`);
+      // recover() keeps a claimed Ticket skipped only while its newest Run says killed.
+      const project = byName.get(run.project);
+      if (run.state === 'killed' && project && store.lastRunState(run.project, run.ticketId) === 'killed' && (await beads.listClaimed(project)).includes(run.ticketId)) {
+        throw new Error(`${run.ticketId} is still claimed; release it in bd first`);
+      }
+      if (run.cloneDir) await host.removeClone({ dir: run.cloneDir });
+      await removeLog(runId);
+      store.deleteRun(runId);
+    },
+
+    setArchived(runId, archived) {
+      const run = store.getRun(runId);
+      if (run?.state !== 'merged' && run?.state !== 'pr-closed') throw new Error(`Run ${runId} is not merged or PR closed`);
+      store.updateRun(runId, { archivedAt: archived ? clock.now() : null });
     },
 
     async watchReviews() {

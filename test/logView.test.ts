@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { parseLog } from '../web/logView';
+import { parseLog, splitLog } from '../web/logView';
 
 it('splits an agent log into steps, tool calls and agent messages', () => {
   const text = `
@@ -98,4 +98,14 @@ it("keeps the agent's indented lines in its message, and a finished one-line cal
 it("keeps a done line's own indented lines", () => {
   const text = 'Setting up sandbox\n  pnpm install\nSetting up sandbox done (1.0s)\n  extra\n';
   assert.deepEqual(parseLog(text), [{ kind: 'step', text: 'Setting up sandbox done (1.0s)', sub: ['  pnpm install', '  extra'] }]);
+});
+
+it('cuts a full log at byte sizes, keeping multibyte text whole', () => {
+  const body = new TextEncoder().encode('ทำ\nreviewed ✓\npushed\n');
+  assert.deepEqual(splitLog('attempt1-implement=7,attempt1-review=13,host=7', body), [
+    { name: 'attempt1-implement', text: 'ทำ\n' },
+    { name: 'attempt1-review', text: 'reviewed ✓\n' },
+    { name: 'host', text: 'pushed\n' },
+  ]);
+  assert.deepEqual(splitLog('', body), []);
 });

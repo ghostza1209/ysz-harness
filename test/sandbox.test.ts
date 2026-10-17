@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox, teeCommand } from '../src/sandbox';
+import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -16,6 +16,34 @@ it('keeps the agent prompts free of !`…`, which sandcastle runs as a shell com
     const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
     assert.deepEqual(prompt.match(/!`[^`]+`/g), null, role);
   }
+});
+
+it('reports usage once per message, keeps a subagent out of the context, and ends on the results\' modelUsage total', () => {
+  // Shaped like a real `claude -p --output-format stream-json --verbose` run: one message per content block repeats its usage.
+  const usage = (i: number, cc: number, cr: number, o: number) => ({ input_tokens: i, cache_creation_input_tokens: cc, cache_read_input_tokens: cr, output_tokens: o });
+  const assistant = (id: string, u: object, parent: string | null = null) =>
+    JSON.stringify({ type: 'assistant', message: { id, type: 'message', content: [], usage: u }, parent_tool_use_id: parent });
+  const seen: object[] = [];
+  const track = usageTracker((u) => seen.push(u));
+  for (const line of [
+    '{"type":"system","subtype":"init"}',
+    assistant('msg_1', usage(2, 24431, 11091, 4)),
+    assistant('msg_1', usage(2, 24431, 11091, 4)),
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"{\\"usage\\":1}"}]}}',
+    assistant('msg_sub', usage(3, 1000, 0, 7), 'toolu_1'),
+    assistant('msg_2', usage(2, 2499, 35522, 6)),
+    'Agent stopped',
+    // Claude Code ends on several results: each has the session's modelUsage, the last one a usage of 0.
+    ...[usage(4, 26930, 46613, 197), usage(0, 0, 0, 0)].map((u) =>
+      JSON.stringify({ duration_api_ms: 3994, usage: u, modelUsage: { haiku: { inputTokens: 7, outputTokens: 214, cacheReadInputTokens: 46613, cacheCreationInputTokens: 27930 } }, type: 'result' }),
+    ),
+  ]) track(line);
+  assert.deepEqual(seen, [
+    { context: 35524, tokens: 35528 },
+    { context: 35524, tokens: 36538 },
+    { context: 38023, tokens: 74567 },
+    { context: 38023, tokens: 74764 },
+  ]);
 });
 
 it('reads COMPLETE as complete', () => {

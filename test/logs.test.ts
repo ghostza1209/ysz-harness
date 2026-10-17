@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
@@ -39,4 +39,32 @@ it("appends host lines to the Run's host log, read after every Attempt's agent l
   const logs = createRunLogs(dir);
 
   assert.equal((await logs.slice(7, 0, await logs.size(7))).toString(), 'I\nR\nPushing\nOpening the PR\n');
+});
+
+it("removes one Run's log files and no other Run's", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
+  writeFileSync(join(dir, '7-attempt1-implement.log'), 'A');
+  appendRunLog(dir, 7, 'host');
+  for (const other of ['17-attempt1-implement.log', '70-host.log', '7-attempt1-implement.log.bak']) writeFileSync(join(dir, other), 'keep');
+  const logs = createRunLogs(dir);
+
+  await logs.remove(7);
+
+  assert.equal(await logs.size(7), 0);
+  assert.deepEqual(readdirSync(dir).sort(), ['17-attempt1-implement.log', '7-attempt1-implement.log.bak', '70-host.log']);
+});
+
+it("names a Run's log files in stream order with their sizes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
+  writeFileSync(join(dir, '3-attempt2-implement.log'), 'again');
+  writeFileSync(join(dir, '3-attempt1-review.log'), 'R');
+  writeFileSync(join(dir, '3-attempt1-implement.log'), 'I');
+  appendRunLog(dir, 3, 'pushed');
+
+  assert.deepEqual(await createRunLogs(dir).parts(3), [
+    { name: 'attempt1-implement', size: 1 },
+    { name: 'attempt1-review', size: 1 },
+    { name: 'attempt2-implement', size: 5 },
+    { name: 'host', size: 7 },
+  ]);
 });

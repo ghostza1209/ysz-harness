@@ -35,6 +35,7 @@ let outcomeError: Error | undefined;
 let preparedWhile: string[];
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
 let killError: Error | undefined;
+let removedLogs: number[];
 let markError: Error | undefined;
 /** Holds showContext open (a Run in the claimed state) until resolved. */
 let contextGate: Promise<void> | undefined;
@@ -202,6 +203,7 @@ beforeEach(() => {
   touchedByHand = new Set();
   outcomeError = undefined;
   killError = undefined;
+  removedLogs = [];
   markError = undefined;
   contextGate = undefined;
   inReviewBlocker = null;
@@ -233,7 +235,9 @@ async function polled(registry: readonly Project[] = projects) {
     host: fakeHost,
     store,
     clock: { now: () => now },
+    model: 'test-model',
     log: (runId, line) => runLog.push(`${runId}: ${line}`),
+    removeLog: async (runId) => void removedLogs.push(runId),
   });
   await orchestrator.poll();
   return orchestrator;
@@ -413,8 +417,8 @@ describe('starting Runs', () => {
 
     assert.deepEqual(writes, ['claim fazwaz/fz1', 'claim PopDeal/pd1']);
     assert.deepEqual(
-      o.runs().live.map((r) => [r.project, r.ticketId, r.state, r.attempt]),
-      [['fazwaz', 'fz1', 'agent', 1], ['PopDeal', 'pd1', 'agent', 1]],
+      o.runs().live.map((r) => [r.project, r.ticketId, r.state, r.attempt, r.model]),
+      [['fazwaz', 'fz1', 'agent', 1, 'test-model'], ['PopDeal', 'pd1', 'agent', 1, 'test-model']],
     );
     assert.deepEqual(o.readyQueue(), []);
     finish();
@@ -467,7 +471,7 @@ describe('starting Runs', () => {
     claimErrors.fazwaz = new Error('bd claim failed: no such repo');
     const o = await polled();
     await o.tick();
-    assert.deepEqual(o.runs(), { live: [], history: [] });
+    assert.deepEqual(o.runs(), { live: [], history: [], archived: [] });
     assert.equal(o.projectStatuses()[0].error, 'claiming fz1: bd claim failed: no such repo');
   });
 
@@ -1227,6 +1231,88 @@ describe('Clean up', () => {
       fakeHost.removeClone = removeClone;
     }
     assert.equal(o.runs().history[0].cloneDir, '/clones/tv1-2');
+  });
+});
+
+describe('Delete', () => {
+  it('removes a failed Run\'s clone, then its log, then its row', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'failed');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    await o.deleteRun(id);
+    assert.deepEqual(hostSteps, ['removeClone /clones/x']);
+    assert.deepEqual(removedLogs, [id]);
+    assert.equal(store.getRun(id), undefined);
+  });
+
+  it('deletes killed and interrupted Runs, with no clone to remove', async () => {
+    const o = await polled();
+    const ids = [startRun('thaivis', 'killed'), startRun('fazwaz', 'interrupted')];
+    for (const id of ids) await o.deleteRun(id);
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history, []);
+  });
+
+  it('refuses live, in-review and finished Runs', async () => {
+    const o = await polled();
+    for (const state of ['agent', 'needs-attention', 'in-review', 'merged', 'pr-closed'] as const) {
+      await assert.rejects(o.deleteRun(startRun('thaivis', state)), /not failed or killed/);
+    }
+    await assert.rejects(o.deleteRun(999), /not failed or killed/);
+    assert.equal(store.liveRuns().length + store.history(50).length, 5);
+  });
+
+  it('keeps a killed Run while its Ticket is still claimed, so a restart still skips the Ticket', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'killed');
+    claimed = ['thaivis/thaivis-run'];
+    await assert.rejects(o.deleteRun(id), /still claimed/);
+    assert.equal(store.getRun(id)?.state, 'killed');
+
+    claimed = []; // released since, by a restart or by hand
+    await o.deleteRun(id);
+    assert.equal(store.getRun(id), undefined);
+  });
+
+  it('keeps the row and its log when the clone removal fails', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'failed');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    const removeClone = fakeHost.removeClone;
+    fakeHost.removeClone = async () => {
+      throw new Error('EBUSY');
+    };
+    try {
+      await assert.rejects(o.deleteRun(id), /EBUSY/);
+    } finally {
+      fakeHost.removeClone = removeClone;
+    }
+    assert.deepEqual(removedLogs, []);
+    assert.equal(store.getRun(id)?.cloneDir, '/clones/x');
+  });
+});
+
+describe('Archive', () => {
+  it('moves a merged or PR-closed Run from the history to the archive, and back', async () => {
+    const o = await polled();
+    const merged = startRun('thaivis', 'merged');
+    const closed = startRun('fazwaz', 'pr-closed');
+    o.setArchived(merged, true);
+    o.setArchived(closed, true);
+    assert.deepEqual(o.runs().history, []);
+    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[closed, now], [merged, now]]);
+
+    o.setArchived(merged, false);
+    assert.deepEqual(o.runs().history.map((r) => [r.id, r.archivedAt]), [[merged, null]]);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [closed]);
+  });
+
+  it('refuses Runs that are not merged or PR closed', async () => {
+    const o = await polled();
+    for (const state of ['agent', 'in-review', 'failed', 'killed'] as const) {
+      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged or PR closed/);
+    }
+    assert.deepEqual(o.runs().archived, []);
   });
 });
 

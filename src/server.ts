@@ -67,7 +67,10 @@ async function streamLog(res: ServerResponse, orchestrator: Orchestrator, logs: 
 /** A year: the token lives in data/ across restarts, so the cookie can too. */
 const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
 
-/** JSON state at /api/state; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+/** The most ended (and archived) Runs one /api/state may ask for. */
+const MAX_HISTORY = 500;
+
+/** JSON state at /api/state (`?limit=N` ended Runs); a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
   // An empty token would match a missing cookie.
   if (!token) throw new Error('the Dashboard needs a token');
@@ -107,12 +110,14 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
     }
 
     if (path === '/api/state') {
+      // SQLite reads a negative LIMIT as none, and every poll re-sends the whole list: keep it within 1..MAX_HISTORY.
+      const limit = Number.parseInt(url.searchParams.get('limit') ?? '', 10);
       res.setHeader('content-type', 'application/json');
       res.end(
         JSON.stringify({
           slots: orchestrator.slots(),
           ready: orchestrator.readyQueue(),
-          runs: orchestrator.runs(),
+          runs: orchestrator.runs(limit >= 1 ? Math.min(limit, MAX_HISTORY) : undefined),
           projects: orchestrator.projectStatuses(),
         }),
       );
@@ -120,7 +125,7 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
     }
 
     const post = ((): (() => unknown) | undefined => {
-      const run = /^\/api\/runs\/(\d+)\/(kill|retry|requeue|cleanup)$/.exec(path);
+      const run = /^\/api\/runs\/(\d+)\/(kill|retry|requeue|cleanup|delete|archive|unarchive)$/.exec(path);
       if (run) {
         const runId = Number(run[1]);
         return {
@@ -128,6 +133,9 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
           retry: () => orchestrator.retryHostStep(runId),
           requeue: () => orchestrator.requeue(runId),
           cleanup: () => orchestrator.cleanUp(runId),
+          delete: () => orchestrator.deleteRun(runId),
+          archive: () => orchestrator.setArchived(runId, true),
+          unarchive: () => orchestrator.setArchived(runId, false),
         }[run[2] as 'kill'];
       }
       const pause = /^\/api\/projects\/([^/]+)\/(pause|resume)$/.exec(path);
@@ -158,9 +166,14 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       const runId = Number(logRoute[1]);
       if (logRoute[2]) return streamLog(res, orchestrator, logs, runId, pollMs);
       try {
-        const total = await logs.size(runId);
-        // Agent output: plain text that the browser must not sniff into HTML.
-        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'x-content-type-options': 'nosniff' });
+        const parts = await logs.parts(runId);
+        const total = parts.reduce((sum, p) => sum + p.size, 0);
+        // Agent output: plain text that the browser must not sniff into HTML. x-log-parts lets the log view split it by stage.
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'x-content-type-options': 'nosniff',
+          'x-log-parts': parts.map((p) => `${p.name}=${p.size}`).join(','),
+        });
         // Unbounded, so streamed in chunks rather than held in memory whole.
         await pipeline(async function* () {
           for (let at = 0; at < total; at += FULL_CHUNK_BYTES) yield await logs.slice(runId, at, Math.min(total, at + FULL_CHUNK_BYTES));

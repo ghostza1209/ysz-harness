@@ -18,3 +18,8 @@ it('sounds good on reaching review, and bad news beats good news in the same pol
   assert.equal(stageCue(new Map([[1, 'host']]), [run(1, 'in-review')]), 'good');
   assert.equal(stageCue(new Map([[1, 'host'], [2, 'agent']]), [run(1, 'in-review'), run(2, 'failed')]), 'bad');
 });
+
+it('stays quiet for an older Run coming back into the list, as after an archive or delete', () => {
+  assert.equal(stageCue(new Map([[5, 'merged']]), [run(5, 'merged'), run(2, 'failed')]), null);
+  assert.equal(stageCue(new Map([[5, 'merged']]), [run(6, 'claimed'), run(5, 'merged')]), 'step');
+});

@@ -6,7 +6,7 @@ const MIN = 60_000;
 
 /** What the Dashboard shows during the tour: one of every card and control the tour points at. Negative ids never reach the API. */
 export function sampleState(now: number): State {
-  const run = { prUrl: null, note: null, endedAt: null, cloneDir: null };
+  const run = { prUrl: null, note: null, endedAt: null, cloneDir: null, archivedAt: null, model: 'claude-sonnet-5-5', usage: {} };
   return {
     slots: { used: 1, total: 2 },
     projects: [
@@ -15,13 +15,14 @@ export function sampleState(now: number): State {
     ],
     runs: {
       live: [
-        { ...run, id: -1, project: 'shop', ticketId: 'shop-a1', title: 'Add a stock check before checkout', state: 'agent-review', attempt: 1, startedAt: now - 7 * MIN, cloneDir: '~/.ysz/clones/shop-a1' },
+        { ...run, id: -1, project: 'shop', ticketId: 'shop-a1', title: 'Add a stock check before checkout', state: 'agent-review', attempt: 1, startedAt: now - 7 * MIN, cloneDir: '~/.ysz/clones/shop-a1', usage: { 'attempt1-implement': { context: 84_000, tokens: 3_200_000 }, 'attempt1-review': { context: 41_000, tokens: 1_100_000 } } },
         { ...run, id: -2, project: 'blog', ticketId: 'blog-c3', title: 'Fix the broken RSS feed date', state: 'needs-attention', attempt: 1, startedAt: now - 42 * MIN, cloneDir: '~/.ysz/clones/blog-c3', note: 'git push failed: remote rejected' },
       ],
       history: [
-        { ...run, id: -3, project: 'shop', ticketId: 'shop-9f', title: 'Show prices in the user’s currency', state: 'in-review', attempt: 1, startedAt: now - 180 * MIN, endedAt: now - 150 * MIN, prUrl: 'https://github.com/example/shop/pull/42' },
+        { ...run, id: -3, project: 'shop', ticketId: 'shop-9f', title: 'Show prices in the user’s currency', state: 'in-review', attempt: 1, startedAt: now - 180 * MIN, endedAt: now - 150 * MIN, prUrl: 'https://github.com/example/shop/pull/42', usage: { 'attempt1-implement': { context: 112_000, tokens: 5_400_000 }, 'attempt1-review': { context: 63_000, tokens: 1_900_000 } } },
         { ...run, id: -4, project: 'blog', ticketId: 'blog-7b', title: 'Paginate the archive page', state: 'failed', attempt: 2, startedAt: now - 26 * 60 * MIN, endedAt: now - 25 * 60 * MIN, cloneDir: '~/.ysz/clones/blog-7b', note: 'Tests still failing after 2 Attempts' },
       ],
+      archived: [],
     },
     ready: [
       { project: 'shop', id: 'shop-b2', title: 'Email a receipt after payment', priority: 1, ageMs: 3 * 60 * MIN, waitReason: 'Project already has a Run', runNow: false },
