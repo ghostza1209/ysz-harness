@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createHostSteps } from '../src/host';
+import { createHostSteps, prTitleAndBody, ticketKey } from '../src/host';
 import type { Project } from '../src/projects';
 
 /** These tests drive real git against a throwaway origin and Project repo, with fake `claude` and `gh` on PATH. */
@@ -16,7 +16,7 @@ describe('host steps against real git', () => {
   let log: string;
   let project: Project;
   let host: ReturnType<typeof createHostSteps>;
-  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [] };
+  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null };
   const ticket = (id: string) => ({ id, title: 'a ticket' });
   const savedPath = process.env.PATH;
 
@@ -66,7 +66,7 @@ describe('host steps against real git', () => {
     const bin = join(root, 'bin');
     mkdirSync(bin);
     script(join(bin, 'claude'), `pwd > ${log}/claude.cwd\nprintf '%s\\n' "$@" > ${log}/claude.argv\necho 'the PR body'`);
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none}" > ${log}/gh.token\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.body; shift; done\necho https://example.test/pull/1`);
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none}" > ${log}/gh.token\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.body; [ "$1" = --title ] && printf '%s' "$2" > ${log}/gh.title; shift; done\necho https://example.test/pull/1`);
     process.env.PATH = `${bin}:${savedPath}`;
   });
 
@@ -199,6 +199,106 @@ describe('host steps against real git', () => {
     assert.equal(git(origin, 'branch', '--list', 'agent/t-13'), '');
   });
 
+  it('stacks on the In review blocker: clones its branch, counts only the new commits, opens the PR onto it and links the stack', async () => {
+    const other = join(root, 'other-stack');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-a');
+    commit(other, 'blocker.txt', 'the blocker change');
+    git(other, 'push', '-q', 'origin', 'agent/t-a');
+    const blocker = { id: 't-a', title: 'the blocker', prUrl: 'https://example.test/pull/7' };
+
+    const prepared = await host.prepare(project, 't-st', { ...context, inReviewBlocker: blocker });
+    const clone = join(prepared.dir, 'repo');
+    assert.equal(git(clone, 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+    assert.deepEqual(JSON.parse(readFileSync(join(clone, '.orchestrator/ticket.json'), 'utf8')).inReviewBlocker, blocker);
+    commit(clone, 'dependent.txt', 'the dependent change');
+    assert.equal((await host.collect(project, prepared)).commits, 1);
+
+    const bin = join(root, 'bin-stack');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho "$*" >> ${log}/gh.stack\n[ "$2" = view ] && { echo '{"baseRefName":"release"}'; exit 0; }\n[ "$1" = pr ] && echo https://example.test/pull/8\nexit 0`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    const lines: string[] = [];
+    try {
+      assert.equal(await host.publish(project, ticket('t-st'), prepared, { log: (line) => lines.push(line) }), 'https://example.test/pull/8');
+    } finally {
+      process.env.PATH = path;
+    }
+    const calls = readFileSync(join(log, 'gh.stack'), 'utf8').trim().split('\n');
+    assert.equal(calls[0], 'pr view https://example.test/pull/7 --json state,baseRefName');
+    assert.match(calls[1], /^pr create --head agent\/t-st --base agent\/t-a /);
+    // The blocker's own base, or gh stack link retargets the blocker's PR onto the repo's default branch.
+    assert.equal(calls[2], 'stack link --base release https://example.test/pull/7 https://example.test/pull/8');
+    assert.equal(lines.at(-2), 'Opening the PR against agent/t-a');
+    assert.equal(lines.at(-1), 'Stacking it on https://example.test/pull/7');
+    assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /since origin\/agent\/t-a/);
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the blocker change/);
+  });
+
+  it('moves a stacked Run whose blocker squash-merged meanwhile onto the blocker base, with only its own commits, and stacks nothing', async () => {
+    const other = join(root, 'other-stack-merged');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-m');
+    commit(other, 'blocker-m.txt', 'the merged blocker change');
+    git(other, 'push', '-q', 'origin', 'agent/t-m');
+    const prepared = await host.prepare(project, 't-sm', { ...context, inReviewBlocker: { id: 't-m', title: 'm', prUrl: 'https://example.test/pull/11' } });
+    commit(join(prepared.dir, 'repo'), 'sm.txt', 'sm');
+    // The squash merge: develop gets the blocker change as a new commit, the branch is deleted on origin and pruned here.
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', '--squash', 'agent/t-m');
+    git(other, 'commit', '-q', '-m', 'the squash commit');
+    git(other, 'push', '-q', 'origin', 'develop', ':agent/t-m');
+    git(repo, 'update-ref', '-d', 'refs/remotes/origin/agent/t-m');
+
+    assert.equal((await host.collect(project, prepared)).commits, 1);
+
+    const bin = join(root, 'bin-stack-merged');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho "$*" >> ${log}/gh.merged\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\n[ "$1" = pr ] && echo https://example.test/pull/12\nexit 0`);
+    // The first publish pushes, then gets an empty PR body; its Retry replays onto a develop that moved on since.
+    script(join(bin, 'claude'), `printf '%s\\n' "$@" > ${log}/claude.argv\n[ -f ${log}/claude.once ] && echo 'the PR body'\ntouch ${log}/claude.once`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.publish(project, ticket('t-sm'), prepared), /empty PR body/);
+      commit(other, 'later.txt', 'later');
+      git(other, 'push', '-q', 'origin', 'develop');
+      assert.equal(await host.publish(project, ticket('t-sm'), prepared), 'https://example.test/pull/12');
+    } finally {
+      process.env.PATH = path;
+    }
+    const calls = readFileSync(join(log, 'gh.merged'), 'utf8').trim().split('\n');
+    assert.equal(calls.length, 3);
+    assert.match(calls[2], /^pr create --head agent\/t-sm --base develop /);
+    assert.equal(git(origin, 'rev-parse', 'agent/t-sm~1'), git(other, 'rev-parse', 'develop'));
+    assert.equal(git(origin, 'log', '--format=%s', 'develop..agent/t-sm'), 'add sm.txt');
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the merged blocker change/);
+  });
+
+  it('still returns the PR when linking the stack fails, and logs why', async () => {
+    const other = join(root, 'other-stack-fail');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-b');
+    commit(other, 'blocker-b.txt', 'b');
+    git(other, 'push', '-q', 'origin', 'agent/t-b');
+    const prepared = await host.prepare(project, 't-sf', { ...context, inReviewBlocker: { id: 't-b', title: 'b', prUrl: 'https://example.test/pull/9' } });
+    commit(join(prepared.dir, 'repo'), 'sf.txt', 'sf');
+
+    const bin = join(root, 'bin-stack-fail');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\n[ "$2" = view ] && { echo '{"baseRefName":"develop"}'; exit 0; }\n[ "$1" = stack ] && { echo 'Cannot update stack: this would remove #2 from the stack' >&2; exit 5; }\necho https://example.test/pull/10`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    const lines: string[] = [];
+    try {
+      assert.equal(await host.publish(project, ticket('t-sf'), prepared, { log: (line) => lines.push(line) }), 'https://example.test/pull/10');
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.match(lines.at(-1)!, /^Could not stack it on https:\/\/example.test\/pull\/9, so it stays a plain PR onto agent\/t-b: .*would remove #2/);
+  });
+
   it("reads a PR's state as the Project's gh account", async () => {
     const bin = join(root, 'bin-pr-view');
     mkdirSync(bin, { recursive: true });
@@ -229,6 +329,23 @@ describe('host steps against real git', () => {
     }
   });
 
+  it('titles the PR as a Conventional Commit naming the Ticket by its Jira key, and keeps the rest as the body', async () => {
+    const prepared = await host.prepare(project, 't-16', { ...context, ticket: { id: 't-16', external_ref: 'jira-OP-7' } });
+    commit(join(prepared.dir, 'repo'), 'd.txt', 'd');
+    const bin = join(root, 'bin-title');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'claude'), `printf 'feat(api): run the checks\\n\\n## Summary\\nthe body\\n'`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await host.publish(project, ticket('t-16'), prepared);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'feat(api): OP-7 run the checks');
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
+  });
+
   it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
     const prepared = await host.prepare(project, 't-14', context);
     const clone = join(prepared.dir, 'repo');
@@ -252,6 +369,7 @@ describe('host steps against real git', () => {
 
     assert.equal(git(origin, 'rev-parse', 'agent/t-15'), git(clone, 'rev-parse', 'HEAD'));
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
+    assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'chore: t-15 a ticket');
   });
 
   it('refuses a branch with no commits', async () => {
@@ -415,5 +533,26 @@ describe('host steps against real git', () => {
     assert.equal(realRepoGitState(), before);
     assert.equal(git(origin, 'branch', '--list', branch), '');
     assert.equal(existsSync(join(log, 'claude.cwd')), false);
+  });
+});
+
+describe('PR title', () => {
+  it('names a Ticket by its own Jira key, else its parent epic\'s, else its own id', () => {
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null });
+    assert.equal(key({ external_ref: 'jira-OP-7' }, { external_ref: 'jira-OP-1' }), 'OP-7');
+    assert.equal(key({}, { external_ref: 'jira-OP-1' }), 'OP-1');
+    assert.equal(key({ external_ref: 'gh-12' }, null), 't-9');
+    assert.equal(key({}, {}), 't-9');
+  });
+
+  it('puts the key before the subject of a Conventional Commit first line, with or without a scope', () => {
+    assert.deepEqual(prTitleAndBody('fix(chat): render the badge\n\nbody', 'OP-2', 'Render it'), { title: 'fix(chat): OP-2 render the badge', body: 'body' });
+    assert.deepEqual(prTitleAndBody('refactor: drop ClaimTypeEnum\n\nbody', 'OP-2', 'Drop it'), { title: 'refactor: OP-2 drop ClaimTypeEnum', body: 'body' });
+  });
+
+  it('falls back to chore and the Ticket title, keeping the whole output as the body, when the first line is no Conventional Commit', () => {
+    for (const output of ['## Summary\nbody', 'feature: add x\n\nbody', 'feat!: drop the API\n\nbody', 'Feat: add x\n\nbody']) {
+      assert.deepEqual(prTitleAndBody(output, 'OP-2', 'Add x'), { title: 'chore: OP-2 Add x', body: output }, output);
+    }
   });
 });

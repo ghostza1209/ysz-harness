@@ -18,7 +18,7 @@ export interface Project {
   ghUser?: string;
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */
   copyToWorktree?: string[];
-  /** Runs inside the sandbox before the agent starts, to install dependencies. */
+  /** Runs inside the implement sandbox before the agent starts, to install dependencies; review reuses its node_modules. */
   installCommand?: string;
   /** Tells the agent which checks to run. Best-effort: the sandbox may lack a database. */
   checkHint?: string;
@@ -65,7 +65,11 @@ export const projects: readonly Project[] = [
     // Explicit, not a glob: copyToWorktree is the list of secret files publish refuses to commit.
     copyToWorktree: ['apps/web/.env', 'apps/web/.env.local', 'apps/mobile/.env', 'apps/mobile/.env.local'],
     installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX}`,
-    checkHint: 'Run `pnpm web:check` for changes under apps/web and `pnpm mobile:check` for changes under apps/mobile (both run type-check, lint and tests).',
+    checkHint:
+      'For changes under apps/web, run from apps/web with paths relative to it: `pnpm exec eslint <changed files>`, ' +
+      '`pnpm exec jest --findRelatedTests --passWithNoTests <changed files>`, then `pnpm web:type-check`. ' +
+      'apps/mobile is the same, with `pnpm mobile:type-check`. A change under packages/ type-checks every app that imports it. ' +
+      'Run `pnpm lint:duplicate-types` when you add or change a type.',
   },
   {
     name: 'thaivis',

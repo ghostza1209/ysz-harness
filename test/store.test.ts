@@ -22,8 +22,8 @@ it('keeps the Runs of a version-1 database and adds the clone column to them', (
     const store = openStore(path);
     const [row] = store.history(10);
     assert.deepEqual(
-      [row.ticketId, row.state, row.prUrl, row.startedAt, row.endedAt, row.cloneDir],
-      ['tv-1', 'in-review', 'https://pr/1', 5, 9, null],
+      [row.ticketId, row.state, row.prUrl, row.startedAt, row.endedAt, row.cloneDir, row.archivedAt, row.model, row.usage],
+      ['tv-1', 'in-review', 'https://pr/1', 5, 9, null, null, null, {}],
     );
     store.updateRun(row.id, { cloneDir: '/clones/x' });
     assert.equal(store.getRun(row.id)?.cloneDir, '/clones/x');
@@ -46,6 +46,18 @@ it('lists needs-attention Runs as live but not as slot holders, and ended Runs a
   assert.equal(store.getRun(999), undefined);
 });
 
+it('lists archived Runs apart from the history, and deletes a Run', () => {
+  const store = openStore(':memory:');
+  const run = (ticketId: string) => store.insertRun({ project: 'a', ticketId, title: 't', state: 'merged', startedAt: 1 });
+  const [kept, shelved, gone] = [run('kept'), run('shelved'), run('gone')];
+  store.updateRun(shelved, { archivedAt: 5 });
+  store.deleteRun(gone);
+  assert.deepEqual(store.history(10).map((r) => [r.ticketId, r.archivedAt]), [['kept', null]]);
+  assert.deepEqual(store.archived(10).map((r) => [r.ticketId, r.archivedAt]), [['shelved', 5]]);
+  assert.equal(store.getRun(gone), undefined);
+  assert.equal(store.getRun(kept)?.ticketId, 'kept');
+});
+
 it('keeps a Run\'s host job across a reopen, and has none until one is saved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'store-'));
   try {
@@ -58,4 +70,13 @@ it('keeps a Run\'s host job across a reopen, and has none until one is saved', (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+it('keeps each agent\'s latest usage under its log part name', () => {
+  const store = openStore(':memory:');
+  const id = store.insertRun({ project: 'a', ticketId: 'a-1', title: 't', state: 'agent', startedAt: 1 });
+  store.setUsage(id, 'attempt1-implement', { context: 10, tokens: 20 });
+  store.setUsage(id, 'attempt1-review', { context: 5, tokens: 6 });
+  store.setUsage(id, 'attempt1-implement', { context: 30, tokens: 90 });
+  assert.deepEqual(store.getRun(id)?.usage, { 'attempt1-implement': { context: 30, tokens: 90 }, 'attempt1-review': { context: 5, tokens: 6 } });
 });

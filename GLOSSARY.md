@@ -1,11 +1,26 @@
 # Glossary
 
-**Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), identified by its local repo. Each Project keeps its own Ticket queue.
+**Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), known by a name that never changes, and worked in its local repo. Each Project keeps its own Ticket queue.
+
+**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from.
+_Avoid_: sandcastle setup, adding a repo.
+
+**Smoke check**: An agent-free trial of a Project's sandbox: its install and a bounded check run on a fresh clone. Passing it is required for Onboarding, but is not Onboarding by itself.
+_Avoid_: dry run, test run.
+
+**Check service**: A Project's running dev service whose image runs the agent's checks, for a stack the sandbox can't run.
+_Avoid_: checkContainer (in prose), php container.
 
 **Ticket**: One unit of work in a Project's own Beads queue. Work tracked elsewhere (e.g. Jira) is not a Ticket until it is brought into that queue.
 _Avoid_: issue, task, job.
 
-**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, with no open blockers, not claimed, and not opted out of ysz.
+**Jira key**: The key of the Jira issue a Ticket was brought in from (e.g. OP-2522). Not every Ticket has one.
+_Avoid_: external ref, Jira id.
+
+**Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
+_Avoid_: issues, beads list.
+
+**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children left open, not claimed, and not opted out of ysz.
 
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.
@@ -26,7 +41,7 @@ _Avoid_: code review, review (alone).
 **Dashboard**: The web page where the human watches and steers ysz: Runs, Ready Tickets, Run logs, pausing Projects. Only the human may use it, never an agent.
 _Avoid_: UI, web app.
 
-**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request. Always the human's review, never the Review agent's.
+**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
 **Merged**: A Run's end once the human merges its pull request. The Ticket is then closed.
 

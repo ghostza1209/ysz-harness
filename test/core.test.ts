@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import type { BeadsGateway, Ticket } from '../src/beads';
+import type { BeadsGateway, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
 import type { HostSteps } from '../src/host';
 import type { Project } from '../src/projects';
@@ -35,9 +35,13 @@ let outcomeError: Error | undefined;
 let preparedWhile: string[];
 /** Errors for the next bead hand-back by kill, and the next markInReview. */
 let killError: Error | undefined;
+let removedLogs: number[];
 let markError: Error | undefined;
 /** Holds showContext open (a Run in the claimed state) until resolved. */
 let contextGate: Promise<void> | undefined;
+/** The In review blocker showContext reports, and the context each prepare was given. */
+let inReviewBlocker: TicketContext['inReviewBlocker'];
+let preparedContexts: TicketContext[];
 /** The sandbox containers the orchestrator was asked to remove (by clone dir), and the error stop() fails with. */
 let stops: string[];
 let stopError: Error | undefined;
@@ -85,6 +89,9 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (failError) throw failError;
     writes.push(`fail ${project.name}/${id}: ${reason}`);
   },
+  async requeue(project, id) {
+    writes.push(`requeue ${project.name}/${id}`);
+  },
   async kill(project, id, reason) {
     if (killError) throw killError;
     writes.push(`kill ${project.name}/${id}: ${reason}`);
@@ -99,7 +106,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [] };
+    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -148,11 +155,12 @@ const fakeHost: HostSteps = {
     preflights.push(project.name);
     if (failingPreflights.has(project.name)) throw new Error('compose php is not running');
   },
-  async prepare(project, ticketId) {
+  async prepare(project, ticketId, context) {
     hostSteps.push(`prepare ${project.name}/${ticketId}`);
+    preparedContexts.push(context);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40) };
+    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
   },
   async collect(_project, { dir }) {
     hostSteps.push(`collect ${dir}`);
@@ -195,8 +203,11 @@ beforeEach(() => {
   touchedByHand = new Set();
   outcomeError = undefined;
   killError = undefined;
+  removedLogs = [];
   markError = undefined;
   contextGate = undefined;
+  inReviewBlocker = null;
+  preparedContexts = [];
   stops = [];
   stopError = undefined;
   claimed = [];
@@ -224,7 +235,9 @@ async function polled(registry: readonly Project[] = projects) {
     host: fakeHost,
     store,
     clock: { now: () => now },
+    model: 'test-model',
     log: (runId, line) => runLog.push(`${runId}: ${line}`),
+    removeLog: async (runId) => void removedLogs.push(runId),
   });
   await orchestrator.poll();
   return orchestrator;
@@ -404,8 +417,8 @@ describe('starting Runs', () => {
 
     assert.deepEqual(writes, ['claim fazwaz/fz1', 'claim PopDeal/pd1']);
     assert.deepEqual(
-      o.runs().live.map((r) => [r.project, r.ticketId, r.state, r.attempt]),
-      [['fazwaz', 'fz1', 'agent', 1], ['PopDeal', 'pd1', 'agent', 1]],
+      o.runs().live.map((r) => [r.project, r.ticketId, r.state, r.attempt, r.model]),
+      [['fazwaz', 'fz1', 'agent', 1, 'test-model'], ['PopDeal', 'pd1', 'agent', 1, 'test-model']],
     );
     assert.deepEqual(o.readyQueue(), []);
     finish();
@@ -458,7 +471,7 @@ describe('starting Runs', () => {
     claimErrors.fazwaz = new Error('bd claim failed: no such repo');
     const o = await polled();
     await o.tick();
-    assert.deepEqual(o.runs(), { live: [], history: [] });
+    assert.deepEqual(o.runs(), { live: [], history: [], archived: [] });
     assert.equal(o.projectStatuses()[0].error, 'claiming fz1: bd claim failed: no such repo');
   });
 
@@ -605,6 +618,34 @@ describe('a happy-path Run', () => {
     await o.whenIdle();
     const [run] = o.runs().history;
     assert.deepEqual([run.startedAt, run.endedAt], [Date.parse('2026-10-08T12:00:00Z'), Date.parse('2026-10-08T12:01:30Z')]);
+  });
+});
+
+describe('a Run stacked on an In review blocker', () => {
+  const inReviewRun = (project: string, ticketId: string, prUrl: string) =>
+    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl });
+
+  it("hands prepare the blocker with its Project's In review PR", async () => {
+    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2' });
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it('fails the Run before any clone, releasing the Ticket, when no In review Run holds the blocker', async () => {
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [['failed', 'blocker tv0 is In review, but no In review Run has its PR to stack on']]);
   });
 });
 
@@ -1078,6 +1119,50 @@ describe('Kill', () => {
   });
 });
 
+describe('Retry a failed Run', () => {
+  async function failedRun() {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+
+  it('puts the Ticket back in the Ready Queue and keeps the failed row as it was', async () => {
+    const o = await failedRun();
+    const [before] = o.runs().history;
+    writes = [];
+
+    await o.requeue(before.id);
+
+    assert.deepEqual(writes, ['requeue thaivis/tv1']);
+    assert.deepEqual(o.runs().history, [before]);
+  });
+
+  it('lets a Ticket whose hand-back failed be picked again', async () => {
+    failError = new Error('bd timed out');
+    const o = await failedRun();
+    await o.requeue(o.runs().history[0].id);
+    await o.poll();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1', 'requeue thaivis/tv1', 'claim thaivis/tv1', 'release thaivis/tv1']);
+  });
+
+  it('refuses a Run that did not fail, or whose Ticket has a newer Run, and writes nothing', async () => {
+    const o = await failedRun();
+    const [old] = o.runs().history;
+    writes = [];
+    for (const state of ['needs-attention', 'in-review', 'killed'] as const) {
+      await assert.rejects(o.requeue(startRun('fazwaz', state)), /no failure to retry/);
+    }
+    store.insertRun({ project: 'thaivis', ticketId: 'tv1', title: 'again', state: 'in-review', startedAt: now });
+    await assert.rejects(o.requeue(old.id), /no failure to retry/);
+    assert.deepEqual(writes, []);
+  });
+});
+
 describe('Clean up', () => {
   async function failedRun() {
     agent = async () => ({ outcome: 'stopped', tail: 'blocked' });
@@ -1146,6 +1231,88 @@ describe('Clean up', () => {
       fakeHost.removeClone = removeClone;
     }
     assert.equal(o.runs().history[0].cloneDir, '/clones/tv1-2');
+  });
+});
+
+describe('Delete', () => {
+  it('removes a failed Run\'s clone, then its log, then its row', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'failed');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    await o.deleteRun(id);
+    assert.deepEqual(hostSteps, ['removeClone /clones/x']);
+    assert.deepEqual(removedLogs, [id]);
+    assert.equal(store.getRun(id), undefined);
+  });
+
+  it('deletes killed and interrupted Runs, with no clone to remove', async () => {
+    const o = await polled();
+    const ids = [startRun('thaivis', 'killed'), startRun('fazwaz', 'interrupted')];
+    for (const id of ids) await o.deleteRun(id);
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history, []);
+  });
+
+  it('refuses live, in-review and finished Runs', async () => {
+    const o = await polled();
+    for (const state of ['agent', 'needs-attention', 'in-review', 'merged', 'pr-closed'] as const) {
+      await assert.rejects(o.deleteRun(startRun('thaivis', state)), /not failed or killed/);
+    }
+    await assert.rejects(o.deleteRun(999), /not failed or killed/);
+    assert.equal(store.liveRuns().length + store.history(50).length, 5);
+  });
+
+  it('keeps a killed Run while its Ticket is still claimed, so a restart still skips the Ticket', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'killed');
+    claimed = ['thaivis/thaivis-run'];
+    await assert.rejects(o.deleteRun(id), /still claimed/);
+    assert.equal(store.getRun(id)?.state, 'killed');
+
+    claimed = []; // released since, by a restart or by hand
+    await o.deleteRun(id);
+    assert.equal(store.getRun(id), undefined);
+  });
+
+  it('keeps the row and its log when the clone removal fails', async () => {
+    const o = await polled();
+    const id = startRun('thaivis', 'failed');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    const removeClone = fakeHost.removeClone;
+    fakeHost.removeClone = async () => {
+      throw new Error('EBUSY');
+    };
+    try {
+      await assert.rejects(o.deleteRun(id), /EBUSY/);
+    } finally {
+      fakeHost.removeClone = removeClone;
+    }
+    assert.deepEqual(removedLogs, []);
+    assert.equal(store.getRun(id)?.cloneDir, '/clones/x');
+  });
+});
+
+describe('Archive', () => {
+  it('moves a merged or PR-closed Run from the history to the archive, and back', async () => {
+    const o = await polled();
+    const merged = startRun('thaivis', 'merged');
+    const closed = startRun('fazwaz', 'pr-closed');
+    o.setArchived(merged, true);
+    o.setArchived(closed, true);
+    assert.deepEqual(o.runs().history, []);
+    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[closed, now], [merged, now]]);
+
+    o.setArchived(merged, false);
+    assert.deepEqual(o.runs().history.map((r) => [r.id, r.archivedAt]), [[merged, null]]);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [closed]);
+  });
+
+  it('refuses Runs that are not merged or PR closed', async () => {
+    const o = await polled();
+    for (const state of ['agent', 'in-review', 'failed', 'killed'] as const) {
+      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged or PR closed/);
+    }
+    assert.deepEqual(o.runs().archived, []);
   });
 });
 

@@ -23,6 +23,7 @@ const orchestrator = createOrchestrator({
   host: createHostSteps(MODEL),
   store: openStore(`${root}data/orchestrator.db`),
   clock: Date,
+  model: MODEL,
   // A log write that fails must not fail the Run.
   log: (runId, line) => {
     try {
@@ -31,6 +32,7 @@ const orchestrator = createOrchestrator({
       console.error(`[log] run ${runId}: ${(err as Error).message}`);
     }
   },
+  removeLog: (runId) => createRunLogs(`${root}data/logs`).remove(runId),
 });
 
 for (const problem of await orchestrator.recover()) console.error(`[recover] ${problem}`);

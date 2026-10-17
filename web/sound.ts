@@ -4,9 +4,13 @@ export type Cue = 'click' | 'step' | 'good' | 'bad';
 
 const BAD: RunState[] = ['failed', 'killed', 'needs-attention', 'interrupted'];
 
-/** The cue for what changed since the last poll: the worst news wins, a Run seen for the first time counts as a step. */
+/**
+ * The cue for what changed since the last poll: the worst news wins, a new Run counts as a step. An unseen Run older than
+ * every seen one is not new: it came back into the list (unarchived, or moved up as newer rows were deleted or archived).
+ */
 export function stageCue(prev: Map<number, RunState>, runs: RunRow[]): Cue | null {
-  const moved = runs.filter((r) => prev.get(r.id) !== r.state).map((r) => r.state);
+  const newest = Math.max(...prev.keys());
+  const moved = runs.filter((r) => (prev.has(r.id) ? prev.get(r.id) !== r.state : r.id > newest)).map((r) => r.state);
   if (moved.some((s) => BAD.includes(s))) return 'bad';
   if (moved.includes('in-review')) return 'good';
   return moved.length ? 'step' : null;

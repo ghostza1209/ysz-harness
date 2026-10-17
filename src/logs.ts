@@ -1,5 +1,5 @@
 import { appendFileSync } from 'node:fs';
-import { open, readdir, stat } from 'node:fs/promises';
+import { open, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /** A Run's log: its agent log files (`<runId>-attempt<n>-<role>.log`, written by sandcastle) read as one stream, oldest Attempt first, then its host log. */
@@ -8,6 +8,10 @@ export interface RunLogs {
   size(runId: number): Promise<number>;
   /** Bytes [from, to) of the concatenated log; shorter if the files hold less. */
   slice(runId: number, from: number, to: number): Promise<Buffer>;
+  /** Each log file in stream order, named like `attempt1-implement` or `host`, with its size in bytes. */
+  parts(runId: number): Promise<{ name: string; size: number }[]>;
+  /** Delete every log file of the Run. */
+  remove(runId: number): Promise<void>;
 }
 
 export function createRunLogs(dir: string): RunLogs {
@@ -20,11 +24,11 @@ export function createRunLogs(dir: string): RunLogs {
     const found = names.flatMap((name) => {
       const m = re.exec(name);
       // The host log comes after every Attempt: the host steps that write it run once the agents are done.
-      return m ? [{ path: join(dir, name), attempt: m[1] ? Number(m[1]) : Infinity, role: m[2] ?? '' }] : [];
+      return m ? [{ path: join(dir, name), name: name.slice(`${runId}-`.length, -'.log'.length), attempt: m[1] ? Number(m[1]) : Infinity, role: m[2] ?? '' }] : [];
     });
     // "implement" sorts before "review", which is the order the agents run in.
     found.sort((a, b) => a.attempt - b.attempt || a.role.localeCompare(b.role));
-    return Promise.all(found.map(async (f) => ({ path: f.path, size: (await stat(f.path)).size })));
+    return Promise.all(found.map(async (f) => ({ path: f.path, name: f.name, size: (await stat(f.path)).size })));
   }
 
   return {
@@ -51,6 +55,14 @@ export function createRunLogs(dir: string): RunLogs {
         offset += f.size;
       }
       return Buffer.concat(parts);
+    },
+
+    async parts(runId) {
+      return (await files(runId)).map(({ name, size }) => ({ name, size }));
+    },
+
+    async remove(runId) {
+      await Promise.all((await files(runId)).map((f) => rm(f.path, { force: true })));
     },
   };
 }

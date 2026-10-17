@@ -14,6 +14,7 @@
 2. เมื่อมี slot ว่าง (สูงสุด 1 Run ต่อ Project) ysz จะ claim Ticket และ clone repo ไว้บน branch `agent/<ticket-id>`
 3. **Implement agent** ทำ Ticket ใน sandbox จากนั้น **Review agent** รีวิวและแก้งาน ถ้า Attempt แรกล้มจะลองใหม่อีกครั้งเดียว
 4. ฝั่ง host push branch แล้วเปิด PR เข้า `baseBranch` ของ Project ตัว bead จะได้คอมเมนต์ลิงก์ PR และ label `in-review`
+   Ticket ที่ blocker ตัวเดียวที่ยังไม่ปิดอยู่ใน `In review` ไม่ต้องรอ merge: Run จะ clone จาก branch `agent/<id>` ของ blocker แล้วเปิด stacked PR ต่อบน branch นั้น (`gh stack link` ต้องติดตั้ง extension `gh-stack`) ดู [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
 ## สิ่งที่ต้องมี
@@ -52,9 +53,10 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |
+| ส่ง Ticket ของ Run ที่ล้มเหลวกลับเข้าคิว Ready | กด **ลองใหม่** ในแถวของมันใน History |
 | ดูว่า Run ทำอะไรไปบ้าง | กด **Log** ในรายการ History |
 
-เมื่อ Run จบที่สถานะ `In review` ให้รีวิวและ merge PR เอง แล้วปิด bead
+เมื่อ Run จบที่สถานะ `In review` ให้รีวิวและ merge PR เอง ysz จะปิด bead ให้เมื่อเห็นว่า merge แล้ว ถ้า stack ตามหลัง `baseBranch` ให้กด **Rebase stack** ที่หน้า PR
 
 ## พัฒนา
 

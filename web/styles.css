@@ -241,7 +241,21 @@ h2 {
 }
 
 .stack.runs {
-  grid-template-columns: repeat(auto-fill, minmax(min(560px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr));
+}
+
+/* A long queue scrolls in place so History stays in reach; the padding keeps the cards' hover glow inside the clip. */
+.stack.queue {
+  max-height: max(420px, calc(100vh - 220px));
+  overflow-y: auto;
+  padding: 4px 8px 12px 4px;
+  margin: -4px -8px 0 -4px;
+}
+
+/* The minmax(0) tracks let a card shrink to the column instead of stretching it. */
+.stack.queue,
+.card.queue {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* Summary strip: Run counts and per-Project pause switches */
@@ -454,6 +468,11 @@ button:hover {
   background: var(--soft);
 }
 
+button[aria-busy='true'] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 button.small {
   padding: 3px 10px;
   font-size: 12px;
@@ -556,6 +575,18 @@ button.link {
   gap: 4px;
 }
 
+.usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage b {
+  font-weight: 600;
+}
+
 .when {
   display: grid;
   gap: 2px;
@@ -581,6 +612,98 @@ button.link {
   flex-wrap: wrap;
 }
 
+/* History groups */
+
+.group + .group,
+.group + .tr,
+.tr + .group,
+.group > summary + .tr {
+  border-top: 1px solid var(--line);
+}
+
+.group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.group > summary::before {
+  content: '▸';
+  color: var(--mute);
+  transition: transform 0.15s;
+}
+
+.group[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.more {
+  display: block;
+  margin: 12px auto 0;
+}
+
+/* Compact History: one line a Run. */
+
+.table.compact .tr {
+  align-items: center;
+  padding: 6px 16px;
+}
+
+.table.compact .what {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.table.compact .what .row {
+  flex-wrap: nowrap;
+}
+
+.table.compact .what .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table.compact .usage {
+  display: inline;
+}
+
+.table.compact .model,
+.table.compact .note {
+  display: none;
+}
+
+.table.compact .when {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+/* One column has no room for one line: let the title wrap under the Ticket. */
+@media (max-width: 900px) {
+  .table.compact .what {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+
+  .table.compact .what .title {
+    flex-basis: 100%;
+  }
+}
+
 /* Log */
 
 div.log {
@@ -592,9 +715,35 @@ div.log {
   margin: 4px 0 0;
   /* Fills the viewport under the topbar, summary and Run card header, so watching a Run needs no page scroll. */
   height: max(220px, calc(100dvh - 400px));
+  /* Drag the bottom-right corner to make the tail taller or shorter. */
+  resize: vertical;
+  min-height: 120px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* The live tail: lines sit at the bottom of the box and grow upward, as in a terminal. */
+.tail {
+  position: relative;
+}
+
+.tail div.log {
+  display: flex;
+  flex-direction: column;
+}
+
+.tail-body {
+  margin-top: auto;
+}
+
+/* Shown once the reader scrolls up; brings the tail back to the bottom and follows it again. */
+.tail .jump {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 30%);
 }
 
 /* Log blocks: steps are dim, tool calls are code, the agent's own words read as prose. */
@@ -681,6 +830,7 @@ div.log {
 .log-dialog div.log {
   flex: 1;
   height: auto;
+  resize: none;
   margin: 0;
 }
 
@@ -709,6 +859,14 @@ div.log {
 
   .columns {
     grid-template-columns: 1fr;
+  }
+
+  /* One column: the page scrolls, so a second scroller inside it would trap the thumb. */
+  .stack.queue {
+    max-height: none;
+    overflow: visible;
+    padding: 0;
+    margin: 0;
   }
 
   .tr {
@@ -787,6 +945,29 @@ div.log {
 .stages li.stuck span {
   background: var(--warn);
   animation: blink 1.6s ease-in-out infinite;
+}
+
+/* The log dialog's stage bar picks which stage's log shows. */
+.stages.pick button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stages.pick li.on {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.stages.pick li.on span {
+  background: var(--accent);
 }
 
 .elapsed {
