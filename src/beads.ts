@@ -30,7 +30,7 @@ export const ORCHESTRATOR = 'orchestrator';
 export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no unclosed children, and every
-   * blocker closed except at most one In review.
+   * blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
    */
   listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */

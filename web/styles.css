@@ -2066,6 +2066,10 @@ a.chip {
   gap: 8px;
 }
 
+.waiting a {
+  white-space: nowrap;
+}
+
 .waiting .title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2111,5 +2115,14 @@ a.chip {
 
   .topbar > nav {
     order: 1;
+  }
+
+  /* The title needs the bar's room; the age still says how long. */
+  .waiting li {
+    grid-template-columns: auto auto minmax(0, 1fr) 56px;
+  }
+
+  .waiting .bar {
+    display: none;
   }
 }

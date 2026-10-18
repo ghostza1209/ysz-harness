@@ -1,6 +1,6 @@
 import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
-import { dicts, en, type Dict, type Lang } from './i18n';
+import { dicts, en, span, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
 import { muted, openedPrs, play, setMuted, stageCue } from './sound';
@@ -303,14 +303,6 @@ function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
 
 // English keeps the browser's own clock format.
 const time = (ms: number, t: Dict) => new Date(ms).toLocaleTimeString(t === en ? [] : t.locale, { hour: '2-digit', minute: '2-digit' });
-export const span = (ms: number, { units: u }: Dict) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}${u.s}`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}${u.m} ${String(s % 60).padStart(2, '0')}${u.s}`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}${u.h} ${m % 60}${u.m}` : `${Math.floor(h / 24)}${u.d} ${h % 24}${u.h}`;
-};
 const ago = (ms: number, t: Dict) => {
   const m = Math.floor(ms / 60_000);
   if (m < 1) return t.justNow;
@@ -674,6 +666,9 @@ export function App() {
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
   // The tour's steps are on the overview.
   const onStats = hash === '#stats' && !demo;
+  // The same array until the Projects change, so the Stats page skips the polls' re-renders.
+  const projectList = view?.projects.map((p) => p.name).join('\n') ?? '';
+  const projectNames = useMemo(() => (projectList ? projectList.split('\n') : []), [projectList]);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
     { key: 'ready', n: view.ready.length, label: 'Ready' },
@@ -772,7 +767,7 @@ export function App() {
       <div className="page">
         {onStats ? (
           <Suspense fallback={<div className="skeleton" />}>
-            <Stats t={t} projects={view?.projects.map((p) => p.name) ?? []} project={project} setProject={setProject} range={range} setRange={setRange} />
+            <Stats t={t} projects={projectNames} project={project} setProject={setProject} range={range} setRange={setRange} />
           </Suspense>
         ) : !view ? (
           <div className="skeleton-grid" aria-busy>

@@ -1645,7 +1645,7 @@ describe('watching in-review PRs', () => {
   };
   const states = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.ticketId, r.state, r.endedAt, r.prClosedAt]);
 
-  it('ends a Run Merged and closes its bead once the PR merges, keeping the time the Orchestrator finished and recording when it merged', async () => {
+  it('ends a Run Merged and closes its bead once the PR merges, keeping when it reached In review and recording when it merged', async () => {
     inReview('tv1', PR_URL);
     prStates[PR_URL] = 'MERGED';
     const o = await polled();

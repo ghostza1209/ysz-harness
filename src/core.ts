@@ -20,6 +20,9 @@ export interface QueueItem {
   runNow: boolean;
 }
 
+/** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
+export type StatsRun = Omit<RunRow, 'note' | 'cloneDir'>;
+
 export interface ProjectStatus {
   name: string;
   ready: number;
@@ -39,7 +42,7 @@ export interface Orchestrator {
   /** Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived ones (newest first). */
   runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
   /** What the Stats page graphs: every Run, archived ones too, and every change of each Project's Backlog and Ready counts. */
-  stats(): { runs: RunRow[]; backlog: BacklogPoint[] };
+  stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
   slots(): { used: number; total: number };
@@ -577,7 +580,8 @@ export function createOrchestrator(deps: {
     },
 
     stats() {
-      return { runs: store.allRuns(), backlog: store.backlogHistory() };
+      // ponytail: every Run on each visit, ~0.4 kB each; filter by range here if the page grows slow.
+      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, ...r }) => r), backlog: store.backlogHistory() };
     },
 
     readyQueue,

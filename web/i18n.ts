@@ -406,3 +406,13 @@ export const th: Dict = {
 };
 
 export const dicts: Record<Lang, Dict> = { en, th };
+
+/** A duration in the short units, as in `5m 03s`. */
+export const span = (ms: number, { units: u }: Dict) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}${u.s}`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}${u.m} ${String(s % 60).padStart(2, '0')}${u.s}`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}${u.h} ${m % 60}${u.m}` : `${Math.floor(h / 24)}${u.d} ${h % 24}${u.h}`;
+};
