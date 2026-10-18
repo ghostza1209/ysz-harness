@@ -32,7 +32,8 @@ Name the exact command and quote its output as it printed it, untranslated: the 
 `{{TICKET_JSON}}` lists the open Friction of this Project under `openFriction`, each with an id and a title. When what got in your way is one of them, do not report it as new: refer to it by id, and say what happened this time.
 
 <friction ref="the-id">
-What happened this time: the command you ran, and the output it printed, quoted.
+What happened this time
+The command you ran, and the output it printed, quoted.
 What you skipped, guessed or worked around.
 </friction>
 

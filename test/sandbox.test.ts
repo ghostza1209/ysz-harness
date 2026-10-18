@@ -23,7 +23,8 @@ it('has both agent prompts ask a <friction> report, new or seen again, for the c
   for (const role of ['implement', 'review']) {
     const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
     assert.match(prompt, /<friction>\n[^\n]*\n[^\n]*command[^\n]*output[^\n]*\n/, role);
-    assert.match(prompt, /<friction ref="the-id">\n(?:[^\n]*\n)?[^\n]*command[^\n]*output[^\n]*\n/, role);
+    // The first line is the title, cut at 200 characters, so the command goes below it.
+    assert.match(prompt, /<friction ref="the-id">\n[^\n]*\n[^\n]*command[^\n]*output[^\n]*\n/, role);
   }
 });
 
