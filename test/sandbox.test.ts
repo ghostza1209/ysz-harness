@@ -55,24 +55,24 @@ it('reports usage once per message, keeps a subagent out of the context, and end
 });
 
 it('reads COMPLETE as complete', () => {
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { followUps: [], friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('takes the last <question> of the output as the question for NEEDS_INFO', () => {
   const stdout = 'I may ask <question>first?</question> later.\n<question>\n  Which of the two APIs?\nBoth fit.\n</question>\n' + NEEDS_INFO;
-  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { followUps: [], friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('goes by the signal the agent ended on, not the one sandcastle matched first', () => {
   const stdout = `I will print ${COMPLETE} once done, but first: <question>Which API?</question>\n${NEEDS_INFO}`;
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { followUps: [], friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('still ends needs-info, with a stand-in question, when the agent forgot the <question>', () => {
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: NEEDS_INFO }), {
     outcome: 'needs-info',
     question: 'the agent signalled NEEDS_INFO without a <question>',
-    reports: { followUps: [], friction: [] },
+    reports: { followUps: [], friction: [], fixedFollowUps: [] },
   });
 });
 
@@ -175,6 +175,29 @@ describe('the <follow-up> reports', () => {
     assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.followUps, expected);
     assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.followUps, expected);
   });
+});
+
+describe('the <fixed-follow-up> marks', () => {
+  const fixed = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.fixedFollowUps;
+
+  it('reads the ref of every self-closing mark, and nothing from other tags', () => {
+    assert.deepEqual(fixed('done <fixed-follow-up ref="F1"/> and <fixed-follow-up ref="F3" />\n<fixed-follow-up   ref="F2"/>'), ['F1', 'F3', 'F2']);
+    assert.deepEqual(fixed('<fixed-follow-up/><fixed-follow-up ref="F1">'), []);
+    assert.deepEqual(fixed('<follow-up>F1</follow-up><friction ref="F1">x</friction>'), []);
+  });
+
+  it('is reported on needs-info and stopped as well as complete', () => {
+    const mark = '<fixed-follow-up ref="F2"/>';
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${mark}<question>q?</question>${NEEDS_INFO}` }).reports.fixedFollowUps, ['F2']);
+    assert.deepEqual(agentResult({ stdout: `blocked ${mark}` }).reports.fixedFollowUps, ['F2']);
+  });
+});
+
+it('has the review prompt point at implementReports in the Ticket file and ask for <fixed-follow-up> marks, and not the implement prompt', () => {
+  const prompt = (role: string) => readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+  assert.match(prompt('review'), /implementReports/);
+  assert.match(prompt('review'), /<fixed-follow-up ref="F1"\/>/);
+  assert.doesNotMatch(prompt('implement'), /fixed-follow-up/);
 });
 
 /** teeCommand on a fake sandbox handle: its exec streams one stdout line, then fails with stderr, as a broken pnpm install does. */

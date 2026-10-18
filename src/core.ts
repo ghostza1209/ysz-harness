@@ -239,22 +239,27 @@ export function createOrchestrator(deps: {
        * mistaken reference loses nothing). A failed write is a log line and nothing more; a kill stops it.
        */
       async function recordFriction(attempt: number, role: 'implement' | 'review', { friction }: AgentReports) {
+        const written: Reports['friction'] = [];
         for (const { title, body, ref } of friction) {
-          if (signal.aborted) return;
+          if (signal.aborted) break;
           try {
             const report = { project, title, body, ticketId: ticket.id, runId, attempt, role };
             const open = openFriction.find((f) => f.id === ref);
             if (open) {
               await beads.commentFriction(open.id, report);
-              recorded.friction.push({ id: open.id, title: open.title, seenAgain: true });
+              written.push({ id: open.id, title: open.title, seenAgain: true });
             } else {
-              recorded.friction.push({ id: await beads.createFriction(report), title, seenAgain: false });
+              const id = await beads.createFriction(report);
+              openFriction = [...openFriction, { id, title }]; // open now: a later agent's reference to it is a comment
+              written.push({ id, title, seenAgain: false });
             }
+            recorded.friction.push(written.at(-1)!);
             store.setReports(runId, recorded);
           } catch (err) {
             logRun(runId, `Recording Friction "${title}" failed: ${message(err)}`);
           }
         }
+        return written;
       }
 
       /**
@@ -284,7 +289,7 @@ export function createOrchestrator(deps: {
           return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
         }
         signal.throwIfAborted();
-        await recordFriction(n, 'implement', implemented.reports);
+        const implementFriction = await recordFriction(n, 'implement', implemented.reports);
         signal.throwIfAborted();
         if (implemented.outcome === 'needs-info') return { kind: 'needs-info', agent: 'implement', question: implemented.question };
         if (implemented.outcome === 'stopped') {
@@ -301,6 +306,15 @@ export function createOrchestrator(deps: {
         signal.throwIfAborted();
         if (collected.commits === 0) return { kind: 'failed', prepared, reason: 'the agent made no commits' };
 
+        // The Ticket file, not the prompt, carries what the implement agent wrote: sandcastle runs a !-backtick span in a prompt as a shell command.
+        const implementReports = { followUps: implemented.reports.followUps.map((f, i) => ({ ref: `F${i + 1}`, ...f })), friction: implementFriction };
+        try {
+          await host.writeTicket(prepared, { ...context, openFriction, implementReports });
+        } catch (err) {
+          signal.throwIfAborted();
+          return { kind: 'failed', prepared, reason: `the implement agent's reports could not be handed to the review agent: ${message(err)}` };
+        }
+
         store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
@@ -309,7 +323,12 @@ export function createOrchestrator(deps: {
           await recordFriction(n, 'review', reviewed.reports);
           signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
-          if (reviewed.outcome === 'complete') return { kind: 'done', prepared, followUps: [...found(implemented, 'implement'), ...found(reviewed, 'review')] };
+          if (reviewed.outcome === 'complete') {
+            // What the review says nothing about stays; a ref it makes up matches nothing.
+            const fixed = new Set(reviewed.reports.fixedFollowUps);
+            const kept = found(implemented, 'implement').filter((_, i) => !fixed.has(`F${i + 1}`));
+            return { kind: 'done', prepared, followUps: [...kept, ...found(reviewed, 'review')] };
+          }
           skipped = 'the review agent stopped without signalling COMPLETE';
         } catch (err) {
           signal.throwIfAborted();

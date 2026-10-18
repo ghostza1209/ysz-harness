@@ -24,6 +24,11 @@ export interface TicketContext {
   inReviewBlocker: { id: string; title: string; prUrl?: string } | null;
   /** The Project's open Friction in ysz's queue, which an agent refers to by id instead of reporting it as new. The Orchestrator fills it in before each Attempt. */
   openFriction: { id: string; title: string }[];
+  /** Only in the Review agent's file: what the Implement agent of its Attempt reported. Follow-ups carry the ref F<n> the Review agent marks fixed; Friction carries its Ticket id. */
+  implementReports?: {
+    followUps: { ref: string; title: string; body: string }[];
+    friction: { id: string; title: string; seenAgain: boolean }[];
+  };
 }
 
 /** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */

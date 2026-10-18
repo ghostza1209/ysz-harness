@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -35,6 +35,12 @@ export interface HostSteps {
    * parent epic is labelled `epic-branch`, which is first pushed from origin/<baseBranch> if origin lacks it.
    */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
+  /**
+   * Rewrite the clone's Ticket file with `context`, once the implement agent has stopped. The sandbox could have made
+   * the clone's repo/, .orchestrator or ticket.json a link, so it throws, writing nothing, unless all three are plain,
+   * and never writes through a link.
+   */
+  writeTicket(prepared: Pick<Prepared, 'dir'>, context: TicketContext): Promise<void>;
   /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over what it was cloned onto. */
   collect(project: Project, prepared: Prepared, signal?: AbortSignal): Promise<{ tip: string; commits: number }>;
   /**
@@ -258,6 +264,22 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         throw err;
       }
       return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }) };
+    },
+
+    async writeTicket({ dir }, context) {
+      const orchestrator = join(dir, 'repo/.orchestrator');
+      const file = join(orchestrator, 'ticket.json');
+      for (const [path, kind] of [[join(dir, 'repo'), 'directory'], [orchestrator, 'directory'], [file, 'file']] as const) {
+        const st = lstatSync(path, { throwIfNoEntry: false });
+        if (!(kind === 'file' ? st?.isFile() : st?.isDirectory())) throw new Error(`refusing to write the Ticket file: ${path} is not a plain ${kind}`);
+      }
+      // lstat above is the plain check; O_NOFOLLOW makes a link planted since fail the open instead of being followed. The sandbox has stopped, so no race.
+      const fd = openSync(file, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+      try {
+        writeFileSync(fd, JSON.stringify(context, null, 2));
+      } finally {
+        closeSync(fd);
+      }
     },
 
     async collect(project, prepared, signal) {

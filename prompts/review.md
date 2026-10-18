@@ -34,6 +34,8 @@ What happened this time, and what you skipped, guessed or worked around.
 
 A reference counts towards the same limit of 3.
 
+`{{TICKET_JSON}}` also holds, under `implementReports`, what the implement agent already reported: its follow-ups, each with a ref `F1`, `F2` and so on, and its friction with the Ticket ids they became. Report only what is new: never repeat one of them. A friction of theirs that also got in your way is already in `openFriction`, so refer to it by id as above.
+
 Report at most 3, the ones that cost you most, and write them in the language of the Ticket. Report nothing when nothing got in your way. Do this also when you stop or ask a question.
 
 ## Reporting follow-ups
@@ -46,6 +48,12 @@ What the work is, and why it matters.
 </follow-up>
 
 Report at most 3, the ones that matter most, and write them in the language of the Ticket. Report nothing when you noticed nothing. Do this also when you stop or ask a question.
+
+When your own commits fixed one of the implement agent's follow-ups in `implementReports`, mark it, in the same message, with its ref:
+
+<fixed-follow-up ref="F1"/>
+
+Mark it only when your commits resolved it, not when you merely agree it is real. One you say nothing about stays on the list, and the human triages it.
 
 ## Rules
 

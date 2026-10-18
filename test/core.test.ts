@@ -62,6 +62,9 @@ let failingFollowUps: Set<string>;
 let followUpIds: number;
 /** The open Friction the Project's queue holds, or the error fetching it fails with. */
 let openFriction: { id: string; title: string }[] | Error;
+/** The Ticket file the host wrote into each clone before its review agent, and the error the next write fails with. */
+let ticketFiles: TicketContext[];
+let writeTicketError: Error | undefined;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
@@ -158,7 +161,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   },
 });
 
-const none: AgentResult['reports'] = { followUps: [], friction: [] };
+const none: AgentResult['reports'] = { followUps: [], friction: [], fixedFollowUps: [] };
 const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
@@ -194,6 +197,10 @@ const fakeHost: HostSteps = {
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
+  },
+  async writeTicket(_prepared, context) {
+    if (writeTicketError) throw writeTicketError;
+    ticketFiles.push(context);
   },
   async collect(_project, { dir }) {
     hostSteps.push(`collect ${dir}`);
@@ -253,6 +260,8 @@ beforeEach(() => {
   failingFollowUps = new Set();
   followUpIds = 0;
   openFriction = [];
+  ticketFiles = [];
+  writeTicketError = undefined;
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
@@ -885,7 +894,7 @@ describe('the Attempt policy', () => {
 });
 
 describe('Follow-ups an agent reports', () => {
-  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [] });
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
   async function run() {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -941,8 +950,116 @@ describe('Follow-ups an agent reports', () => {
   });
 });
 
+describe('what the review agent is handed and may mark fixed', () => {
+  const reports = (followUps: string[], friction: AgentResult['reports']['friction'] = [], fixedFollowUps: string[] = []): AgentResult['reports'] => ({
+    followUps: followUps.map((title) => ({ title, body: `why ${title}` })),
+    friction,
+    fixedFollowUps,
+  });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const created = () => writes.filter((w) => w.startsWith('follow-up')).map((w) => w.split(': ').slice(1).join(': '));
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it('writes the implement agent\'s Follow-ups as F1... and its Friction with their Ticket ids into the Ticket file before the review agent starts', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({
+      outcome: 'complete',
+      reports: reports(['drop the old export', 'rename the flag'], [{ title: 'no php', body: 'x' }, { title: 'phpunit exited 127 again', body: 'y', ref: 'ysz-7' }]),
+    });
+    let seen: TicketContext[] = [];
+    reviewer = async () => {
+      seen = [...ticketFiles];
+      return complete;
+    };
+    await run();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].implementReports, {
+      followUps: [
+        { ref: 'F1', title: 'drop the old export', body: 'why drop the old export' },
+        { ref: 'F2', title: 'rename the flag', body: 'why rename the flag' },
+      ],
+      friction: [
+        { id: 'ysz-1', title: 'no php', seenAgain: false },
+        { id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true },
+      ],
+    });
+    assert.deepEqual(seen[0].openFriction, [
+      { id: 'ysz-7', title: 'phpunit cannot run' },
+      { id: 'ysz-1', title: 'no php' },
+    ]);
+  });
+
+  it('turns the review agent\'s reference to a Friction the implement agent just opened into a comment', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php', body: 'x' }]) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php again', body: 'z', ref: 'ysz-1' }]) });
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), [
+      'friction thaivis/tv1 attempt 1 implement: no php',
+      'friction-comment ysz-1 from thaivis/tv1 attempt 1 review: no php again / z',
+    ]);
+  });
+
+  it('hands the review agent no reports when the implement agent made none', async () => {
+    reviewer = async () => {
+      assert.deepEqual(ticketFiles[0].implementReports, { followUps: [], friction: [] });
+      return complete;
+    };
+    await run();
+    assert.equal(ticketFiles.length, 1);
+  });
+
+  it('drops the Follow-ups the review marks fixed from the PR and the Tickets, and keeps the rest and its own', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two', 'three']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports(['four'], [], ['F1', 'F3']) });
+    const o = await run();
+    assert.deepEqual(published(), ['two', 'four']);
+    assert.deepEqual(created(), ['two', 'four']);
+    assert.deepEqual(o.runs().history[0].reports?.followUps.map((f) => f.title), ['two', 'four']);
+  });
+
+  it('keeps an implement Follow-up the review says nothing about, and ignores a ref it never handed out', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [], ['F3', 'F0', 'one', 'F']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('gives the implement agent\'s Follow-ups alone when the review is skipped, whatever it marked', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: reports(['half a review'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('ignores fixed marks the implement agent makes', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+  });
+
+  it('fails the Attempt, and retries on a fresh clone, when the Ticket file cannot be written', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one']) });
+    writeTicketError = new Error('refusing to write the Ticket file: .orchestrator is not a plain directory');
+    const o = await run();
+    assert.deepEqual(agentCalls.filter((c) => c.startsWith('review')), []);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [[
+      'failed',
+      'Attempt 1 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory\n' +
+        'Attempt 2 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory',
+    ]]);
+  });
+});
+
 describe('Follow-up Tickets the Run creates', () => {
-  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [] });
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
   async function run() {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -1038,7 +1155,7 @@ describe('Follow-up Tickets the Run creates', () => {
 });
 
 describe('Friction an agent reports', () => {
-  const friction = (...titles: string[]): AgentResult['reports'] => ({ followUps: [], friction: titles.map((title) => ({ title, body: '' })) });
+  const friction = (...titles: string[]): AgentResult['reports'] => ({ followUps: [], friction: titles.map((title) => ({ title, body: '' })), fixedFollowUps: [] });
   async function run() {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -1158,7 +1275,7 @@ describe('Friction an agent reports', () => {
     assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
   });
 
-  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ followUps: [], friction: [{ title, body, ref }] });
+  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ followUps: [], friction: [{ title, body, ref }], fixedFollowUps: [] });
 
   it('comments on an open Friction a report refers to, instead of opening a duplicate, and the Run shows it as seen again', async () => {
     openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
@@ -1918,7 +2035,7 @@ describe('restart recovery', () => {
   it('after a restart mid-way, creates only the Follow-ups still in the host job and opens no second PR', async () => {
     // first process: the second Follow-up fails
     failingFollowUps.add('second');
-    agent = async () => ({ outcome: 'complete', reports: { followUps: [{ title: 'first', body: '' }, { title: 'second', body: '' }], friction: [] } });
+    agent = async () => ({ outcome: 'complete', reports: { followUps: [{ title: 'first', body: '' }, { title: 'second', body: '' }], friction: [], fixedFollowUps: [] } });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const first = await polled();
     await first.tick();

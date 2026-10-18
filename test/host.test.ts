@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -514,6 +514,53 @@ describe('host steps against real git', () => {
     git(clone, 'commit', '-q', '-m', 'oops');
     await assert.rejects(host.publish(project, ticket('t-12'), prepared), /\.env is committed/);
     assert.equal(git(origin, 'branch', '--list', 'agent/t-12'), '');
+  });
+
+  describe('writeTicket', () => {
+    const ticketPath = (dir: string) => join(dir, 'repo/.orchestrator/ticket.json');
+    const handed = { ...context, implementReports: { followUps: [{ ref: 'F1', title: 'drop it', body: 'why' }], friction: [] } };
+
+    it('rewrites the Ticket file with the given context', async () => {
+      const prepared = await host.prepare(project, 't-wt1', context);
+      await host.writeTicket(prepared, handed);
+      assert.deepEqual(JSON.parse(readFileSync(ticketPath(prepared.dir), 'utf8')), handed);
+    });
+
+    it('refuses a ticket.json that is a symlink and leaves its target untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt2', context);
+      const target = join(root, 'wt2-target');
+      writeFileSync(target, 'host file');
+      rmSync(ticketPath(prepared.dir));
+      symlinkSync(target, ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+      assert.equal(readFileSync(target, 'utf8'), 'host file');
+    });
+
+    it('refuses an .orchestrator that is a symlink and leaves the directory it points at untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt3', context);
+      const targetDir = join(root, 'wt3-target');
+      mkdirSync(targetDir);
+      writeFileSync(join(targetDir, 'ticket.json'), 'host file');
+      rmSync(join(prepared.dir, 'repo/.orchestrator'), { recursive: true });
+      symlinkSync(targetDir, join(prepared.dir, 'repo/.orchestrator'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.equal(readFileSync(join(targetDir, 'ticket.json'), 'utf8'), 'host file');
+    });
+
+    it('refuses a clone whose repo is a symlink', async () => {
+      const prepared = await host.prepare(project, 't-wt4', context);
+      const moved = join(root, 'wt4-moved');
+      renameSync(join(prepared.dir, 'repo'), moved);
+      symlinkSync(moved, join(prepared.dir, 'repo'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.deepEqual(JSON.parse(readFileSync(join(moved, '.orchestrator/ticket.json'), 'utf8')), context);
+    });
+
+    it('refuses when the sandbox deleted the Ticket file', async () => {
+      const prepared = await host.prepare(project, 't-wt5', context);
+      rmSync(ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+    });
   });
 
   it('refuses a clone whose refs reach out of it through a symlink', async () => {

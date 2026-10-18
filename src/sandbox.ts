@@ -25,6 +25,8 @@ export interface AgentReports {
   followUps: { title: string; body: string }[];
   /** `ref` is the id of an open Friction the agent saw again; its title and body then say what happened this time. */
   friction: { title: string; body: string; ref?: string }[];
+  /** Review agent only: the refs (F1...) of the Implement agent's Follow-ups it fixed with its own commits. Any text; the Orchestrator ignores a ref it did not hand out. */
+  fixedFollowUps: string[];
 }
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
@@ -89,6 +91,7 @@ function parseTags(stdout: string, tag: string) {
 const parseReports = (stdout: string): AgentReports => ({
   followUps: parseTags(stdout, 'follow-up').map(({ title, body }) => ({ title, body })),
   friction: parseTags(stdout, 'friction'),
+  fixedFollowUps: [...stdout.matchAll(/<fixed-follow-up\s+ref="([^"]*)"\s*\/>/g)].map(([, ref]) => ref),
 });
 
 export function agentResult({ completionSignal, stdout }: { completionSignal?: string; stdout: string }): AgentResult {
