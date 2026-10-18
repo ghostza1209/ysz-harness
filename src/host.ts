@@ -46,8 +46,8 @@ export interface HostSteps {
   /**
    * Bring the agent's branch back into the Project repo, push it and open the PR against what it was cloned onto, then
    * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). A blocker PR that merged meanwhile
-   * has the agent's commits replayed onto its base instead, which the PR then targets, unstacked; one that cannot be
-   * read fails the publish. Returns the PR URL and the branch it targets.
+   * has the PR target its base instead, unstacked, with the agent's commits replayed onto it if the merge squashed the
+   * blocker's; one that cannot be read fails the publish. Returns the PR URL and the branch it targets.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review; `followUps` are the titles its "## Follow-ups" section lists;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
@@ -300,14 +300,24 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       let from = prepared.base;
       await fetchBack(project, prepared, tip, signal);
       if (merged) {
-        // Its squash commit is not the blocker's commits, so only the agent's own move onto the blocker's base.
-        step(`${stack.prUrl} merged meanwhile: replaying ${branch} onto ${base}`);
         await run('git', ['fetch', 'origin', base], repo);
         const onBase = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);
-        await run('git', ['replay', '--ref-action=update', '--onto', onBase, `${from}..${branch}`], repo).catch((err) => {
-          throw new Error(`${stack.prUrl} merged meanwhile and ${branch} does not replay onto ${base}: ${message(err)}`);
-        });
-        from = onBase;
+        if ((await text('git', ['merge-base', from, onBase], repo)) === from) {
+          // A merge commit took the blocker's commits as they are, so the branch already holds only the agent's on top of
+          // the base. GitHub shows any conflict on the PR, for the human to resolve (thaivis app-2bl.18).
+          step(`${stack.prUrl} merged meanwhile: opening ${branch} onto ${base} as it is`);
+        } else {
+          // Its squash commit is not the blocker's commits, so only the agent's own move onto the blocker's base.
+          step(`${stack.prUrl} merged meanwhile: replaying ${branch} onto ${base}`);
+          await run('git', ['replay', '--ref-action=update', '--onto', onBase, `${from}..${branch}`], repo).catch(async (err) => {
+            // git replay reports a conflict by its exit status alone; a merge of the agent's commits taken together names the files.
+            const merge = await execFileAsync('git', ['merge-tree', '--write-tree', '--name-only', '--no-messages', '--merge-base', from, onBase, branch], { cwd: repo, signal })
+              .then(() => '', (e: { stdout?: string }) => e.stdout ?? '');
+            const files = merge.split('\n').slice(1).filter(Boolean);
+            throw new Error(`${stack.prUrl} merged meanwhile and ${branch} ${files.length ? `conflicts with ${base} in ${files.join(', ')}` : `does not replay onto ${base}: ${message(err)}`}`);
+          });
+          from = onBase;
+        }
       }
       const range = `${from}..${branch}`;
       if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');

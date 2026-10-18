@@ -5,7 +5,7 @@ ysz opens one PR per Ticket, so an epic like thaivis app-2bl (26 agent Tickets) 
 ## Consequences
 
 - An epic is opted in by its label, not per Project. A small epic stays on plain PRs, which avoids an extra final PR.
-- Stacking (ADR 0005) works unchanged inside an epic. A child with an In review sibling blocker clones the sibling's `agent/<id>`, and the stack's base is the sibling PR's own base, which is the epic branch. When the blocker merges meanwhile, the child replays onto the epic branch.
+- Stacking (ADR 0005) works unchanged inside an epic. A child with an In review sibling blocker clones the sibling's `agent/<id>`, and the stack's base is the sibling PR's own base, which is the epic branch. When the blocker merges meanwhile, the child's PR opens onto the epic branch.
 - A child stacked on a blocker outside its epic follows that blocker. When the blocker merges, GitHub retargets the child's PR onto the blocker's base, not the epic branch, so the human retargets it by hand.
 - Merging the epic PR before every child is done ships part of the epic. If the repo deletes merged head branches, GitHub retargets the open child PRs onto `baseBranch`, and the next child's Run cuts a fresh epic branch from it.
 - The epic branch is never rebased by ysz. Keeping it current with `baseBranch` stays with the human, as with a stack.
