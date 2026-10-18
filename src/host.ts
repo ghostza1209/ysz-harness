@@ -220,9 +220,11 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const dir = mkdtempSync(join(clonesDir, `${project.name}-${ticketId}-`));
       const clone = join(dir, 'repo');
       try {
-        // Only origin/<base>'s history: a local clone would copy the whole object dir, stashes and local branches included.
+        // Only origin's branches, which a Ticket may port from: a local clone would copy the whole object dir, stashes and local branches included.
+        // ponytail: they are as fresh as the repo's last fetch of them; fetch them all here if a Ticket names a branch pushed since.
+        // Git writes a first fetch's refs to packed-refs, so assertSelfContained never meets a loose branch named like `TV-122(new)`.
         await run('git', ['init', '--quiet', clone], dir);
-        await run('git', ['fetch', '--quiet', '--no-tags', repo, `refs/remotes/origin/${base}`], clone, { timeout: 10 * 60_000 });
+        await run('git', ['fetch', '--quiet', '--no-tags', repo, 'refs/remotes/origin/*:refs/remotes/origin/*'], clone, { timeout: 10 * 60_000 });
         await run('git', ['remote', 'add', 'origin', url], clone);
         await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
         await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);

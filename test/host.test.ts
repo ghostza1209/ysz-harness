@@ -405,7 +405,12 @@ describe('host steps against real git', () => {
     assert.throws(() => git(repo, 'cat-file', '-e', secret));
   });
 
-  it('clones only origin/<base>: no stash, local branch or unreachable object of the Project repo', async () => {
+  it("clones origin's branches, which a Ticket may port from, but no stash, local branch or unreachable object of the Project repo", async () => {
+    git(repo, 'switch', '-q', '-c', 'pushed');
+    commit(repo, 'pushed.txt', 'pushed');
+    git(repo, 'push', '-q', 'origin', 'pushed');
+    git(repo, 'switch', '-q', 'develop');
+    git(repo, 'branch', '-q', '-D', 'pushed');
     git(repo, 'switch', '-q', '-c', 'local-only');
     commit(repo, 'local.txt', 'LOCAL ONLY');
     const local = git(repo, 'rev-parse', 'HEAD');
@@ -418,6 +423,7 @@ describe('host steps against real git', () => {
     git(repo, 'branch', '-q', '-D', 'local-only');
     assert.throws(() => git(clone, 'cat-file', '-e', stash));
     assert.throws(() => git(clone, 'cat-file', '-e', local));
+    assert.equal(git(clone, 'show', 'origin/pushed:pushed.txt'), 'pushed');
   });
 
   it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', async () => {
@@ -522,7 +528,8 @@ describe('host steps against real git', () => {
       readFileSync(join(common, 'config'), 'utf8') +
         `[core]\n\tfsmonitor = ${join(evil, 'fsmonitor')}\n[credential]\n\thelper = "!touch ${sentinels}/credential"\n[include]\n\tpath = ${join(evil, 'included')}\n`,
     );
-    // Collapse a guard range taken from the clone: its origin/<base> now claims to be the agent's tip.
+    // Collapse a guard range taken from the clone: its origin/<base> now claims to be the agent's tip. Loose, over the packed one.
+    mkdirSync(join(common, 'refs/remotes/origin'), { recursive: true });
     writeFileSync(join(common, 'refs/remotes/origin/develop'), `${tip}\n`);
     plantClaudeHook(clone);
 
