@@ -59,3 +59,9 @@ _Avoid_: success rate.
 
 **First-Attempt pass**: A Run that got its pull request from its first Attempt alone.
 _Avoid_: first-try.
+
+**Follow-up**: Work in a Project's code that an agent noticed during a Run but left outside its Ticket. Only a Run that reaches In review yields Follow-ups, and only from the Attempt its pull request came from. Each becomes a Ticket in that Project's queue for the human to triage, and is never Ready until the human marks it so.
+_Avoid_: feedback, issue, TODO.
+
+**Friction**: Something in ysz or a Project's sandbox that got in an agent's way during a Run: a check that cannot run, a missing tool, a misleading check hint or prompt. It is fixed in ysz, never in the Project's code, so it becomes a Ticket in ysz's own queue, marked with the Project it came from, for the human to triage.
+_Avoid_: feedback, issue, harness gap.
