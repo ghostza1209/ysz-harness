@@ -43,7 +43,8 @@ let removedLogs: number[];
 let markError: Error | undefined;
 /** Holds showContext open (a Run in the claimed state) until resolved. */
 let contextGate: Promise<void> | undefined;
-/** The In review blocker showContext reports, and the context each prepare was given. */
+/** The closed and In review blockers showContext reports, and the context each prepare was given. */
+let closedBlockers: TicketContext['closedBlockers'];
 let inReviewBlocker: TicketContext['inReviewBlocker'];
 let preparedContexts: TicketContext[];
 /** The sandbox containers the orchestrator was asked to remove (by clone dir), and the error stop() fails with. */
@@ -112,7 +113,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
+    return { ticket: { id }, parent: null, closedBlockers, inReviewBlocker };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -213,6 +214,7 @@ beforeEach(() => {
   removedLogs = [];
   markError = undefined;
   contextGate = undefined;
+  closedBlockers = [];
   inReviewBlocker = null;
   preparedContexts = [];
   stops = [];
@@ -665,6 +667,73 @@ describe('a Run stacked on an In review blocker', () => {
     await o.whenIdle();
     assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2' });
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it("stacks on the In review branch a closed blocker's PR merged into, which alone holds its code", async () => {
+    // thaivis app-2bl: .16 stacked on .13 and merged into agent/app-2bl.13 while .13's own PR was still In review.
+    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975');
+    inReviewBlocker = { id: 'tv13', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv16', 2, '2026-01-01T00:00:00Z')] };
+    publish = async () => 'https://example.test/thaivis/pull/1979';
+    publishBase = 'agent/tv13';
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    prStates = { 'https://example.test/thaivis/pull/1975': 'OPEN', 'https://example.test/thaivis/pull/1979': 'MERGED' };
+    assert.deepEqual(await o.watchReviews(), []);
+
+    inReviewBlocker = null;
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: 'PR merged: https://example.test/thaivis/pull/1979' }];
+    queues.thaivis = [ticket('tv18', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[1].inReviewBlocker, { id: 'tv13', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/1975' });
+  });
+
+  const mergedRun = (ticketId: string, prBase: string, prClosedAt: number | null = null) =>
+    store.updateRun(store.insertRun({ project: 'thaivis', ticketId, title: 'merged', state: 'merged', startedAt: now }), { prUrl: `https://example.test/${ticketId}`, prBase, prClosedAt });
+
+  it('does not stack once the branch a closed blocker merged into has merged into the epic branch', async () => {
+    mergedRun('tv13', 'epic/tv', Date.parse('2026-10-08T11:00:00Z'));
+    mergedRun('tv16', 'agent/tv13', Date.parse('2026-10-08T10:00:00Z'));
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.equal(preparedContexts[0].inReviewBlocker, null);
+  });
+
+  it("fails the Run before any clone when a closed blocker merged into a branch after that branch's own PR merged", async () => {
+    // thaivis keeps merged head branches, so GitHub does not retarget a PR still open onto agent/tv13 once tv13 merges.
+    mergedRun('tv13', 'epic/tv', Date.parse('2026-10-08T10:00:00Z'));
+    mergedRun('tv14', 'agent/tv13', Date.parse('2026-10-08T11:00:00Z'));
+    closedBlockers = [{ id: 'tv14', title: 'title of tv14', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state, r.note]).filter(([id]) => id === 'tv18'), [
+      ['tv18', 'failed', 'tv14 merged into agent/tv13 after tv13 had merged, so its code is on no branch to start from'],
+    ]);
+  });
+
+  it('fails the Run before any clone when its In review blocker and a closed blocker sit on different branches', async () => {
+    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    mergedRun('tv16', 'agent/tv13');
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state, r.note]).filter(([id]) => id === 'tv18'), [
+      ['tv18', 'failed', 'the Run would stack on tv0 and tv13, but a PR has one base'],
+    ]);
   });
 
   it('fails the Run before any clone, releasing the Ticket, when no In review Run holds the blocker', async () => {

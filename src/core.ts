@@ -206,8 +206,33 @@ export function createOrchestrator(deps: {
     const { signal } = control.ctl;
     try {
       const context = await beads.showContext(project, ticket.id);
+      // A closed blocker whose PR merged into another Run's agent/<id> branch, while that Run's own PR was still In review,
+      // has its code only on that branch, so the Run stacks there too. Follow Runs that merged into one that merged in turn.
+      const newest = new Map(store.allRuns().filter((r) => r.project === project.name).map((r) => [r.ticketId, r]));
+      const holders = new Map<string, RunRow>();
+      for (const { id } of context.closedBlockers) {
+        const seen = new Set<string>();
+        let run = newest.get(id);
+        while (run?.state === 'merged' && run.prBase?.startsWith('agent/') && !seen.has(run.ticketId)) {
+          seen.add(run.ticketId);
+          const onto = newest.get(run.prBase.slice('agent/'.length));
+          // GitHub retargets a PR only when its base branch is deleted, so one merged after that branch's own PR lands where nothing merges on.
+          if (onto?.state === 'merged' && run.prClosedAt && onto.prClosedAt && run.prClosedAt > onto.prClosedAt) {
+            throw new Error(`${run.ticketId} merged into ${run.prBase} after ${onto.ticketId} had merged, so its code is on no branch to start from`);
+          }
+          run = onto;
+        }
+        if (seen.size && run?.state === 'in-review' && run.prUrl) holders.set(run.ticketId, run);
+      }
+      const stackIds = new Set([...(context.inReviewBlocker ? [context.inReviewBlocker.id] : []), ...holders.keys()]);
+      // ponytail: fails and skips the Ticket until a restart, where ADR 0005 has two In review blockers wait; make listReady see Runs if it recurs.
+      if (stackIds.size > 1) throw new Error(`the Run would stack on ${[...stackIds].join(' and ')}, but a PR has one base`);
+      if (!context.inReviewBlocker && holders.size) {
+        const [run] = holders.values();
+        context.inReviewBlocker = { id: run.ticketId, title: run.title, prUrl: run.prUrl! };
+      }
       const blocker = context.inReviewBlocker;
-      if (blocker) {
+      if (blocker && !blocker.prUrl) {
         // The Run stacks on the blocker's PR, which only its In review Run knows.
         const prUrl = store.inReview().find((r) => r.project === project.name && r.ticketId === blocker.id)?.prUrl;
         if (!prUrl) throw new Error(`blocker ${blocker.id} is In review, but no In review Run has its PR to stack on`);
