@@ -18,6 +18,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: git config --global user.name ci && git config --global user.email ci@example.test
       - run: npm ci
       - run: npm test
       - run: npm run typecheck

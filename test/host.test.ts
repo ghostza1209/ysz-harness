@@ -7,6 +7,9 @@ import { after, before, describe, it } from 'node:test';
 import { createHostSteps, prTitleAndBody, ticketKey } from '../src/host';
 import type { Project } from '../src/projects';
 
+/** git reads a case variant of objects/info/alternates only where the disk ignores case, as macOS does and Linux does not. */
+const caseInsensitiveDisk = existsSync(tmpdir().toUpperCase());
+
 /** These tests drive real git against a throwaway origin and Project repo, with fake `claude` and `gh` on PATH. */
 describe('host steps against real git', () => {
   let root: string;
@@ -475,7 +478,7 @@ describe('host steps against real git', () => {
     assert.equal(git(clone, 'show', 'origin/pushed:pushed.txt'), 'pushed');
   });
 
-  it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', async () => {
+  it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', { skip: !caseInsensitiveDisk && 'the disk is case-sensitive' }, async () => {
     const other = join(root, 'other-project-2');
     git(root, 'init', '-q', other);
     commit(other, 'secret.txt', 'TOP SECRET 2');
