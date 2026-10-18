@@ -428,26 +428,29 @@ describe('Open Friction and "seen again" comments in ysz\'s own queue, against r
   const bd = (...args: string[]) => run('bd', args, { cwd: yszDir, env });
   const friction = (project: typeof popdeal, title: string) =>
     createBeadsGateway({ yszRepo: yszDir }).createFriction({ project, title, body: '', ticketId: 'pd-1', runId: 1, attempt: 1, role: 'implement' });
-  let open: string, inProgress: string, closed: string, other: string;
+  let open: string, inProgress: string, pinned: string, closed: string, other: string;
 
   before(async () => {
     yszDir = await mkdtemp(join(tmpdir(), 'beads-ysz-open-'));
     await bd('init', '-p', 'ysz', '--non-interactive', '--skip-agents', '--skip-hooks');
     open = await friction(popdeal, 'open one');
     inProgress = await friction(popdeal, 'the human is fixing this');
+    pinned = await friction(popdeal, 'pinned for later');
     closed = await friction(popdeal, 'fixed already');
     other = await friction(fazwaz, 'another project');
     await bd('update', inProgress, '--status', 'in_progress');
+    await bd('update', pinned, '--status', 'pinned');
     await bd('close', closed, '--reason', 'fixed');
   });
 
   after(() => rm(yszDir, { recursive: true, force: true }));
 
-  it('lists the Project\'s Friction that is not closed, an in_progress one included', async () => {
+  it('lists the Project\'s Friction that is not closed, an in_progress and a pinned one included', async () => {
     const found = await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(popdeal);
     assert.deepEqual(found.sort((a, b) => a.title.localeCompare(b.title)), [
       { id: inProgress, title: 'the human is fixing this' },
       { id: open, title: 'open one' },
+      { id: pinned, title: 'pinned for later' },
     ].sort((a, b) => a.title.localeCompare(b.title)));
     assert.deepEqual(await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(fazwaz), [{ id: other, title: 'another project' }]);
   });

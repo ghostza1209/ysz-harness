@@ -1019,9 +1019,13 @@ describe('Friction an agent reports', () => {
 
   it('gives prepare the open Friction of the Project, fetched again for each Attempt', async () => {
     openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: none } : complete);
+    agent = async (attempt) => {
+      if (attempt > 1) return complete;
+      openFriction = [{ id: 'ysz-8', title: 'lint cannot run' }]; // the human closed ysz-7 and a new Friction opened meanwhile
+      return { outcome: 'stopped', tail: 'x', reports: none };
+    };
     await run();
-    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[{ id: 'ysz-7', title: 'phpunit cannot run' }], [{ id: 'ysz-7', title: 'phpunit cannot run' }]]);
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[{ id: 'ysz-7', title: 'phpunit cannot run' }], [{ id: 'ysz-8', title: 'lint cannot run' }]]);
   });
 
   it('logs a failed fetch of the open Friction and goes ahead with none: a reference then opens a new Ticket', async () => {

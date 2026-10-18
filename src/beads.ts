@@ -261,7 +261,7 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     },
 
     async listOpenFriction(project) {
-      const out = await bd(['--readonly', '-C', yszQueue(), 'list', '-l', `friction,project:${project.name}`, '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']);
+      const out = await bd(['--readonly', '-C', yszQueue(), 'list', '-l', `friction,project:${project.name}`, '-s', 'open,in_progress,blocked,deferred,pinned,hooked', '-n', '0', '--json', '--brief']);
       return (JSON.parse(out) as { id: string; title: string }[]).map(({ id, title }) => ({ id, title }));
     },
 
