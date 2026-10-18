@@ -124,7 +124,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker, openFriction: [] };
+    return { ticket: { id }, parent: null, closedBlockers, inReviewBlocker, openFriction: [] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
