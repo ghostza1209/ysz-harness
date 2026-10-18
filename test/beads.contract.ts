@@ -35,13 +35,14 @@ describe('Beads gateway against real bd', () => {
     await create('parent', 'split into children');
     await create('child', 'open child', '--parent', ids.parent);
     await bd('update', ids.parent, '--add-label', 'ready-for-agent');
+    await create('readyEpic', 'labelled epic, no children', '-t', 'epic', '-l', 'ready-for-agent');
   });
 
   after(() => rm(dir, { recursive: true, force: true }));
 
-  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip, and counts every unclosed bead', async () => {
+  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip or epic type, and counts every unclosed bead', async () => {
     const { tickets, backlog } = await createBeadsGateway().listReady(project);
-    assert.equal(backlog, 8);
+    assert.equal(backlog, 9);
     assert.deepEqual(
       tickets.map(({ id, title, priority }) => ({ id, title, priority })),
       [{ id: ids.ready, title: 'ready one', priority: 1 }],
@@ -359,11 +360,13 @@ describe('Beads gateway with In review blockers, against real bd', () => {
     await bd('dep', 'add', ids.skipped, ids.reviewA);
     await create('unlabelled', 'not for agents, on A');
     await bd('dep', 'add', ids.unlabelled, ids.reviewA);
+    await create('epicOnA', 'labelled epic, on A', '-t', 'epic', '-l', 'ready-for-agent');
+    await bd('dep', 'add', ids.epicOnA, ids.reviewA);
   });
 
   after(() => rm(dir, { recursive: true, force: true }));
 
-  it('lists a Ticket whose only unclosed blocker is In review, and not one with two or with a blocker still being worked', async () => {
+  it('lists a Ticket whose only unclosed blocker is In review, and not one with two, with a blocker still being worked, or an epic', async () => {
     const { tickets } = await createBeadsGateway().listReady(project);
     assert.deepEqual(
       tickets.map(({ id, title, priority }) => ({ id, title, priority })),

@@ -36,8 +36,8 @@ export const ORCHESTRATOR = 'orchestrator';
 
 export interface BeadsGateway {
   /**
-   * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no unclosed children, and every
-   * blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
+   * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no unclosed children,
+   * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
    */
   listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
@@ -110,6 +110,7 @@ interface Bead {
   priority: number;
   created_at: string;
   status: string;
+  issue_type: string;
   assignee?: string;
   labels?: string[] | null;
   parent?: string;
@@ -162,7 +163,7 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
   return {
     async listReady(project) {
       const [out, unclosed] = await Promise.all([
-        bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '-u', '-n', '0', '--json']),
+        bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '--exclude-type', 'epic', '-u', '-n', '0', '--json']),
         // bd ready ignores parent-child links, so a parent would compete with its own children: it waits until they all close.
         bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']),
       ]);
@@ -171,7 +172,7 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       const parents = new Set(beads.map((b) => b.parent));
       // bd ready counts an In review blocker as open; a Ticket whose only unclosed blocker is one stacks on its PR.
       const stacked = beads.filter((b) => {
-        if (b.status !== 'open' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
+        if (b.status !== 'open' || b.issue_type === 'epic' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
         const blockers = (b.dependencies ?? []).filter((d) => d.type === 'blocks').flatMap((d) => byId.get(d.depends_on_id) ?? []);
         return blockers.length === 1 && isInReview(blockers[0]);
       });
