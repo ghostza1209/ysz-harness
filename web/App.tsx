@@ -3,7 +3,7 @@ import type { ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
-import { muted, play, setMuted, stageCue } from './sound';
+import { muted, openedPrs, play, setMuted, stageCue } from './sound';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
 
@@ -394,7 +394,12 @@ interface Toast {
   id: number;
   text: string;
   bad: boolean;
+  /** A Run that just opened its PR: the toast links to it and stays until handled. Its text is worded at render, in the current language. */
+  pr?: { ticketId: string; url: string };
 }
+
+/** PR toasts kept on screen at once; older ones drop first. */
+const MAX_PR_TOASTS = 3;
 
 const FILTERS = {
   all: () => true,
@@ -441,6 +446,13 @@ export function App() {
         const runs = [...s.runs.live, ...s.runs.history];
         const cue = seen.current && stageCue(seen.current, runs);
         if (cue) play(cue);
+        const prs = seen.current ? openedPrs(seen.current, runs) : [];
+        if (prs.length)
+          setToasts((all) => {
+            const next = [...all, ...prs.map((r) => ({ id: Date.now() + Math.random(), text: '', bad: false, pr: { ticketId: r.ticketId, url: r.prUrl! } }))];
+            const old = next.filter((x) => x.pr).slice(0, -MAX_PR_TOASTS);
+            return next.filter((x) => !old.includes(x));
+          });
         seen.current = new Map(runs.map((r) => [r.id, r.state]));
         setState(s);
         setError(null);
@@ -481,10 +493,11 @@ export function App() {
     };
   }, []);
 
+  const dropToast = (id: number) => setToasts((all) => all.filter((x) => x.id !== id));
   const toast = (text: string, bad = false) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t, { id, text, bad }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 8000 : 3500);
+    setTimeout(() => dropToast(id), bad ? 8000 : 3500);
   };
 
   /** A control: POST it (marked busy until the refresh lands), toast the outcome (or why the server refused), and refresh. */
@@ -910,8 +923,27 @@ export function App() {
       <div className="toasts" aria-live="polite">
         {toasts.map((x) => (
           <div key={x.id} className={`toast ${x.bad ? 'bad' : ''}`} role={x.bad ? 'alert' : 'status'}>
-            <span className="grow">{x.text}</span>
-            <button className="ghost small" aria-label={t.dismiss} onClick={() => setToasts((all) => all.filter((y) => y.id !== x.id))}>
+            <span className="grow">{x.pr ? t.prOpened(x.pr.ticketId) : x.text}</span>
+            {x.pr && (
+              <>
+                <a className="act" href={x.pr.url} target="_blank" rel="noreferrer" onClick={() => dropToast(x.id)}>
+                  #{prNumber(x.pr.url) ?? '?'}
+                  <span className="arrow">↗</span>
+                </a>
+                <button
+                  className="act"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(x.pr!.url).then(() => {
+                      dropToast(x.id);
+                      toast(t.copied);
+                    });
+                  }}
+                >
+                  {t.copy}
+                </button>
+              </>
+            )}
+            <button className="ghost small" aria-label={t.dismiss} onClick={() => dropToast(x.id)}>
               ✕
             </button>
           </div>

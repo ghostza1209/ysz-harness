@@ -1236,6 +1236,13 @@ input:focus-visible {
   opacity: 0.7;
 }
 
+/* The toast's own ink: --ok on its inverted background fails contrast in dark mode. */
+.toast .act {
+  --c: currentColor;
+  color: inherit;
+  opacity: 1;
+}
+
 /* Ambient: a slow-drifting aurora over a faint neural grid, so the board feels alive even when idle. */
 
 body::before,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { stageCue } from '../web/sound';
+import { openedPrs, stageCue } from '../web/sound';
 import type { RunRow, RunState } from '../src/store';
 
 const run = (id: number, state: RunState) => ({ id, state }) as RunRow;
@@ -22,4 +22,11 @@ it('sounds good on reaching review, and bad news beats good news in the same pol
 it('stays quiet for an older Run coming back into the list, as after an archive or delete', () => {
   assert.equal(stageCue(new Map([[5, 'merged']]), [run(5, 'merged'), run(2, 'failed')]), null);
   assert.equal(stageCue(new Map([[5, 'merged']]), [run(6, 'claimed'), run(5, 'merged')]), 'step');
+});
+
+it('lists each Run that just reached review with a PR, but not one already there or paged in from older history', () => {
+  const pr = (id: number, prUrl: string | null) => ({ id, state: 'in-review', prUrl }) as RunRow;
+  const prev = new Map<number, RunState>([[5, 'host'], [6, 'in-review']]);
+  assert.deepEqual(openedPrs(prev, [pr(7, 'u7'), pr(6, 'u6'), pr(5, 'u5'), pr(2, 'u2')]).map((r) => r.id), [5, 7]);
+  assert.deepEqual(openedPrs(new Map([[5, 'host']]), [pr(5, null)]), []);
 });

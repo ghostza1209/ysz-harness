@@ -132,6 +132,7 @@ export const en = {
   unarchived: (id: string) => `${id} is back in the history`,
   archived: 'Archived',
   dismiss: 'Dismiss',
+  prOpened: (id: string) => `${id} opened its PR`,
 
   logView: 'Log view',
   formatted: 'Formatted',
@@ -301,6 +302,7 @@ export const th: Dict = {
   unarchived: (id) => `${id} กลับมาอยู่ใน History แล้ว`,
   archived: 'Archived',
   dismiss: 'ปิด',
+  prOpened: (id) => `${id} เปิด PR แล้ว`,
 
   logView: 'มุมมอง log',
   formatted: 'จัดรูปแบบ',
