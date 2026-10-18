@@ -954,10 +954,10 @@ describe('Friction an agent reports', () => {
     assert.deepEqual(recorded(o), [null]);
   });
 
-  it('stops writing the rest of an agent\'s Friction once the Run is killed', async () => {
+  it('stops writing the rest of an agent\'s Friction once the Run is killed, and ends the Attempt there, keeping the clone', async () => {
     let kill!: () => Promise<void>;
     let killed: Promise<void> | undefined;
-    agent = async () => ({ outcome: 'complete', reports: friction('first', 'second') });
+    agent = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('first', 'second') });
     const base = fakeBeads(queues);
     const o = createOrchestrator({
       projects,
@@ -971,6 +971,8 @@ describe('Friction an agent reports', () => {
     await o.whenIdle();
     await killed;
     assert.deepEqual(writes.filter((w) => w.startsWith('friction')), ['friction thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.cloneDir]), [['killed', '/clones/tv1-1']]);
   });
 
   it('logs a failed write and goes on: the other Friction is written and the Run ends In review', async () => {

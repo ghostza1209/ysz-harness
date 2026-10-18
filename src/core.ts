@@ -251,6 +251,7 @@ export function createOrchestrator(deps: {
         }
         signal.throwIfAborted();
         await recordFriction(n, 'implement', implemented.reports);
+        signal.throwIfAborted();
         if (implemented.outcome === 'needs-info') return { kind: 'needs-info', agent: 'implement', question: implemented.question };
         if (implemented.outcome === 'stopped') {
           return { kind: 'failed', prepared, reason: `the implement agent stopped without signalling COMPLETE${implemented.tail && `: ${implemented.tail}`}` };
@@ -272,6 +273,7 @@ export function createOrchestrator(deps: {
           const reviewed = await sandbox.review({ ...req, onUsage: usage('review') });
           signal.throwIfAborted();
           await recordFriction(n, 'review', reviewed.reports);
+          signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
           if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
           skipped = 'the review agent stopped without signalling COMPLETE';
