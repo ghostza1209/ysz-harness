@@ -162,6 +162,10 @@ export const en = {
   backlogOverTimeHint: 'Unclosed and Ready Tickets of the Projects picked, as each poll saw them change.',
   noBacklogYet: 'Nothing recorded in this range yet: ysz records the counts from now on.',
 
+  followUps: 'Follow-ups',
+  friction: 'Friction',
+  seenAgain: 'seen again',
+
   logView: 'Log view',
   formatted: 'Formatted',
   raw: 'Raw',
@@ -359,6 +363,10 @@ export const th: Dict = {
   backlogOverTime: 'Backlog ตามเวลา',
   backlogOverTimeHint: 'Ticket ที่ยังไม่ปิดและ Ready Ticket ของ Project ที่เลือก ตามที่แต่ละรอบ poll เห็นว่าเปลี่ยน',
   noBacklogYet: 'ยังไม่มีข้อมูลในช่วงนี้ ysz จะเริ่มบันทึกตั้งแต่ตอนนี้',
+
+  followUps: 'Follow-ups',
+  friction: 'Friction',
+  seenAgain: 'เจออีกครั้ง',
 
   logView: 'มุมมอง log',
   formatted: 'จัดรูปแบบ',

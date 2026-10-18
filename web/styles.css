@@ -583,6 +583,27 @@ button.link {
   font-variant-numeric: tabular-nums;
 }
 
+.reports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.report[open] {
+  flex-basis: 100%;
+}
+
+.report summary {
+  cursor: pointer;
+}
+
+.report ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
 .usage b {
   font-weight: 600;
 }
