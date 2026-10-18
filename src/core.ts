@@ -78,7 +78,7 @@ export interface Orchestrator {
   /**
    * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
    * one closed unmerged ends it pr-closed and hands the bead back. A bead the human changed is left alone. endedAt keeps the
-   * time the Run reached in-review. Never rejects: a Run whose check failed stays in-review for the next call.
+   * time the Run reached in-review; prClosedAt gets GitHub's. Never rejects: a Run whose check failed stays in-review for the next call.
    */
   watchReviews(): Promise<string[]>;
 }
@@ -542,12 +542,12 @@ export function createOrchestrator(deps: {
           continue;
         }
         try {
-          const state = await host.prState(project, run.prUrl);
+          const { state, closedAt } = await host.prState(project, run.prUrl);
           if (state !== 'MERGED' && state !== 'CLOSED') continue;
           const merged = state === 'MERGED';
           // Bead first: if its write fails the Run stays in-review, so the next call tries again.
           const written = merged ? await beads.merged(project, run.ticketId, run.prUrl) : await beads.prClosed(project, run.ticketId, run.prUrl);
-          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed' });
+          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed', prClosedAt: closedAt });
           logRun(run.id, `PR ${merged ? 'merged' : 'closed unmerged'}: ${run.prUrl}`);
           if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
         } catch (err) {

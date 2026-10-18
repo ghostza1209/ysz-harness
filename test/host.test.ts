@@ -329,15 +329,15 @@ describe('host steps against real git', () => {
     assert.equal(git(join(plain.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
   });
 
-  it("reads a PR's state as the Project's gh account", async () => {
+  it("reads a PR's state and when it closed as the Project's gh account", async () => {
     const bin = join(root, 'bin-pr-view');
     mkdirSync(bin, { recursive: true });
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED"}'`);
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","closedAt":"2026-10-16T07:05:01Z"}'`);
     const path = process.env.PATH;
     process.env.PATH = `${bin}:${path}`;
     try {
-      assert.equal(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), 'MERGED');
-      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state');
+      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', closedAt: Date.UTC(2026, 9, 16, 7, 5, 1) });
+      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,closedAt');
     } finally {
       process.env.PATH = path;
     }

@@ -40,12 +40,14 @@ export interface RunRow {
   model: string | null;
   /** Each agent's usage by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
   usage: Record<string, AgentUsage>;
+  /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
+  prClosedAt: number | null;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt' | 'prClosedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
 };
 
 export interface Store {
@@ -114,6 +116,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 7) {
     db.exec('ALTER TABLE runs ADD COLUMN pr_base TEXT; PRAGMA user_version = 7');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 8) {
+    db.exec('ALTER TABLE runs ADD COLUMN pr_closed_at INTEGER; PRAGMA user_version = 8');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at, model) VALUES (?, ?, ?, ?, ?, ?)');
@@ -143,6 +148,7 @@ export function openStore(path: string): Store {
     archivedAt: r.archived_at as number | null,
     model: r.model as string | null,
     usage: JSON.parse((r.usage as string | null) ?? '{}'),
+    prClosedAt: r.pr_closed_at as number | null,
   });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),

@@ -53,8 +53,8 @@ export interface HostSteps {
   ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
-  /** The PR's state on GitHub, asked as the Project's gh account. */
-  prState(project: Project, prUrl: string): Promise<'OPEN' | 'MERGED' | 'CLOSED'>;
+  /** The PR's state on GitHub and when it merged or closed (null while open), asked as the Project's gh account. */
+  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; closedAt: number | null }>;
 }
 
 /** Under /Users, which Docker Desktop shares, and outside every repo's working tree. */
@@ -346,8 +346,10 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
     },
 
     async prState(project, prUrl) {
-      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state'], project.repoPath, { env: await ghEnv(project) });
-      return JSON.parse(out).state;
+      // GitHub sets closedAt on a merge too, to the merge time.
+      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,closedAt'], project.repoPath, { env: await ghEnv(project) });
+      const { state, closedAt } = JSON.parse(out);
+      return { state, closedAt: closedAt ? Date.parse(closedAt) : null };
     },
 
     async removeClone({ dir }) {
