@@ -64,6 +64,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 
 ```bash
 npm test           # unit tests
+npm run test:contract  # the Beads gateway against the real bd
 npm run typecheck
 ```
 

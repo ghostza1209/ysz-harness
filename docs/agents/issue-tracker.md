@@ -36,10 +36,9 @@ Used by `/wayfinder`. The **map** is an epic, and each **child** bead under it i
 
 - **Spec query**: `bd ready --type epic --sort oldest`; the first result wins.
 - **Key**: the spec's bead id (no Jira). Worktree `.claude/worktrees/<spec-id>`, branch `<spec-id>`.
-- **Base**: local `master`. No remote, so no push and no PR: a run ends with the branch ready locally.
 - **Worktree setup**: `npm ci` (skip while there is no `package.json`).
 - **Checks run**: on the host, in the worktree.
-- **Gate**: `npm test && npx tsc --noEmit`.
+- **Gate**: `npm test && npx tsc --noEmit`, plus `npm run test:contract` (~85s, against the real `bd`) when the change touches `src/beads.ts` or `test/beads.contract.ts`. Verify runs `npm run test:contract` once over the whole branch.
 - **Commit format**: `<ticket-id>: <ticket title>`.
 - **Size check**: none.
 - **Human tickets**: skip tickets labelled `ready-for-human`; report them as blockers.

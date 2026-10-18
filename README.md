@@ -64,6 +64,7 @@ After a Run ends `In review`, review and merge the PR yourself: ysz closes the b
 
 ```bash
 npm test           # unit tests
+npm run test:contract  # the Beads gateway against the real bd
 npm run typecheck
 ```
 
