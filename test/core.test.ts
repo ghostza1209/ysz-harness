@@ -1006,12 +1006,8 @@ describe('what the review agent is handed and may mark fixed', () => {
   });
 
   it('hands the review agent no reports when the implement agent made none', async () => {
-    reviewer = async () => {
-      assert.deepEqual(ticketFiles[0].implementReports, { followUps: [], friction: [] });
-      return complete;
-    };
     await run();
-    assert.equal(ticketFiles.length, 1);
+    assert.deepEqual(ticketFiles.map((f) => f.implementReports), [{ followUps: [], friction: [] }]);
   });
 
   it('drops the Follow-ups the review marks fixed from the PR and the Tickets, and keeps the rest and its own', async () => {
