@@ -16,7 +16,7 @@ describe('host steps against real git', () => {
   let log: string;
   let project: Project;
   let host: ReturnType<typeof createHostSteps>;
-  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null };
+  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null, openFriction: [] };
   const ticket = (id: string) => ({ id, title: 'a ticket' });
   const savedPath = process.env.PATH;
 
@@ -575,7 +575,7 @@ describe('host steps against real git', () => {
 
 describe('PR title', () => {
   it('names a Ticket by its own Jira key, else its parent epic\'s, else its own id', () => {
-    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null });
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null, openFriction: [] });
     assert.equal(key({ external_ref: 'jira-OP-7' }, { external_ref: 'jira-OP-1' }), 'OP-7');
     assert.equal(key({}, { external_ref: 'jira-OP-1' }), 'OP-1');
     assert.equal(key({ external_ref: 'gh-12' }, null), 't-9');

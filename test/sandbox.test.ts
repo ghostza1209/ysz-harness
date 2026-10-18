@@ -105,6 +105,24 @@ describe('the <friction> reports', () => {
     assert.deepEqual([found.title.length, found.body.length], [200, 2000]);
   });
 
+  it('reads ref as the id of an open Friction, and leaves it off a tag without one', () => {
+    const stdout = '<friction ref="ysz-12">\nphpunit exited 127 again\nskipped it\n</friction><friction>new one</friction>';
+    assert.deepEqual(friction(stdout), [
+      { title: 'phpunit exited 127 again', body: 'skipped it', ref: 'ysz-12' },
+      { title: 'new one', body: '' },
+    ]);
+  });
+
+  it('counts references towards the cap of 3', () => {
+    const stdout = ['<friction ref="ysz-1">a</friction>', '<friction>b</friction>', '<friction ref="ysz-2">c</friction>', '<friction ref="ysz-3">d</friction>', '<friction>e</friction>'].join('\n');
+    assert.deepEqual(friction(stdout).map((f) => [f.title, f.ref]), [['a', 'ysz-1'], ['b', undefined], ['c', 'ysz-2']]);
+  });
+
+  it('drops a reference with no text, and a tag opened inside a reference', () => {
+    assert.deepEqual(friction('<friction ref="ysz-1">  </friction>'), []);
+    assert.deepEqual(friction('<friction ref="ysz-1">outer <friction>inner</friction>').map((f) => f.title), ['inner']);
+  });
+
   it('is reported on needs-info and stopped as well as complete', () => {
     const tag = '<friction>check hint is wrong</friction>';
     const expected = [{ title: 'check hint is wrong', body: '' }];

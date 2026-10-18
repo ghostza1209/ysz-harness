@@ -21,7 +21,8 @@ export type AgentResult = (
 
 /** What the agent reported in its final message, whatever its outcome. */
 export interface AgentReports {
-  friction: { title: string; body: string }[];
+  /** `ref` is the id of an open Friction the agent saw again; its title and body then say what happened this time. */
+  friction: { title: string; body: string; ref?: string }[];
 }
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
@@ -74,10 +75,10 @@ const MAX_BODY = 2000;
 
 /** The `<friction>` tags of the output: the first line is the title, the rest the body. A tag opened inside another is malformed, and dropped. */
 function parseReports(stdout: string): AgentReports {
-  const friction = [...stdout.matchAll(/<friction>((?:(?!<friction>)[\s\S])*?)<\/friction>/g)]
-    .map(([, text]) => {
+  const friction = [...stdout.matchAll(/<friction(?:\s+ref="([^"]*)")?>((?:(?!<friction[\s>])[\s\S])*?)<\/friction>/g)]
+    .map(([, ref, text]) => {
       const [title = '', ...rest] = text.trim().split('\n');
-      return { title: title.trim().slice(0, MAX_TITLE), body: rest.join('\n').trim().slice(0, MAX_BODY) };
+      return { title: title.trim().slice(0, MAX_TITLE), body: rest.join('\n').trim().slice(0, MAX_BODY), ...(ref && { ref }) };
     })
     .filter((f) => f.title)
     .slice(0, MAX_REPORTS);

@@ -216,13 +216,24 @@ export function createOrchestrator(deps: {
 
       /** What the Run's agents reported so far, across Attempts. */
       const recorded: Reports = { followUps: [], friction: [] };
-      /** Record an agent's Friction as Tickets in ysz's own queue. A failed write is a log line and nothing more; a kill stops it. */
+      /** The Project's open Friction as this Attempt's agents saw it; what an agent refers to by id is commented on, not duplicated. */
+      let openFriction: { id: string; title: string }[] = [];
+      /**
+       * Record an agent's Friction in ysz's own queue: a comment on the open Ticket it refers to, else a new Ticket (so a
+       * mistaken reference loses nothing). A failed write is a log line and nothing more; a kill stops it.
+       */
       async function recordFriction(attempt: number, role: 'implement' | 'review', { friction }: AgentReports) {
-        for (const { title, body } of friction) {
+        for (const { title, body, ref } of friction) {
           if (signal.aborted) return;
           try {
-            const id = await beads.createFriction({ project, title, body, ticketId: ticket.id, runId, attempt, role });
-            recorded.friction.push({ id, title, seenAgain: false });
+            const report = { project, title, body, ticketId: ticket.id, runId, attempt, role };
+            const open = openFriction.find((f) => f.id === ref);
+            if (open) {
+              await beads.commentFriction(open.id, report);
+              recorded.friction.push({ id: open.id, title: open.title, seenAgain: true });
+            } else {
+              recorded.friction.push({ id: await beads.createFriction(report), title, seenAgain: false });
+            }
             store.setReports(runId, recorded);
           } catch (err) {
             logRun(runId, `Recording Friction "${title}" failed: ${message(err)}`);
@@ -237,7 +248,13 @@ export function createOrchestrator(deps: {
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
         store.updateRun(runId, { state: 'claimed', attempt: n });
-        const prepared = await host.prepare(project, ticket.id, context, signal);
+        // A Friction the human closed since the last Attempt must not be commented on, so each Attempt asks again.
+        openFriction = await beads.listOpenFriction(project).catch((err) => {
+          logRun(runId, `Fetching the open Friction failed, so the agents get none: ${message(err)}`);
+          return [];
+        });
+        signal.throwIfAborted();
+        const prepared = await host.prepare(project, ticket.id, { ...context, openFriction }, signal);
         store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
         const usage = (role: string) => (u: AgentUsage) => store.setUsage(runId, `attempt${n}-${role}`, u);

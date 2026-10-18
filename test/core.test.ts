@@ -57,6 +57,8 @@ let leftoverSweeps: number;
 /** Titles of the Friction whose write fails, and the Friction ids handed out so far. */
 let failingFriction: Set<string>;
 let frictionIds: number;
+/** The open Friction the Project's queue holds, or the error fetching it fails with. */
+let openFriction: { id: string; title: string }[] | Error;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
@@ -115,7 +117,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
+    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker, openFriction: [] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -137,6 +139,14 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (failingFriction.has(title)) throw new Error('ysz bd is down');
     writes.push(`friction ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
     return `ysz-${++frictionIds}`;
+  },
+  async listOpenFriction() {
+    if (openFriction instanceof Error) throw openFriction;
+    return openFriction;
+  },
+  async commentFriction(id, { project, title, body, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction-comment ${id} from ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}${body && ` / ${body}`}`);
   },
 });
 
@@ -232,6 +242,7 @@ beforeEach(() => {
   leftoverSweeps = 0;
   failingFriction = new Set();
   frictionIds = 0;
+  openFriction = [];
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
@@ -982,6 +993,54 @@ describe('Friction an agent reports', () => {
     assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "broken one" failed: ysz bd is down']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: fine one', 'markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
+  });
+
+  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ friction: [{ title, body, ref }] });
+
+  it('comments on an open Friction a report refers to, instead of opening a duplicate, and the Run shows it as seen again', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again', 'skipped it') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction-comment ysz-7 from thaivis/tv1 attempt 1 implement: phpunit exited 127 again / skipped it',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true }]);
+  });
+
+  it('opens a new Ticket for a reference that is not in the open list: a closed Friction, or a mistaken id', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-3', 'came back after the fix') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: came back after the fix', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'came back after the fix', seenAgain: false }]);
+  });
+
+  it('gives prepare the open Friction of the Project, fetched again for each Attempt', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: none } : complete);
+    await run();
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[{ id: 'ysz-7', title: 'phpunit cannot run' }], [{ id: 'ysz-7', title: 'phpunit cannot run' }]]);
+  });
+
+  it('logs a failed fetch of the open Friction and goes ahead with none: a reference then opens a new Ticket', async () => {
+    openFriction = new Error('ysz bd is down');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('open Friction')), ['1: Fetching the open Friction failed, so the agents get none: ysz bd is down']);
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[]]);
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['in-review']);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'phpunit exited 127 again', seenAgain: false }]);
+  });
+
+  it('logs a failed comment and goes on, leaving it off the Run', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    failingFriction.add('again');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "again" failed: ysz bd is down']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['in-review', null]]);
   });
 
   it('ends a failed Run as it otherwise would when its Friction cannot be written', async () => {

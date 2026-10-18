@@ -26,6 +26,14 @@ Short title
 What happened, and what you skipped, guessed or worked around.
 </friction>
 
+`{{TICKET_JSON}}` lists the open Friction of this Project under `openFriction`, each with an id and a title. When what got in your way is one of them, do not report it as new: refer to it by id, and say what happened this time.
+
+<friction ref="the-id">
+What happened this time, and what you skipped, guessed or worked around.
+</friction>
+
+A reference counts towards the same limit of 3.
+
 Report at most 3, the ones that cost you most, and write them in the language of the Ticket. Report nothing when nothing got in your way. Do this also when you stop or ask a question.
 
 ## Rules

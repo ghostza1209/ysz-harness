@@ -22,6 +22,8 @@ export interface TicketContext {
   parent: Record<string, unknown> | null;
   closedBlockers: { id: string; title: string; closeReason: string }[];
   inReviewBlocker: { id: string; title: string; prUrl?: string } | null;
+  /** The Project's open Friction in ysz's queue, which an agent refers to by id instead of reporting it as new. The Orchestrator fills it in before each Attempt. */
+  openFriction: { id: string; title: string }[];
 }
 
 /** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
@@ -70,6 +72,10 @@ export interface BeadsGateway {
    * default type and priority. The body ends with where it came from. Returns the new id.
    */
   createFriction(friction: FrictionReport): Promise<string>;
+  /** The Project's open Friction in ysz's own queue: everything not closed, a Friction the human is fixing (in_progress) included. */
+  listOpenFriction(project: Project): Promise<{ id: string; title: string }[]>;
+  /** An agent hit an open Friction again: comment on its Ticket, as the Orchestrator, what happened this time. The comment ends with where it came from. */
+  commentFriction(id: string, friction: FrictionReport): Promise<void>;
 }
 
 /** One Friction an agent reported, and the Run it came from. */
@@ -126,6 +132,13 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
   const write = (project: Project, args: string[]) => bd(['-C', project.repoPath, '--actor', ORCHESTRATOR, ...args]);
   const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
     JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
+  const yszQueue = () => {
+    if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
+    return yszRepo;
+  };
+  /** A Friction's text, ending with where it came from. */
+  const withSource = (text: string, { project, ticketId, runId, attempt, role }: Omit<FrictionReport, 'title' | 'body'>) =>
+    `${text ? `${text}\n\n` : ''}Project: ${project.name} · Ticket: ${ticketId} · Run: ${runId} · Attempt: ${attempt} · Agent: ${role}`;
   /** The bead is still in_progress and the Orchestrator's, as a Run left it: the human has not changed it since. */
   const held = async (project: Project, id: string) => {
     const issue = await show(project, [id]);
@@ -212,7 +225,7 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         .filter((d: { dependency_type: string; status: string }) => d.dependency_type === 'blocks' && d.status === 'closed')
         .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
       const reviewing = (ticket.dependencies ?? []).find((d: Bead & { dependency_type: string }) => d.dependency_type === 'blocks' && isInReview(d));
-      return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null };
+      return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null, openFriction: [] };
     },
 
     async markInReview(project, id, prUrl) {
@@ -239,14 +252,21 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     },
 
     async createFriction({ project, title, body, ticketId, runId, attempt, role }) {
-      if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
-      const source = `Project: ${project.name} · Ticket: ${ticketId} · Run: ${runId} · Attempt: ${attempt} · Agent: ${role}`;
       const out = await bd([
-        '-C', yszRepo, '--actor', ORCHESTRATOR, 'create', '--silent',
-        '--title', title, '-d', body ? `${body}\n\n${source}` : source,
+        '-C', yszQueue(), '--actor', ORCHESTRATOR, 'create', '--silent',
+        '--title', title, '-d', withSource(body, { project, ticketId, runId, attempt, role }),
         '-l', `friction,project:${project.name},needs-triage`,
       ]);
       return out.trim();
+    },
+
+    async listOpenFriction(project) {
+      const out = await bd(['--readonly', '-C', yszQueue(), 'list', '-l', `friction,project:${project.name}`, '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']);
+      return (JSON.parse(out) as { id: string; title: string }[]).map(({ id, title }) => ({ id, title }));
+    },
+
+    async commentFriction(id, { title, body, ...from }) {
+      await bd(['-C', yszQueue(), '--actor', ORCHESTRATOR, 'comment', id, withSource(`Seen again: ${body ? `${title}\n${body}` : title}`, from)]); // the prefix keeps a title that starts with "-" from reading as a flag
     },
   };
 }

@@ -419,3 +419,51 @@ describe('Friction in ysz\'s own queue, against real bd', () => {
     );
   });
 });
+
+describe('Open Friction and "seen again" comments in ysz\'s own queue, against real bd', () => {
+  let yszDir: string;
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const popdeal = { name: 'PopDeal', repoPath: '/not/used', baseBranch: 'main' };
+  const fazwaz = { name: 'fazwaz', repoPath: '/not/used', baseBranch: 'main' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: yszDir, env });
+  const friction = (project: typeof popdeal, title: string) =>
+    createBeadsGateway({ yszRepo: yszDir }).createFriction({ project, title, body: '', ticketId: 'pd-1', runId: 1, attempt: 1, role: 'implement' });
+  let open: string, inProgress: string, closed: string, other: string;
+
+  before(async () => {
+    yszDir = await mkdtemp(join(tmpdir(), 'beads-ysz-open-'));
+    await bd('init', '-p', 'ysz', '--non-interactive', '--skip-agents', '--skip-hooks');
+    open = await friction(popdeal, 'open one');
+    inProgress = await friction(popdeal, 'the human is fixing this');
+    closed = await friction(popdeal, 'fixed already');
+    other = await friction(fazwaz, 'another project');
+    await bd('update', inProgress, '--status', 'in_progress');
+    await bd('close', closed, '--reason', 'fixed');
+  });
+
+  after(() => rm(yszDir, { recursive: true, force: true }));
+
+  it('lists the Project\'s Friction that is not closed, an in_progress one included', async () => {
+    const found = await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(popdeal);
+    assert.deepEqual(found.sort((a, b) => a.title.localeCompare(b.title)), [
+      { id: inProgress, title: 'the human is fixing this' },
+      { id: open, title: 'open one' },
+    ].sort((a, b) => a.title.localeCompare(b.title)));
+    assert.deepEqual(await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(fazwaz), [{ id: other, title: 'another project' }]);
+  });
+
+  it('lists nothing for a Project with no Friction, and refuses when no ysz checkout is configured', async () => {
+    assert.deepEqual(await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction({ ...popdeal, name: 'thaivis' }), []);
+    await assert.rejects(createBeadsGateway().listOpenFriction(popdeal), /ysz checkout is not configured/);
+  });
+
+  it('comments on the Ticket as the orchestrator, saying what happened this time and ending with where it came from', async () => {
+    await createBeadsGateway({ yszRepo: yszDir }).commentFriction(open, {
+      project: popdeal, title: '--phpunit exited 127 again', body: 'Skipped it.', ticketId: 'pd-9', runId: 21, attempt: 2, role: 'review',
+    });
+    const [comment, ...rest] = JSON.parse((await bd('comments', open, '--json')).stdout);
+    assert.equal(rest.length, 0);
+    assert.equal(comment.author, 'orchestrator');
+    assert.equal(comment.text, 'Seen again: --phpunit exited 127 again\nSkipped it.\n\nProject: PopDeal · Ticket: pd-9 · Run: 21 · Attempt: 2 · Agent: review');
+  });
+});
