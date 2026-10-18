@@ -2,10 +2,10 @@
 
 **Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), known by a name that never changes, and worked in its local repo. Each Project keeps its own Ticket queue.
 
-**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from.
+**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from. Adding a Project, from the Dashboard or otherwise, does not make it onboarded: it is onboarded once its Smoke check and host checks pass, or when the human vouches for it by hand. Editing an onboarded Project leaves it onboarded.
 _Avoid_: sandcastle setup, adding a repo.
 
-**Smoke check**: An agent-free trial of a Project's sandbox: its install and a bounded check run on a fresh clone. Passing it is required for Onboarding, but is not Onboarding by itself.
+**Smoke check**: An agent-free trial of a Project's sandbox: its install and a bounded check run on a fresh clone. ysz and the Dashboard onboard a Project only after it passes, but passing is not Onboarding by itself.
 _Avoid_: dry run, test run.
 
 **Check service**: A Project's running dev service whose image runs the agent's checks, for a stack the sandbox can't run.
