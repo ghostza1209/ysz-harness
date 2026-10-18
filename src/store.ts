@@ -50,6 +50,14 @@ const COLUMNS: Record<keyof RunPatch, string> = {
   state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
 };
 
+/** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
+export interface BacklogPoint {
+  project: string;
+  at: number;
+  backlog: number;
+  ready: number;
+}
+
 export interface Store {
   /** Returns the new Run's id. */
   insertRun(run: { project: string; ticketId: string; title: string; state: RunState; startedAt: number; model?: string }): number;
@@ -76,6 +84,10 @@ export interface Store {
   /** Pause or resume a Project's picking. Survives a restart. */
   setPaused(project: string, paused: boolean): void;
   pausedProjects(): string[];
+  /** Record a Project's counts from a poll, unless they equal the last ones recorded for it. */
+  recordBacklog(project: string, at: number, counts: { backlog: number; ready: number }): void;
+  /** Every recorded change of every Project's counts, oldest first. */
+  backlogHistory(): BacklogPoint[];
 }
 
 /** `:memory:` or a file path; the parent directory is created. */
@@ -120,6 +132,8 @@ export function openStore(path: string): Store {
     db.exec('ALTER TABLE runs ADD COLUMN pr_closed_at INTEGER; PRAGMA user_version = 8');
   }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
+  db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at, model) VALUES (?, ?, ?, ?, ?, ?)');
   const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
@@ -132,6 +146,9 @@ export function openStore(path: string): Store {
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
   const paused = db.prepare('SELECT project FROM paused_projects');
+  const lastCounts = db.prepare('SELECT backlog, ready FROM backlog WHERE project = ? ORDER BY at DESC LIMIT 1');
+  const addCounts = db.prepare('INSERT INTO backlog (project, at, backlog, ready) VALUES (?, ?, ?, ?)');
+  const counts = db.prepare('SELECT project, at, backlog, ready FROM backlog ORDER BY at, rowid');
   const toRow = (r: Record<string, unknown>): RunRow => ({
     id: r.id as number,
     project: r.project as string,
@@ -176,5 +193,10 @@ export function openStore(path: string): Store {
       db.prepare('SELECT state FROM runs WHERE project = ? AND ticket_id = ? ORDER BY id DESC LIMIT 1').get(project, ticketId)?.state as RunState | undefined,
     setPaused: (project, on) => void (on ? pause : resume).run(project),
     pausedProjects: () => paused.all().map((row) => row.project as string),
+    recordBacklog(project, at, { backlog, ready }) {
+      const last = lastCounts.get(project);
+      if (last?.backlog !== backlog || last?.ready !== ready) addCounts.run(project, at, backlog, ready);
+    },
+    backlogHistory: () => counts.all().map((row) => ({ ...row }) as unknown as BacklogPoint),
   };
 }

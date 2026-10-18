@@ -30,7 +30,7 @@ export interface ProjectStatus {
 }
 
 export interface Orchestrator {
-  /** Query every Project's Beads queue in parallel. One failing Project never blocks the others. */
+  /** Query every Project's Beads queue in parallel, recording its Backlog and Ready counts when they change. One failing Project never blocks the others. */
   poll(): Promise<void>;
   /** Claim the Ready Tickets that fit the free slots and start a Run for each; resolves once they are started, not finished. */
   tick(): Promise<void>;
@@ -562,10 +562,12 @@ export function createOrchestrator(deps: {
       results.forEach((result, i) => {
         const snapshot = snapshots.get(projects[i].name)!;
         if (result.status === 'fulfilled') {
-          snapshot.tickets = result.value;
+          const { tickets, backlog } = result.value;
+          snapshot.tickets = tickets;
           // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
-          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !result.value.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
+          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !tickets.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
           snapshot.error = null;
+          store.recordBacklog(projects[i].name, clock.now(), { backlog, ready: tickets.length });
         } else {
           snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
         }

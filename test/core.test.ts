@@ -11,6 +11,8 @@ const projects: Project[] = ['fazwaz', 'PopDeal', 'thaivis'].map((name) => ({ na
 
 /** Each Project's bd queue, or the error its bd call fails with. */
 type Queues = Record<string, Ticket[] | Error>;
+/** Each Project's count of unclosed beads, as its poll reports it; 0 if unset. */
+let backlogs: Record<string, number>;
 
 function ticket(id: string, priority: number, createdAt: string): Ticket {
   return { id, title: `title of ${id}`, priority, createdAt };
@@ -78,7 +80,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
     const queue = queues[project.name];
     if (queue instanceof Error) throw queue;
-    return queue ?? [];
+    return { tickets: queue ?? [], backlog: backlogs[project.name] ?? 0 };
   },
   async claim(project, id) {
     if (claimErrors[project.name]) throw claimErrors[project.name];
@@ -195,6 +197,7 @@ let now: number;
 beforeEach(() => {
   store = openStore(':memory:');
   queues = {};
+  backlogs = {};
   now = Date.parse('2026-10-08T12:00:00Z');
   writes = [];
   hostSteps = [];
@@ -387,6 +390,16 @@ describe('polling', () => {
     await o.poll();
     assert.deepEqual(order(o), ['fz9']);
     assert.equal(o.projectStatuses()[0].error, null);
+  });
+
+  it("records each Project's Backlog and Ready counts, but none for a Project whose poll fails", async () => {
+    queues = { fazwaz: new Error('boom'), PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')] };
+    backlogs = { fazwaz: 4, PopDeal: 9 };
+    await polled();
+    assert.deepEqual(store.backlogHistory(), [
+      { project: 'PopDeal', at: now, backlog: 9, ready: 1 },
+      { project: 'thaivis', at: now, backlog: 0, ready: 0 },
+    ]);
   });
 });
 

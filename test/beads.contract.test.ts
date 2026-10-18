@@ -39,8 +39,9 @@ describe('Beads gateway against real bd', () => {
 
   after(() => rm(dir, { recursive: true, force: true }));
 
-  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip', async () => {
-    const tickets = await createBeadsGateway().listReady(project);
+  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip, and counts every unclosed bead', async () => {
+    const { tickets, backlog } = await createBeadsGateway().listReady(project);
+    assert.equal(backlog, 8);
     assert.deepEqual(
       tickets.map(({ id, title, priority }) => ({ id, title, priority })),
       [{ id: ids.ready, title: 'ready one', priority: 1 }],
@@ -50,13 +51,13 @@ describe('Beads gateway against real bd', () => {
 
   it('releases a Ticket once its blocker is closed', async () => {
     await bd('close', ids.blocker, '-r', 'done');
-    const found = (await createBeadsGateway().listReady(project)).map((t) => t.id).sort();
+    const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
     assert.deepEqual(found, [ids.blocked, ids.ready].sort());
   });
 
   it('holds a parent back until every child is closed', async () => {
     await bd('close', ids.child, '-r', 'done');
-    const found = (await createBeadsGateway().listReady(project)).map((t) => t.id).sort();
+    const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
     assert.deepEqual(found, [ids.blocked, ids.parent, ids.ready].sort());
   });
 
@@ -143,7 +144,7 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'needs-info'] });
     const [issue] = JSON.parse((await bd('show', ids.rejected, '--json', '--include-comments')).stdout);
     assert.deepEqual(issue.comments.at(-1).text, 'PR closed unmerged: https://github.com/o/r/pull/3');
-    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.rejected));
+    assert.ok(!(await createBeadsGateway().listReady(project)).tickets.some((t) => t.id === ids.rejected));
   });
 
   it('writes nothing to an in-review Ticket the human already closed or took over', async () => {
@@ -171,7 +172,7 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'needs-info'] });
     const [issue] = JSON.parse((await bd('show', ids.failing, '--json', '--include-comments')).stdout);
     assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', reason]]);
-    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.failing));
+    assert.ok(!(await createBeadsGateway().listReady(project)).tickets.some((t) => t.id === ids.failing));
   });
 
   it('re-queues a failed Ticket: needs-info dropped, ready-for-agent back, Ready again', async () => {
@@ -183,7 +184,7 @@ describe('Beads gateway against real bd', () => {
 
     const { labels, ...rest } = await state(ids.requeued);
     assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'ready-for-agent'] });
-    assert.ok((await createBeadsGateway().listReady(project)).some((t) => t.id === ids.requeued));
+    assert.ok((await createBeadsGateway().listReady(project)).tickets.some((t) => t.id === ids.requeued));
   });
 
   it('re-queues a Ticket that was only released, never labelled needs-info', async () => {
@@ -209,7 +210,7 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'orchestrator:skip', 'ready-for-agent'] });
     const [issue] = JSON.parse((await bd('show', ids.killing, '--json', '--include-comments')).stdout);
     assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', 'Killed from the dashboard while agent.']]);
-    assert.ok(!(await createBeadsGateway().listReady(project)).some((t) => t.id === ids.killing));
+    assert.ok(!(await createBeadsGateway().listReady(project)).tickets.some((t) => t.id === ids.killing));
   });
 
   it('leaves the Ticket claimed when the kill hand-back cannot even comment', async () => {
@@ -245,7 +246,7 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual({ ...rest, labels: labels.sort() }, { status: 'open', assignee: '', labels: ['keep-me', 'ready-for-agent'] });
     const [issue] = JSON.parse((await bd('show', ids.interrupted, '--json', '--include-comments')).stdout);
     assert.deepEqual(issue.comments.map((c: { author: string; text: string }) => [c.author, c.text]), [['orchestrator', 'Interrupted by an Orchestrator restart while agent.']]);
-    assert.ok((await createBeadsGateway().listReady(project)).some((t) => t.id === ids.interrupted));
+    assert.ok((await createBeadsGateway().listReady(project)).tickets.some((t) => t.id === ids.interrupted));
   });
 
   /** bd leases last 5 minutes and no setting shortens them, so age every lease straight in its Dolt table, as if that long had passed. */
@@ -363,7 +364,7 @@ describe('Beads gateway with In review blockers, against real bd', () => {
   after(() => rm(dir, { recursive: true, force: true }));
 
   it('lists a Ticket whose only unclosed blocker is In review, and not one with two or with a blocker still being worked', async () => {
-    const tickets = await createBeadsGateway().listReady(project);
+    const { tickets } = await createBeadsGateway().listReady(project);
     assert.deepEqual(
       tickets.map(({ id, title, priority }) => ({ id, title, priority })),
       [{ id: ids.stacked, title: 'on A', priority: 2 }],

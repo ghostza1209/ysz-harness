@@ -32,7 +32,7 @@ export interface BeadsGateway {
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, unassigned, no unclosed children, and every
    * blocker closed except at most one In review.
    */
-  listReady(project: Project): Promise<Ticket[]>;
+  listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
   /** Hand a claimed Ticket back: open and unassigned. */
@@ -131,7 +131,8 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
         return blockers.length === 1 && isInReview(blockers[0]);
       });
       const issues: { id: string; title: string; priority: number; created_at: string }[] = [...JSON.parse(out), ...stacked];
-      return issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      const tickets = issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      return { tickets, backlog: beads.length };
     },
 
     async claim(project, id) {

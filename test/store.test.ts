@@ -80,3 +80,27 @@ it('keeps each agent\'s latest usage under its log part name', () => {
   store.setUsage(id, 'attempt1-implement', { context: 30, tokens: 90 });
   assert.deepEqual(store.getRun(id)?.usage, { 'attempt1-implement': { context: 30, tokens: 90 }, 'attempt1-review': { context: 5, tokens: 6 } });
 });
+
+it("keeps a Project's Backlog counts only when they change from its last ones, across a reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const store = openStore(path);
+    store.recordBacklog('a', 1, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 2, { backlog: 5, ready: 2 });
+    store.recordBacklog('b', 3, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 4, { backlog: 6, ready: 2 });
+    openStore(path).recordBacklog('a', 5, { backlog: 6, ready: 2 }); // a restart compares against the stored row
+    store.recordBacklog('a', 6, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 7, { backlog: 5, ready: 3 });
+    assert.deepEqual(store.backlogHistory(), [
+      { project: 'a', at: 1, backlog: 5, ready: 2 },
+      { project: 'b', at: 3, backlog: 5, ready: 2 },
+      { project: 'a', at: 4, backlog: 6, ready: 2 },
+      { project: 'a', at: 6, backlog: 5, ready: 2 },
+      { project: 'a', at: 7, backlog: 5, ready: 3 },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
