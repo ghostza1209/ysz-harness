@@ -16,10 +16,12 @@ const execFileAsync = promisify(execFile);
 export interface Prepared {
   branch: string;
   dir: string;
-  /** The sha the clone was made at: the tip of origin/<baseBranch>, or of the stacked-on branch. */
+  /** The sha the clone was made at: the tip of origin/<baseBranch>, of the epic branch, or of the stacked-on branch. */
   base: string;
-  /** The In review blocker's branch and PR the clone starts on, which the PR then targets unless the blocker merged meanwhile. Absent: baseBranch. */
+  /** The In review blocker's branch and PR the clone starts on, which the PR then targets unless the blocker merged meanwhile. Absent: the epic branch, else baseBranch. */
   stack?: { branch: string; prUrl: string };
+  /** The labelled parent epic's branch (ADR 0006), which the clone starts on and the PR targets when there is no stack. Absent: baseBranch. */
+  epic?: string;
   /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
   key: string;
 }
@@ -29,7 +31,8 @@ export interface HostSteps {
   preflight(project: Project): Promise<void>;
   /**
    * A fresh clone on `agent/<ticket-id>` with the Ticket context in place, at the just-fetched origin/<baseBranch>,
-   * or at the In review blocker's `agent/<id>` when the context names one with its PR.
+   * at the In review blocker's `agent/<id>` when the context names one with its PR, or else at the epic branch when the
+   * parent epic is labelled `epic-branch`, which is first pushed from origin/<baseBranch> if origin lacks it.
    */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over what it was cloned onto. */
@@ -192,7 +195,13 @@ export function prTitleAndBody(output: string, key: string, ticketTitle: string)
 }
 
 /** The branch a Run's clone was made on, which its PR targets. */
-const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? project.baseBranch;
+const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? prepared.epic ?? project.baseBranch;
+
+/** ADR 0006: the branch the children of a parent epic labelled `epic-branch` share. */
+function epicBranch(project: Project, { parent }: TicketContext): string | undefined {
+  const labels = parent?.labels;
+  if (Array.isArray(labels) && labels.includes('epic-branch')) return `${project.epicBranchPrefix ?? 'epic/'}${parent!.id}`;
+}
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -209,9 +218,15 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const repo = project.repoPath;
       const blocker = context.inReviewBlocker;
       const stack = blocker?.prUrl ? { branch: `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
-      const base = stack?.branch ?? project.baseBranch;
+      const epic = epicBranch(project, context);
+      const base = stack?.branch ?? epic ?? project.baseBranch;
       const branch = `agent/${ticketId}`;
 
+      if (base === epic && !(await text('git', ['ls-remote', '--heads', 'origin', `refs/heads/${epic}`], repo))) {
+        // The epic's first child: cut its branch from the base. One Run per Project, so no other Run races this push.
+        await run('git', ['fetch', 'origin', project.baseBranch], repo);
+        await run('git', ['push', 'origin', `refs/remotes/origin/${project.baseBranch}:refs/heads/${epic}`], repo);
+      }
       await run('git', ['fetch', 'origin', base], repo);
       const sha = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);
       const url = await text('git', ['remote', 'get-url', 'origin'], repo);
@@ -243,7 +258,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }) };
+      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }) };
     },
 
     async collect(project, prepared, signal) {

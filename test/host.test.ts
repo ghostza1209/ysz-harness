@@ -299,6 +299,36 @@ describe('host steps against real git', () => {
     assert.match(lines.at(-1)!, /^Could not stack it on https:\/\/example.test\/pull\/9, so it stays a plain PR onto agent\/t-b: .*would remove #2/);
   });
 
+  it("clones a child of an epic-branch epic at the epic's branch, cutting it from origin/<base> first, and opens the PR onto it", async () => {
+    const epicContext = { ...context, parent: { id: 'e-1', labels: ['epic-branch'] } };
+    const first = await host.prepare(project, 't-e1', epicContext);
+    assert.equal(git(origin, 'rev-parse', 'epic/e-1'), git(origin, 'rev-parse', 'develop'));
+    assert.equal(git(join(first.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
+    commit(join(first.dir, 'repo'), 'e1.txt', 'e1');
+    const lines: string[] = [];
+    await host.publish(project, ticket('t-e1'), first, { log: (line) => lines.push(line) });
+    assert.equal(lines.at(-1), 'Opening the PR against epic/e-1');
+    assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /since origin\/epic\/e-1/);
+
+    // The human merged a child into the epic branch: the next child starts from it, which is no longer develop.
+    const other = join(root, 'other-epic');
+    git(root, 'clone', '-q', '-b', 'epic/e-1', origin, other);
+    commit(other, 'merged-child.txt', 'merged');
+    git(other, 'push', '-q', 'origin', 'epic/e-1');
+    const second = await host.prepare(project, 't-e2', epicContext);
+    assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+  });
+
+  it("names the epic branch with the Project's prefix, and keeps a Ticket whose parent lacks the label on baseBranch", async () => {
+    const custom = await host.prepare({ ...project, epicBranchPrefix: 'train/' }, 't-e3', { ...context, parent: { id: 'e-2', labels: ['epic-branch'] } });
+    assert.equal(git(origin, 'rev-parse', 'train/e-2'), git(origin, 'rev-parse', 'develop'));
+    assert.equal(git(join(custom.dir, 'repo'), 'rev-parse', 'origin/train/e-2'), git(origin, 'rev-parse', 'develop'));
+
+    const plain = await host.prepare(project, 't-e4', { ...context, parent: { id: 'e-3', labels: ['ready-for-human'] } });
+    assert.equal(git(origin, 'branch', '--list', 'epic/e-3'), '');
+    assert.equal(git(join(plain.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
+  });
+
   it("reads a PR's state as the Project's gh account", async () => {
     const bin = join(root, 'bin-pr-view');
     mkdirSync(bin, { recursive: true });

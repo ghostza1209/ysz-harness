@@ -15,6 +15,7 @@
 3. The **Implement agent** works the Ticket in a sandbox; the **Review agent** then reviews and corrects it. A failed Attempt is retried once.
 4. The host pushes the branch and opens a PR against the Project's `baseBranch`. The bead gets a comment with the link and the `in-review` label.
    A Ticket whose only unclosed blocker is `In review` does not wait for that merge: its Run clones the blocker's `agent/<id>` branch and opens a stacked PR onto it (`gh stack link`, needs the `gh-stack` extension). See [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md).
+   A Ticket whose parent epic is labelled `epic-branch` clones and opens its PR onto `epic/<epic-id>` (the Project's `epicBranchPrefix`) instead, so `baseBranch` gets one PR per epic. See [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md).
 5. If the agent needs information, the bead is handed back with a comment and the `needs-info` label.
 
 ## Requirements
@@ -50,6 +51,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | --- | --- |
 | Queue a Ticket | `bd update <id> --add-label ready-for-agent` in the Project's repo |
 | Keep a Ticket away from ysz | `bd update <id> --add-label orchestrator:skip` |
+| Collect an epic's PRs on one branch | `bd update <epic-id> --add-label epic-branch`, then open `epic/<epic-id>` → `baseBranch` yourself when its children are merged |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |
 | Stop a live Run | **Kill** on its card: the Ticket gets `orchestrator:skip` |
 | Resume a Run stuck in a host step | **Retry host step** on its card |

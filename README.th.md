@@ -15,6 +15,7 @@
 3. **Implement agent** ทำ Ticket ใน sandbox จากนั้น **Review agent** รีวิวและแก้งาน ถ้า Attempt แรกล้มจะลองใหม่อีกครั้งเดียว
 4. ฝั่ง host push branch แล้วเปิด PR เข้า `baseBranch` ของ Project ตัว bead จะได้คอมเมนต์ลิงก์ PR และ label `in-review`
    Ticket ที่ blocker ตัวเดียวที่ยังไม่ปิดอยู่ใน `In review` ไม่ต้องรอ merge: Run จะ clone จาก branch `agent/<id>` ของ blocker แล้วเปิด stacked PR ต่อบน branch นั้น (`gh stack link` ต้องติดตั้ง extension `gh-stack`) ดู [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md)
+   Ticket ที่ epic แม่ติด label `epic-branch` จะ clone และเปิด PR เข้า `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) แทน ทำให้ `baseBranch` ได้ PR เดียวต่อ epic ดู [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
 ## สิ่งที่ต้องมี
@@ -50,6 +51,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | --- | --- |
 | ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
 | กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
+| รวม PR ของ epic ไว้ใน branch เดียว | `bd update <epic-id> --add-label epic-branch` แล้วเปิด PR `epic/<epic-id>` → `baseBranch` เองเมื่อ merge child ครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |
