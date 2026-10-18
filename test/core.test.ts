@@ -57,6 +57,9 @@ let leftoverSweeps: number;
 /** Titles of the Friction whose write fails, and the Friction ids handed out so far. */
 let failingFriction: Set<string>;
 let frictionIds: number;
+/** Titles of Follow-ups whose Ticket cannot be created (until cleared), and how many Tickets were created. */
+let failingFollowUps: Set<string>;
+let followUpIds: number;
 /** The open Friction the Project's queue holds, or the error fetching it fails with. */
 let openFriction: { id: string; title: string }[] | Error;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
@@ -139,6 +142,11 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (failingFriction.has(title)) throw new Error('ysz bd is down');
     writes.push(`friction ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
     return `ysz-${++frictionIds}`;
+  },
+  async createFollowUp({ project, title, ticketId, attempt, role }) {
+    if (failingFollowUps.has(title)) throw new Error('project bd is down');
+    writes.push(`follow-up ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `${project.name}-f${++followUpIds}`;
   },
   async listOpenFriction() {
     if (openFriction instanceof Error) throw openFriction;
@@ -242,6 +250,8 @@ beforeEach(() => {
   leftoverSweeps = 0;
   failingFriction = new Set();
   frictionIds = 0;
+  failingFollowUps = new Set();
+  followUpIds = 0;
   openFriction = [];
   agentCalls = [];
   agent = async () => complete;
@@ -928,6 +938,102 @@ describe('Follow-ups an agent reports', () => {
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
     assert.deepEqual(published(), ['drop the old export']);
+  });
+});
+
+describe('Follow-up Tickets the Run creates', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+
+  it('writes them one at a time between publish and markInReview, and the Run records each id and title', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'follow-up thaivis/tv1 attempt 1 implement: drop the old export',
+      'follow-up thaivis/tv1 attempt 1 implement: rename the flag',
+      'follow-up thaivis/tv1 attempt 1 review: cover the empty case',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [
+      ['in-review', [
+        { id: 'thaivis-f1', title: 'drop the old export' },
+        { id: 'thaivis-f2', title: 'rename the flag' },
+        { id: 'thaivis-f3', title: 'cover the empty case' },
+      ]],
+    ]);
+  });
+
+  it('creates them only after the PR is open', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    publish = async () => {
+      assert.deepEqual(writes, ['claim thaivis/tv1']);
+      return PR_URL;
+    };
+    await run();
+    assert.equal(writes.length, 3);
+  });
+
+  it('creates none from a failed Attempt, only from the Attempt the PR opened from', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 2 implement: from the second attempt']);
+  });
+
+  it('creates none for a Run that fails without reaching In review', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: followUps('drop the old export') });
+    const o = await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), []);
+    assert.equal(o.runs().history[0].reports, null);
+  });
+
+  it('parks the Run in needs-attention when a Follow-up cannot be written, and a retry creates only the missing ones, with no second PR', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second', 'third') });
+    failingFollowUps.add('second');
+    const o = await run();
+    assert.deepEqual(o.runs().live.map((r) => [r.state, r.note, r.reports?.followUps]), [['needs-attention', 'project bd is down', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+
+    failingFollowUps.clear();
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+
+    assert.deepEqual(writes.slice(2), [
+      'follow-up thaivis/tv1 attempt 1 implement: second',
+      'follow-up thaivis/tv1 attempt 1 implement: third',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps.map((f) => f.title)]), [['in-review', ['first', 'second', 'third']]]);
+  });
+
+  it('creates no further Follow-up once the Run is killed during the host steps', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second') });
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFollowUp: async (f) => { const id = await base.createFollowUp(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [['killed', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.equal(writes.some((w) => w.startsWith('markInReview')), false);
   });
 });
 
@@ -1798,13 +1904,35 @@ describe('restart recovery', () => {
     assert.match(o.runs().history[0].note!, /releasing the Ticket failed: bd timed out/);
   });
 
-  it('resumes a host job that holds Follow-ups with them', async () => {
+  it('resumes a host job that holds Follow-ups with them: published, created, then the bead marked', async () => {
     const id = leftBehind('host', { hostJob: true });
-    store.setHostJob(id, JSON.stringify({ ...JSON.parse(HOST_JOB), followUps: [{ title: 'drop the old export', body: 'it is unused' }] }));
+    store.setHostJob(id, JSON.stringify({ ...JSON.parse(HOST_JOB), followUps: [{ title: 'drop the old export', body: 'it is unused', attempt: 2, role: 'review' }] }));
     const o = await polled();
     await o.recover();
     await o.whenIdle();
     assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: ['drop the old export'] });
+    assert.deepEqual(writes, ['follow-up thaivis/tv1 attempt 2 review: drop the old export', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(store.getRun(id)!.reports?.followUps, [{ id: 'thaivis-f1', title: 'drop the old export' }]);
+  });
+
+  it('after a restart mid-way, creates only the Follow-ups still in the host job and opens no second PR', async () => {
+    // first process: the second Follow-up fails
+    failingFollowUps.add('second');
+    agent = async () => ({ outcome: 'complete', reports: { followUps: [{ title: 'first', body: '' }, { title: 'second', body: '' }], friction: [] } });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const first = await polled();
+    await first.tick();
+    await first.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+    // restart: a new Orchestrator over the same store
+    failingFollowUps.clear();
+    const second = await polled();
+    assert.deepEqual(await second.recover(), []);
+    await second.retryHostStep(store.liveRuns()[0].id);
+    await second.whenIdle();
+    assert.deepEqual(writes.slice(2), ['follow-up thaivis/tv1 attempt 1 implement: second', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(store.history(10).map((r) => r.reports?.followUps.map((f) => f.title)), [['first', 'second']]);
   });
 
   it('resumes a host-phase Run from its host step to in-review, without another agent run', async () => {

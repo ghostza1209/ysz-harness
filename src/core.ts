@@ -98,8 +98,8 @@ type Attempted =
   | { kind: 'failed'; prepared: Prepared; reason: string }
   | { kind: 'needs-info'; agent: 'implement' | 'review'; question: string };
 
-/** Work in the Project's code outside the Ticket, as an agent reported it. */
-type FollowUp = AgentReports['followUps'][number];
+/** Work in the Project's code outside the Ticket, as an agent reported it, with the Attempt and agent that did. */
+type FollowUp = AgentReports['followUps'][number] & { attempt: number; role: 'implement' | 'review' };
 
 /** What a Run needs to resume its host steps. */
 interface HostJob {
@@ -108,7 +108,7 @@ interface HostJob {
   prepared: Prepared;
   tip?: string;
   reviewSkipped?: string;
-  /** The Follow-ups of the Attempt the PR opens from. */
+  /** The Follow-ups of the Attempt the PR opens from that have no Ticket yet. */
   followUps: FollowUp[];
   /** Set once the PR is open, so a retry does not open a second one. */
   prUrl: string | null;
@@ -173,9 +173,10 @@ export function createOrchestrator(deps: {
   }
 
   /**
-   * The host steps after a successful Attempt: publish, mark the bead, end in-review. A failure never burns an Attempt:
-   * the Run parks in needs-attention (freeing its slot) with the clone and the bead claim kept, for Retry or Kill.
-   * A step that already succeeded is not repeated: once the PR exists, a retry only marks the bead. Never rejects.
+   * The host steps after a successful Attempt: publish, create a Ticket for each Follow-up, mark the bead, end in-review.
+   * A failure never burns an Attempt: the Run parks in needs-attention (freeing its slot) with the clone and the bead
+   * claim kept, for Retry or Kill. A step that already succeeded is not repeated: once the PR exists, a retry creates
+   * only the Follow-ups still missing, then marks the bead. Never rejects.
    */
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
@@ -191,6 +192,16 @@ export function createOrchestrator(deps: {
         job.prUrl = pr.url;
         store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
+      }
+      // One at a time; each id is on the Run before the next write, and out of the job, so a retry or a restart does only the rest.
+      while (job.followUps.length) {
+        signal.throwIfAborted();
+        const { title, body, attempt, role } = job.followUps[0];
+        const id = await beads.createFollowUp({ project: job.project, title, body, ticketId: job.ticket.id, runId, attempt, role });
+        const reports = store.getRun(runId)!.reports ?? { followUps: [], friction: [] };
+        store.setReports(runId, { ...reports, followUps: [...reports.followUps, { id, title }] });
+        job.followUps = job.followUps.slice(1);
+        store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
       }
       signal.throwIfAborted();
       await beads.markInReview(job.project, job.ticket.id, job.prUrl);
@@ -253,6 +264,7 @@ export function createOrchestrator(deps: {
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
         store.updateRun(runId, { state: 'claimed', attempt: n });
+        const found = ({ reports }: AgentResult, role: FollowUp['role']): FollowUp[] => reports.followUps.map((f) => ({ ...f, attempt: n, role }));
         // A Friction the human closed since the last Attempt must not be commented on, so each Attempt asks again.
         openFriction = await beads.listOpenFriction(project).catch((err) => {
           logRun(runId, `Fetching the open Friction failed, so the agents get none: ${message(err)}`);
@@ -297,14 +309,14 @@ export function createOrchestrator(deps: {
           await recordFriction(n, 'review', reviewed.reports);
           signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
-          if (reviewed.outcome === 'complete') return { kind: 'done', prepared, followUps: [...implemented.reports.followUps, ...reviewed.reports.followUps] };
+          if (reviewed.outcome === 'complete') return { kind: 'done', prepared, followUps: [...found(implemented, 'implement'), ...found(reviewed, 'review')] };
           skipped = 'the review agent stopped without signalling COMPLETE';
         } catch (err) {
           signal.throwIfAborted();
           skipped = `the review agent failed: ${message(err)}`;
         }
         // An unfinished review may have left half a change, so the PR opens from the implement commits.
-        return { kind: 'done', prepared, followUps: implemented.reports.followUps, tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
+        return { kind: 'done', prepared, followUps: found(implemented, 'implement'), tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
       }
 
       let result = await attempt(1);

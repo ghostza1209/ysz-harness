@@ -76,6 +76,12 @@ export interface BeadsGateway {
   listOpenFriction(project: Project): Promise<{ id: string; title: string }[]>;
   /** An agent hit an open Friction again: comment on its Ticket, as the Orchestrator, what happened this time. The comment ends with where it came from. */
   commentFriction(id: string, friction: FrictionReport): Promise<void>;
+  /**
+   * An agent found work in the Project's code outside the Ticket: a new Ticket in the Project's own queue, labelled
+   * needs-triage, linked discovered-from the Run's Ticket, with no parent, no ready-for-agent and bd's default type and
+   * priority. The body ends with where it came from. Returns the new id.
+   */
+  createFollowUp(followUp: FollowUpReport): Promise<string>;
 }
 
 /** One Friction an agent reported, and the Run it came from. */
@@ -88,6 +94,9 @@ export interface FrictionReport {
   attempt: number;
   role: 'implement' | 'review';
 }
+
+/** One Follow-up an agent reported, and the Run it came from. */
+export type FollowUpReport = FrictionReport;
 
 /** The fields of a bead as `bd list --json` prints it that the gateway reads. */
 interface Bead {
@@ -256,6 +265,14 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         '-C', yszQueue(), '--actor', ORCHESTRATOR, 'create', '--silent',
         '--title', title, '-d', withSource(body, { project, ticketId, runId, attempt, role }),
         '-l', `friction,project:${project.name},needs-triage`,
+      ]);
+      return out.trim();
+    },
+
+    async createFollowUp({ project, title, body, ticketId, runId, attempt, role }) {
+      const out = await write(project, [
+        'create', '--silent', '--title', title, '-d', withSource(body, { project, ticketId, runId, attempt, role }),
+        '-l', 'needs-triage', '--deps', `discovered-from:${ticketId}`,
       ]);
       return out.trim();
     },

@@ -470,3 +470,39 @@ describe('Open Friction and "seen again" comments in ysz\'s own queue, against r
     assert.equal(comment.text, 'Seen again: --phpunit exited 127 again\nSkipped it.\n\nProject: PopDeal · Ticket: pd-9 · Run: 21 · Attempt: 2 · Agent: review');
   });
 });
+
+describe('Follow-up Tickets in the Project\'s own queue, against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  let ticket: string, followUp: string;
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'beads-followup-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+    ticket = (await bd('create', 'the Run\'s Ticket', '--silent', '-l', 'ready-for-agent')).stdout.trim();
+    followUp = await createBeadsGateway().createFollowUp({
+      project, title: '--drop the old export', body: 'Nothing imports it.', ticketId: ticket, runId: 17, attempt: 2, role: 'review',
+    });
+  });
+
+  after(() => rm(dir, { recursive: true, force: true }));
+
+  it('is needs-triage and discovered-from the Ticket, with no parent, at default type and priority, as the orchestrator, ending with where it came from', async () => {
+    const [issue] = JSON.parse((await bd('show', followUp, '--json')).stdout);
+    assert.deepEqual(
+      [issue.title, issue.status, issue.priority, issue.issue_type, issue.created_by, [...issue.labels], issue.parent ?? null],
+      ['--drop the old export', 'open', 2, 'task', 'orchestrator', ['needs-triage'], null],
+    );
+    assert.deepEqual(issue.dependencies.map((d: { id: string; dependency_type: string }) => [d.id, d.dependency_type]), [[ticket, 'discovered-from']]);
+    assert.equal(issue.description, `Nothing imports it.\n\nProject: lab · Ticket: ${ticket} · Run: 17 · Attempt: 2 · Agent: review`);
+  });
+
+  it('never appears in listReady, though it counts in the Backlog', async () => {
+    const { tickets, backlog } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(tickets.map((t) => t.id), [ticket]);
+    assert.equal(backlog, 2);
+  });
+});
