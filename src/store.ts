@@ -26,6 +26,8 @@ export interface RunRow {
   /** Attempts started so far: 0 until the agent starts. */
   attempt: number;
   prUrl: string | null;
+  /** The branch the PR targets when it is not the Project's baseBranch: an epic branch or a stacked-on blocker's. Null otherwise, and for Runs from before it was recorded. */
+  prBase: string | null;
   /** Why a Run failed. */
   note: string | null;
   startedAt: number;
@@ -40,10 +42,10 @@ export interface RunRow {
   usage: Record<string, AgentUsage>;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at',
 };
 
 export interface Store {
@@ -109,6 +111,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 6) {
     db.exec('ALTER TABLE runs ADD COLUMN usage TEXT; PRAGMA user_version = 6');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 7) {
+    db.exec('ALTER TABLE runs ADD COLUMN pr_base TEXT; PRAGMA user_version = 7');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at, model) VALUES (?, ?, ?, ?, ?, ?)');
@@ -130,6 +135,7 @@ export function openStore(path: string): Store {
     state: r.state as RunState,
     attempt: r.attempt as number,
     prUrl: r.pr_url as string | null,
+    prBase: r.pr_base as string | null,
     note: r.note as string | null,
     startedAt: r.started_at as number,
     endedAt: r.ended_at as number | null,

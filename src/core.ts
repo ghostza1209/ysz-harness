@@ -177,8 +177,9 @@ export function createOrchestrator(deps: {
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
-        store.updateRun(runId, { prUrl: job.prUrl });
+        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
+        job.prUrl = pr.url;
+        store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
       }
       signal.throwIfAborted();

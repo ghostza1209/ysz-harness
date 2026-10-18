@@ -577,6 +577,7 @@ export function App() {
           <span className="tag">{r.project}</span>
           <Copy text={r.ticketId} />
           {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
+          {r.prBase && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
         </div>
         <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
           {r.title}

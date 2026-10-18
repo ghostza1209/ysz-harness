@@ -175,7 +175,7 @@ describe('host steps against real git', () => {
     const tip = git(clone, 'rev-parse', 'HEAD');
     plantClaudeHook(clone);
 
-    assert.equal(await host.publish(project, ticket('t-2'), prepared), 'https://example.test/pull/1');
+    assert.deepEqual(await host.publish(project, ticket('t-2'), prepared), { url: 'https://example.test/pull/1', base: 'develop' });
     await host.removeClone(prepared);
 
     assert.equal(git(origin, 'rev-parse', 'agent/t-2'), tip);
@@ -221,7 +221,7 @@ describe('host steps against real git', () => {
     process.env.PATH = `${bin}:${path}`;
     const lines: string[] = [];
     try {
-      assert.equal(await host.publish(project, ticket('t-st'), prepared, { log: (line) => lines.push(line) }), 'https://example.test/pull/8');
+      assert.deepEqual(await host.publish(project, ticket('t-st'), prepared, { log: (line) => lines.push(line) }), { url: 'https://example.test/pull/8', base: 'agent/t-a' });
     } finally {
       process.env.PATH = path;
     }
@@ -264,7 +264,7 @@ describe('host steps against real git', () => {
       await assert.rejects(host.publish(project, ticket('t-sm'), prepared), /empty PR body/);
       commit(other, 'later.txt', 'later');
       git(other, 'push', '-q', 'origin', 'develop');
-      assert.equal(await host.publish(project, ticket('t-sm'), prepared), 'https://example.test/pull/12');
+      assert.deepEqual(await host.publish(project, ticket('t-sm'), prepared), { url: 'https://example.test/pull/12', base: 'develop' });
     } finally {
       process.env.PATH = path;
     }
@@ -292,7 +292,7 @@ describe('host steps against real git', () => {
     process.env.PATH = `${bin}:${path}`;
     const lines: string[] = [];
     try {
-      assert.equal(await host.publish(project, ticket('t-sf'), prepared, { log: (line) => lines.push(line) }), 'https://example.test/pull/10');
+      assert.deepEqual(await host.publish(project, ticket('t-sf'), prepared, { log: (line) => lines.push(line) }), { url: 'https://example.test/pull/10', base: 'agent/t-b' });
     } finally {
       process.env.PATH = path;
     }
@@ -306,7 +306,7 @@ describe('host steps against real git', () => {
     assert.equal(git(join(first.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
     commit(join(first.dir, 'repo'), 'e1.txt', 'e1');
     const lines: string[] = [];
-    await host.publish(project, ticket('t-e1'), first, { log: (line) => lines.push(line) });
+    assert.equal((await host.publish(project, ticket('t-e1'), first, { log: (line) => lines.push(line) })).base, 'epic/e-1');
     assert.equal(lines.at(-1), 'Opening the PR against epic/e-1');
     assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /since origin\/epic\/e-1/);
 

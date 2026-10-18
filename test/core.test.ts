@@ -55,6 +55,8 @@ let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
+/** The branch the next publish reports its PR targets. */
+let publishBase: string;
 /** What the last publish was given, bar its signal. */
 let publishOpts: unknown;
 /** Lines the orchestrator wrote to each Run's host log. */
@@ -172,7 +174,7 @@ const fakeHost: HostSteps = {
     hostSteps.push(`publish ${branch}`);
     if (opts) ({ signal: _signal, log: _log, ...publishOpts } = opts);
     opts?.log?.(`pushing ${branch}`);
-    return publish(opts?.signal);
+    return { url: await publish(opts?.signal), base: publishBase };
   },
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
@@ -218,6 +220,7 @@ beforeEach(() => {
   agent = async () => complete;
   reviewer = async () => complete;
   publish = async () => PR_URL;
+  publishBase = 'main';
   publishOpts = undefined;
   runLog = [];
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
@@ -586,6 +589,18 @@ describe('a happy-path Run', () => {
       { project: run.project, ticketId: run.ticketId, title: run.title, state: run.state, attempt: run.attempt, prUrl: run.prUrl, note: run.note },
       { project: 'thaivis', ticketId: 'tv1', title: 'title of tv1', state: 'in-review', attempt: 1, prUrl: PR_URL, note: null },
     );
+  });
+
+  it("records the branch its PR targets on the Run only when that is not the Project's baseBranch", async () => {
+    for (const [id, base, expected] of [['tv1', 'epic/e-1', 'epic/e-1'], ['tv2', 'main', null]] as const) {
+      queues = { thaivis: [ticket(id, 2, '2026-01-01T00:00:00Z')] };
+      publishBase = base;
+      const o = await polled();
+      await o.tick();
+      await o.whenIdle();
+      const [run] = o.runs().history;
+      assert.deepEqual([run.ticketId, run.state, run.prBase], [id, 'in-review', expected]);
+    }
   });
 
   it('collects the implement commits under agent, and reviews under agent-review', async () => {

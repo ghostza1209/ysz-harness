@@ -41,7 +41,7 @@ export interface HostSteps {
    * Bring the agent's branch back into the Project repo, push it and open the PR against what it was cloned onto, then
    * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). A blocker PR that merged meanwhile
    * has the agent's commits replayed onto its base instead, which the PR then targets, unstacked; one that cannot be
-   * read fails the publish. Returns the PR URL.
+   * read fails the publish. Returns the PR URL and the branch it targets.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
@@ -50,7 +50,7 @@ export interface HostSteps {
     ticket: { id: string; title: string },
     prepared: Prepared,
     opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal; log?: (line: string) => void },
-  ): Promise<string>;
+  ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
   /** The PR's state on GitHub, asked as the Project's gh account. */
@@ -339,7 +339,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
           await text('gh', ['stack', 'link', '--base', blocker.baseRefName, stack.prUrl, prUrl], repo, { env })
             .catch((err) => step(`Could not stack it on ${stack.prUrl}, so it stays a plain PR onto ${base}: ${message(err)}`));
         }
-        return prUrl;
+        return { url: prUrl, base };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

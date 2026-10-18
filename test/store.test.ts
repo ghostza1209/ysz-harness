@@ -22,8 +22,8 @@ it('keeps the Runs of a version-1 database and adds the clone column to them', (
     const store = openStore(path);
     const [row] = store.history(10);
     assert.deepEqual(
-      [row.ticketId, row.state, row.prUrl, row.startedAt, row.endedAt, row.cloneDir, row.archivedAt, row.model, row.usage],
-      ['tv-1', 'in-review', 'https://pr/1', 5, 9, null, null, null, {}],
+      [row.ticketId, row.state, row.prUrl, row.prBase, row.startedAt, row.endedAt, row.cloneDir, row.archivedAt, row.model, row.usage],
+      ['tv-1', 'in-review', 'https://pr/1', null, 5, 9, null, null, null, {}],
     );
     store.updateRun(row.id, { cloneDir: '/clones/x' });
     assert.equal(store.getRun(row.id)?.cloneDir, '/clones/x');
