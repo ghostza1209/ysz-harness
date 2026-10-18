@@ -54,6 +54,17 @@ let claimed: string[];
 let interruptError: Error | undefined;
 let releaseError: Error | undefined;
 let leftoverSweeps: number;
+/** Titles of the Friction whose write fails, and the Friction ids handed out so far. */
+let failingFriction: Set<string>;
+let frictionIds: number;
+/** Titles of Follow-ups whose Ticket cannot be created (until cleared), and how many Tickets were created. */
+let failingFollowUps: Set<string>;
+let followUpIds: number;
+/** The open Friction the Project's queue holds, or the error fetching it fails with. */
+let openFriction: { id: string; title: string }[] | Error;
+/** The Ticket file the host wrote into each clone before its review agent, and the error the next write fails with. */
+let ticketFiles: TicketContext[];
+let writeTicketError: Error | undefined;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
@@ -112,7 +123,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
+    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker, openFriction: [] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -130,9 +141,28 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     writes.push(`prClosed ${project.name}/${id} ${prUrl}`);
     return true;
   },
+  async createFriction({ project, title, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `ysz-${++frictionIds}`;
+  },
+  async createFollowUp({ project, title, ticketId, attempt, role }) {
+    if (failingFollowUps.has(title)) throw new Error('project bd is down');
+    writes.push(`follow-up ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `${project.name}-f${++followUpIds}`;
+  },
+  async listOpenFriction() {
+    if (openFriction instanceof Error) throw openFriction;
+    return openFriction;
+  },
+  async commentFriction(id, { project, title, body, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction-comment ${id} from ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}${body && ` / ${body}`}`);
+  },
 });
 
-const complete: AgentResult = { outcome: 'complete' };
+const none: AgentResult['reports'] = { followUps: [], friction: [], fixedFollowUps: [] };
+const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
 const fakeSandbox: SandboxRunner = {
@@ -167,6 +197,10 @@ const fakeHost: HostSteps = {
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
     return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
+  },
+  async writeTicket(_prepared, context) {
+    if (writeTicketError) throw writeTicketError;
+    ticketFiles.push(context);
   },
   async collect(_project, { dir }) {
     hostSteps.push(`collect ${dir}`);
@@ -221,6 +255,13 @@ beforeEach(() => {
   interruptError = undefined;
   releaseError = undefined;
   leftoverSweeps = 0;
+  failingFriction = new Set();
+  frictionIds = 0;
+  failingFollowUps = new Set();
+  followUpIds = 0;
+  openFriction = [];
+  ticketFiles = [];
+  writeTicketError = undefined;
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
@@ -596,7 +637,7 @@ describe('a happy-path Run', () => {
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1', 'publish agent/tv1', 'removeClone /clones/tv1-1']);
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
     assert.deepEqual(o.runs().live, []);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
     const [run] = o.runs().history;
@@ -690,7 +731,7 @@ describe('a Run that does not reach a PR', () => {
   const historyOf = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.state, r.attempt, r.note]);
 
   it('does not pick a Ticket again once handing it back failed while the process lives', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     await o.poll(); // the released bead is Ready again
@@ -699,7 +740,7 @@ describe('a Run that does not reach a PR', () => {
   });
 
   it('falls back to a plain release, keeping the reason, when the failed hand-back itself fails', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
@@ -721,7 +762,7 @@ describe('the Attempt policy', () => {
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
   });
 
   it('retries a thrown implement agent once, in a fresh clone, handing over the failure', async () => {
@@ -748,7 +789,7 @@ describe('the Attempt policy', () => {
   });
 
   it('retries an agent that stops without a signal, passing the end of its output', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database' } : complete);
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database', reports: none } : complete);
     await run();
     assert.equal(agentCalls[1], 'implement attempt 2 Attempt 1 failed: the implement agent stopped without signalling COMPLETE: the build needs a database');
   });
@@ -806,15 +847,15 @@ describe('the Attempt policy', () => {
       throw new Error('idle for 600s');
     };
     const o = await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s', followUps: [] });
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
   });
 
   it('skips the review, not the PR, when the review agent stops without a signal', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it('keeps the review-skipped reason to one line of at most 300 characters', async () => {
@@ -828,7 +869,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the implement agent needs info', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nWhich of the two APIs?']);
@@ -837,7 +878,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the review agent needs info', async () => {
-    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?' });
+    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The review agent needs information:\nIs the old export still wanted?']);
@@ -846,9 +887,448 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question when Attempt 2 needs info after a failed Attempt 1', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '' } : { outcome: 'needs-info', question: 'Which API?' });
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '', reports: none } : { outcome: 'needs-info', question: 'Which API?', reports: none });
     const o = await run();
     assert.deepEqual(historyOf(o), [['failed', 2, 'The implement agent needs information:\nWhich API?']]);
+  });
+});
+
+describe('Follow-ups an agent reports', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it("gives publish the implement agent's titles, then the review agent's own", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export', 'rename the flag', 'cover the empty case']);
+  });
+
+  it("gives the implement agent's alone when the review stopped", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: followUps('half a review') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it("gives the implement agent's alone when the review threw", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => {
+      throw new Error('idle for 600s');
+    };
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it('takes them from the Attempt the PR opens from, never from a failed one', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('from the second review') });
+    await run();
+    assert.deepEqual(published(), ['from the second attempt', 'from the second review']);
+  });
+
+  it('keeps them for a retry of the host step', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    let failures = 1;
+    publish = async () => {
+      if (failures-- > 0) throw new Error('git push failed: rejected');
+      return PR_URL;
+    };
+    const o = await run();
+    publishOpts = undefined;
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+});
+
+describe('what the review agent is handed and may mark fixed', () => {
+  const reports = (followUps: string[], friction: AgentResult['reports']['friction'] = [], fixedFollowUps: string[] = []): AgentResult['reports'] => ({
+    followUps: followUps.map((title) => ({ title, body: `why ${title}` })),
+    friction,
+    fixedFollowUps,
+  });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const created = () => writes.filter((w) => w.startsWith('follow-up')).map((w) => w.split(': ').slice(1).join(': '));
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it('writes the implement agent\'s Follow-ups as F1... and its Friction with their Ticket ids into the Ticket file before the review agent starts', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({
+      outcome: 'complete',
+      reports: reports(['drop the old export', 'rename the flag'], [{ title: 'no php', body: 'x' }, { title: 'phpunit exited 127 again', body: 'y', ref: 'ysz-7' }]),
+    });
+    let seen: TicketContext[] = [];
+    reviewer = async () => {
+      seen = [...ticketFiles];
+      return complete;
+    };
+    await run();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].implementReports, {
+      followUps: [
+        { ref: 'F1', title: 'drop the old export', body: 'why drop the old export' },
+        { ref: 'F2', title: 'rename the flag', body: 'why rename the flag' },
+      ],
+      friction: [
+        { id: 'ysz-1', title: 'no php', seenAgain: false },
+        { id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true },
+      ],
+    });
+    assert.deepEqual(seen[0].openFriction, [
+      { id: 'ysz-7', title: 'phpunit cannot run' },
+      { id: 'ysz-1', title: 'no php' },
+    ]);
+  });
+
+  it('turns the review agent\'s reference to a Friction the implement agent just opened into a comment', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php', body: 'x' }]) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php again', body: 'z', ref: 'ysz-1' }]) });
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), [
+      'friction thaivis/tv1 attempt 1 implement: no php',
+      'friction-comment ysz-1 from thaivis/tv1 attempt 1 review: no php again / z',
+    ]);
+  });
+
+  it('hands the review agent no reports when the implement agent made none', async () => {
+    await run();
+    assert.deepEqual(ticketFiles.map((f) => f.implementReports), [{ followUps: [], friction: [] }]);
+  });
+
+  it('drops the Follow-ups the review marks fixed from the PR and the Tickets, and keeps the rest and its own', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two', 'three']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports(['four'], [], ['F1', 'F3']) });
+    const o = await run();
+    assert.deepEqual(published(), ['two', 'four']);
+    assert.deepEqual(created(), ['two', 'four']);
+    assert.deepEqual(o.runs().history[0].reports?.followUps.map((f) => f.title), ['two', 'four']);
+  });
+
+  it('keeps an implement Follow-up the review says nothing about, and ignores a ref it never handed out', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [], ['F3', 'F0', 'one', 'F']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('gives the implement agent\'s Follow-ups alone when the review is skipped, whatever it marked', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: reports(['half a review'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('ignores fixed marks the implement agent makes', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+  });
+
+  it('fails the Attempt, and retries on a fresh clone, when the Ticket file cannot be written', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one']) });
+    writeTicketError = new Error('refusing to write the Ticket file: .orchestrator is not a plain directory');
+    const o = await run();
+    assert.deepEqual(agentCalls.filter((c) => c.startsWith('review')), []);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [[
+      'failed',
+      'Attempt 1 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory\n' +
+        'Attempt 2 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory',
+    ]]);
+  });
+});
+
+describe('Follow-up Tickets the Run creates', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+
+  it('writes them one at a time between publish and markInReview, and the Run records each id and title', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'follow-up thaivis/tv1 attempt 1 implement: drop the old export',
+      'follow-up thaivis/tv1 attempt 1 implement: rename the flag',
+      'follow-up thaivis/tv1 attempt 1 review: cover the empty case',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [
+      ['in-review', [
+        { id: 'thaivis-f1', title: 'drop the old export' },
+        { id: 'thaivis-f2', title: 'rename the flag' },
+        { id: 'thaivis-f3', title: 'cover the empty case' },
+      ]],
+    ]);
+  });
+
+  it('creates them only after the PR is open', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    publish = async () => {
+      assert.deepEqual(writes, ['claim thaivis/tv1']);
+      return PR_URL;
+    };
+    await run();
+    assert.equal(writes.length, 3);
+  });
+
+  it('creates none from a failed Attempt, only from the Attempt the PR opened from', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 2 implement: from the second attempt']);
+  });
+
+  it('creates none for a Run that fails without reaching In review', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: followUps('drop the old export') });
+    const o = await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), []);
+    assert.equal(o.runs().history[0].reports, null);
+  });
+
+  it('parks the Run in needs-attention when a Follow-up cannot be written, and a retry creates only the missing ones, with no second PR', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second', 'third') });
+    failingFollowUps.add('second');
+    const o = await run();
+    assert.deepEqual(o.runs().live.map((r) => [r.state, r.note, r.reports?.followUps]), [['needs-attention', 'project bd is down', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+
+    failingFollowUps.clear();
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+
+    assert.deepEqual(writes.slice(2), [
+      'follow-up thaivis/tv1 attempt 1 implement: second',
+      'follow-up thaivis/tv1 attempt 1 implement: third',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps.map((f) => f.title)]), [['in-review', ['first', 'second', 'third']]]);
+  });
+
+  it('creates no further Follow-up once the Run is killed during the host steps', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second') });
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFollowUp: async (f) => { const id = await base.createFollowUp(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [['killed', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.equal(writes.some((w) => w.startsWith('markInReview')), false);
+  });
+});
+
+describe('Friction an agent reports', () => {
+  const friction = (...titles: string[]): AgentResult['reports'] => ({ followUps: [], friction: titles.map((title) => ({ title, body: '' })), fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const recorded = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => r.reports);
+
+  it('writes each agent\'s Friction as a new Ticket, in order, and the Run records them', async () => {
+    agent = async () => ({ outcome: 'complete', reports: friction('no php in the sandbox', 'stale check hint') });
+    reviewer = async () => ({ outcome: 'complete', reports: friction('lint cannot run') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no php in the sandbox',
+      'friction thaivis/tv1 attempt 1 implement: stale check hint',
+      'friction thaivis/tv1 attempt 1 review: lint cannot run',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o), [
+      {
+        followUps: [],
+        friction: [
+          { id: 'ysz-1', title: 'no php in the sandbox', seenAgain: false },
+          { id: 'ysz-2', title: 'stale check hint', seenAgain: false },
+          { id: 'ysz-3', title: 'lint cannot run', seenAgain: false },
+        ],
+      },
+    ]);
+  });
+
+  it('has nothing recorded for a Run whose agents reported nothing', async () => {
+    assert.deepEqual(recorded(await run()), [null]);
+  });
+
+  it('writes the Friction of an agent that needs info, before handing the Ticket back', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('check hint is wrong') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: check hint is wrong',
+      'fail thaivis/tv1: The implement agent needs information:\nwhich API?',
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'check hint is wrong', seenAgain: false }]);
+  });
+
+  it('writes the Friction of a review agent that needs info', async () => {
+    reviewer = async () => ({ outcome: 'needs-info', question: 'keep the export?', reports: friction('review hint is wrong') });
+    await run();
+    assert.deepEqual(writes.slice(1, 2), ['friction thaivis/tv1 attempt 1 review: review hint is wrong']);
+  });
+
+  it('writes the Friction of an agent that stopped, in both Attempts, and keeps both on the Run', async () => {
+    agent = async (attempt) =>
+      attempt === 1
+        ? { outcome: 'stopped', tail: 'no database', reports: friction('no database in the sandbox') }
+        : { outcome: 'complete', reports: friction('still no database') };
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('review stopped too') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no database in the sandbox',
+      'friction thaivis/tv1 attempt 2 implement: still no database',
+      'friction thaivis/tv1 attempt 2 review: review stopped too',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction.map((f) => f.id), ['ysz-1', 'ysz-2', 'ysz-3']);
+  });
+
+  it('writes nothing for an agent that finishes after the Run was killed', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    agent = async () => {
+      await gate;
+      return { outcome: 'complete', reports: friction('too late') };
+    };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await flush();
+    const killed = o.kill(o.runs().live[0].id);
+    finish(); // the agent ignores the abort and still reports
+    await killed;
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(recorded(o), [null]);
+  });
+
+  it('stops writing the rest of an agent\'s Friction once the Run is killed, and ends the Attempt there, keeping the clone', async () => {
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    agent = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('first', 'second') });
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFriction: async (f) => { const id = await base.createFriction(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), ['friction thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.cloneDir]), [['killed', '/clones/tv1-1']]);
+  });
+
+  it('logs a failed write and goes on: the other Friction is written and the Run ends In review', async () => {
+    failingFriction.add('broken one');
+    agent = async () => ({ outcome: 'complete', reports: friction('broken one', 'fine one') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "broken one" failed: ysz bd is down']);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: fine one', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
+  });
+
+  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ followUps: [], friction: [{ title, body, ref }], fixedFollowUps: [] });
+
+  it('comments on an open Friction a report refers to, instead of opening a duplicate, and the Run shows it as seen again', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again', 'skipped it') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction-comment ysz-7 from thaivis/tv1 attempt 1 implement: phpunit exited 127 again / skipped it',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true }]);
+  });
+
+  it('opens a new Ticket for a reference that is not in the open list: a closed Friction, or a mistaken id', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-3', 'came back after the fix') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: came back after the fix', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'came back after the fix', seenAgain: false }]);
+  });
+
+  it('gives prepare the open Friction of the Project, fetched again for each Attempt', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async (attempt) => {
+      if (attempt > 1) return complete;
+      openFriction = [{ id: 'ysz-8', title: 'lint cannot run' }]; // the human closed ysz-7 and a new Friction opened meanwhile
+      return { outcome: 'stopped', tail: 'x', reports: none };
+    };
+    await run();
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[{ id: 'ysz-7', title: 'phpunit cannot run' }], [{ id: 'ysz-8', title: 'lint cannot run' }]]);
+  });
+
+  it('logs a failed fetch of the open Friction and goes ahead with none: a reference then opens a new Ticket', async () => {
+    openFriction = new Error('ysz bd is down');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('open Friction')), ['1: Fetching the open Friction failed, so the agents get none: ysz bd is down']);
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[]]);
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['in-review']);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'phpunit exited 127 again', seenAgain: false }]);
+  });
+
+  it('logs a failed comment and goes on, leaving it off the Run', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    failingFriction.add('again');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "again" failed: ysz bd is down']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['in-review', null]]);
+  });
+
+  it('ends a failed Run as it otherwise would when its Friction cannot be written', async () => {
+    failingFriction.add('lost');
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('lost') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nwhich API?']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['failed', null]]);
   });
 });
 
@@ -907,11 +1387,11 @@ describe('a host step that fails', () => {
   });
 
   it('a retry publishes the same commit and review note as the first try', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     const o = await parkedRun();
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it("writes each Push & PR try to the Run's log: the host step's lines, then the PR or why it failed", async () => {
@@ -1151,7 +1631,7 @@ describe('Kill', () => {
 
 describe('Retry a failed Run', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1195,7 +1675,7 @@ describe('Retry a failed Run', () => {
 
 describe('Clean up', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'stopped', tail: 'blocked' });
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1219,7 +1699,7 @@ describe('Clean up', () => {
   });
 
   it('also removes the clone a NEEDS_INFO Run left behind', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1537,6 +2017,37 @@ describe('restart recovery', () => {
     assert.match(o.runs().history[0].note!, /releasing the Ticket failed: bd timed out/);
   });
 
+  it('resumes a host job that holds Follow-ups with them: published, created, then the bead marked', async () => {
+    const id = leftBehind('host', { hostJob: true });
+    store.setHostJob(id, JSON.stringify({ ...JSON.parse(HOST_JOB), followUps: [{ title: 'drop the old export', body: 'it is unused', attempt: 2, role: 'review' }] }));
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: ['drop the old export'] });
+    assert.deepEqual(writes, ['follow-up thaivis/tv1 attempt 2 review: drop the old export', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(store.getRun(id)!.reports?.followUps, [{ id: 'thaivis-f1', title: 'drop the old export' }]);
+  });
+
+  it('after a restart mid-way, creates only the Follow-ups still in the host job and opens no second PR', async () => {
+    // first process: the second Follow-up fails
+    failingFollowUps.add('second');
+    agent = async () => ({ outcome: 'complete', reports: { followUps: [{ title: 'first', body: '' }, { title: 'second', body: '' }], friction: [], fixedFollowUps: [] } });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const first = await polled();
+    await first.tick();
+    await first.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+    // restart: a new Orchestrator over the same store
+    failingFollowUps.clear();
+    const second = await polled();
+    assert.deepEqual(await second.recover(), []);
+    await second.retryHostStep(store.liveRuns()[0].id);
+    await second.whenIdle();
+    assert.deepEqual(writes.slice(2), ['follow-up thaivis/tv1 attempt 1 implement: second', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(store.history(10).map((r) => r.reports?.followUps.map((f) => f.title)), [['first', 'second']]);
+  });
+
   it('resumes a host-phase Run from its host step to in-review, without another agent run', async () => {
     let finishPublish!: () => void;
     publish = () => new Promise((resolve) => (finishPublish = () => resolve(PR_URL)));
@@ -1549,7 +2060,7 @@ describe('restart recovery', () => {
     await o.whenIdle();
 
     assert.deepEqual(hostSteps, ['publish agent/tv1', 'removeClone /clones/tv1-9']);
-    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review' });
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: [] });
     assert.deepEqual(writes, ['markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(agentCalls, []);
     const run = store.getRun(id)!;

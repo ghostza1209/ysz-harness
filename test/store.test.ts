@@ -113,3 +113,28 @@ it("keeps a Project's Backlog counts only when they change from its last ones, a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it('migrates a version-8 database: its Runs have no reports, and reports saved on one survive a reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const old = new DatabaseSync(path);
+    old.exec(`CREATE TABLE runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, ticket_id TEXT NOT NULL, title TEXT NOT NULL,
+      state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, pr_url TEXT, note TEXT, started_at INTEGER NOT NULL, ended_at INTEGER,
+      clone_dir TEXT, host_job TEXT, archived_at INTEGER, model TEXT, usage TEXT, pr_base TEXT, pr_closed_at INTEGER
+    );
+    INSERT INTO runs (project, ticket_id, title, state, started_at) VALUES ('thaivis', 'tv-1', 'old Run', 'merged', 5);
+    PRAGMA user_version = 8`);
+    old.close();
+
+    const store = openStore(path);
+    const [row] = store.history(10);
+    assert.equal(row.reports, null);
+    const reports = { followUps: [], friction: [{ id: 'ysz-1', title: 'no php', seenAgain: false }] };
+    store.setReports(row.id, reports);
+    assert.deepEqual(openStore(path).getRun(row.id)?.reports, reports);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

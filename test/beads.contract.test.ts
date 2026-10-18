@@ -378,3 +378,131 @@ describe('Beads gateway with In review blockers, against real bd', () => {
     assert.deepEqual(context.closedBlockers.map((b) => b.id), [ids.done]);
   });
 });
+
+describe('Friction in ysz\'s own queue, against real bd', () => {
+  let yszDir: string;
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const project = { name: 'PopDeal', repoPath: '/not/used', baseBranch: 'main' };
+
+  before(async () => {
+    yszDir = await mkdtemp(join(tmpdir(), 'beads-ysz-'));
+    await run('bd', ['init', '-p', 'ysz', '--non-interactive', '--skip-agents', '--skip-hooks'], { cwd: yszDir, env });
+  });
+
+  after(() => rm(yszDir, { recursive: true, force: true }));
+
+  it('creates a needs-triage Ticket with the Project label, as the orchestrator, at default type and priority, ending with where it came from', async () => {
+    const id = await createBeadsGateway({ yszRepo: yszDir }).createFriction({
+      project, title: '--phpunit cannot run', body: 'It exited 127.\nI skipped it.', ticketId: 'pd-42', runId: 17, attempt: 2, role: 'review',
+    });
+    const [issue] = JSON.parse((await run('bd', ['show', id, '--json'], { cwd: yszDir, env })).stdout);
+    assert.match(id, /^ysz-/);
+    assert.deepEqual(
+      [issue.title, issue.status, issue.priority, issue.issue_type, issue.created_by, [...issue.labels].sort()],
+      ['--phpunit cannot run', 'open', 2, 'task', 'orchestrator', ['friction', 'needs-triage', 'project:PopDeal']],
+    );
+    assert.equal(issue.description, 'It exited 127.\nI skipped it.\n\nProject: PopDeal · Ticket: pd-42 · Run: 17 · Attempt: 2 · Agent: review');
+  });
+
+  it('puts only the provenance line in the body of a Friction with no body', async () => {
+    const id = await createBeadsGateway({ yszRepo: yszDir }).createFriction({
+      project, title: 'lint is slow to start', body: '', ticketId: 'pd-43', runId: 18, attempt: 1, role: 'implement',
+    });
+    const [issue] = JSON.parse((await run('bd', ['show', id, '--json'], { cwd: yszDir, env })).stdout);
+    assert.equal(issue.description, 'Project: PopDeal · Ticket: pd-43 · Run: 18 · Attempt: 1 · Agent: implement');
+  });
+
+  it('refuses to write Friction when no ysz checkout is configured', async () => {
+    await assert.rejects(
+      createBeadsGateway().createFriction({ project, title: 't', body: '', ticketId: 'x', runId: 1, attempt: 1, role: 'implement' }),
+      /ysz checkout is not configured/,
+    );
+  });
+});
+
+describe('Open Friction and "seen again" comments in ysz\'s own queue, against real bd', () => {
+  let yszDir: string;
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const popdeal = { name: 'PopDeal', repoPath: '/not/used', baseBranch: 'main' };
+  const fazwaz = { name: 'fazwaz', repoPath: '/not/used', baseBranch: 'main' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: yszDir, env });
+  const friction = (project: typeof popdeal, title: string) =>
+    createBeadsGateway({ yszRepo: yszDir }).createFriction({ project, title, body: '', ticketId: 'pd-1', runId: 1, attempt: 1, role: 'implement' });
+  let open: string, inProgress: string, pinned: string, closed: string, other: string;
+
+  before(async () => {
+    yszDir = await mkdtemp(join(tmpdir(), 'beads-ysz-open-'));
+    await bd('init', '-p', 'ysz', '--non-interactive', '--skip-agents', '--skip-hooks');
+    open = await friction(popdeal, 'open one');
+    inProgress = await friction(popdeal, 'the human is fixing this');
+    pinned = await friction(popdeal, 'pinned for later');
+    closed = await friction(popdeal, 'fixed already');
+    other = await friction(fazwaz, 'another project');
+    await bd('update', inProgress, '--status', 'in_progress');
+    await bd('update', pinned, '--status', 'pinned');
+    await bd('close', closed, '--reason', 'fixed');
+  });
+
+  after(() => rm(yszDir, { recursive: true, force: true }));
+
+  it('lists the Project\'s Friction that is not closed, an in_progress and a pinned one included', async () => {
+    const found = await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(popdeal);
+    assert.deepEqual(found.sort((a, b) => a.title.localeCompare(b.title)), [
+      { id: inProgress, title: 'the human is fixing this' },
+      { id: open, title: 'open one' },
+      { id: pinned, title: 'pinned for later' },
+    ].sort((a, b) => a.title.localeCompare(b.title)));
+    assert.deepEqual(await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction(fazwaz), [{ id: other, title: 'another project' }]);
+  });
+
+  it('lists nothing for a Project with no Friction, and refuses when no ysz checkout is configured', async () => {
+    assert.deepEqual(await createBeadsGateway({ yszRepo: yszDir }).listOpenFriction({ ...popdeal, name: 'thaivis' }), []);
+    await assert.rejects(createBeadsGateway().listOpenFriction(popdeal), /ysz checkout is not configured/);
+  });
+
+  it('comments on the Ticket as the orchestrator, saying what happened this time and ending with where it came from', async () => {
+    await createBeadsGateway({ yszRepo: yszDir }).commentFriction(open, {
+      project: popdeal, title: '--phpunit exited 127 again', body: 'Skipped it.', ticketId: 'pd-9', runId: 21, attempt: 2, role: 'review',
+    });
+    const [comment, ...rest] = JSON.parse((await bd('comments', open, '--json')).stdout);
+    assert.equal(rest.length, 0);
+    assert.equal(comment.author, 'orchestrator');
+    assert.equal(comment.text, 'Seen again: --phpunit exited 127 again\nSkipped it.\n\nProject: PopDeal · Ticket: pd-9 · Run: 21 · Attempt: 2 · Agent: review');
+  });
+});
+
+describe('Follow-up Tickets in the Project\'s own queue, against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  let ticket: string, followUp: string;
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'beads-followup-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+    ticket = (await bd('create', 'the Run\'s Ticket', '--silent', '-l', 'ready-for-agent')).stdout.trim();
+    followUp = await createBeadsGateway().createFollowUp({
+      project, title: '--drop the old export', body: 'Nothing imports it.', ticketId: ticket, runId: 17, attempt: 2, role: 'review',
+    });
+  });
+
+  after(() => rm(dir, { recursive: true, force: true }));
+
+  it('is needs-triage and discovered-from the Ticket, with no parent, at default type and priority, as the orchestrator, ending with where it came from', async () => {
+    const [issue] = JSON.parse((await bd('show', followUp, '--json')).stdout);
+    assert.deepEqual(
+      [issue.title, issue.status, issue.priority, issue.issue_type, issue.created_by, [...issue.labels], issue.parent ?? null],
+      ['--drop the old export', 'open', 2, 'task', 'orchestrator', ['needs-triage'], null],
+    );
+    assert.deepEqual(issue.dependencies.map((d: { id: string; dependency_type: string }) => [d.id, d.dependency_type]), [[ticket, 'discovered-from']]);
+    assert.equal(issue.description, `Nothing imports it.\n\nProject: lab · Ticket: ${ticket} · Run: 17 · Attempt: 2 · Agent: review`);
+  });
+
+  it('never appears in listReady, though it counts in the Backlog', async () => {
+    const { tickets, backlog } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(tickets.map((t) => t.id), [ticket]);
+    assert.equal(backlog, 2);
+  });
+});

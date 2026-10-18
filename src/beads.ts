@@ -22,6 +22,13 @@ export interface TicketContext {
   parent: Record<string, unknown> | null;
   closedBlockers: { id: string; title: string; closeReason: string }[];
   inReviewBlocker: { id: string; title: string; prUrl?: string } | null;
+  /** The Project's open Friction in ysz's queue, which an agent refers to by id instead of reporting it as new. The Orchestrator fills it in before each Attempt. */
+  openFriction: { id: string; title: string }[];
+  /** Only in the Review agent's file: what the Implement agent of its Attempt reported. Follow-ups carry the ref F<n> the Review agent marks fixed; Friction carries its Ticket id. */
+  implementReports?: {
+    followUps: { ref: string; title: string; body: string }[];
+    friction: { id: string; title: string; seenAgain: boolean }[];
+  };
 }
 
 /** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
@@ -65,7 +72,36 @@ export interface BeadsGateway {
    * and release the claim. false, writing nothing, when the human changed the bead since.
    */
   prClosed(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
+   * An agent hit Friction: a new Ticket in ysz's own queue, labelled friction, project:<name> and needs-triage, at bd's
+   * default type and priority. The body ends with where it came from. Returns the new id.
+   */
+  createFriction(friction: FrictionReport): Promise<string>;
+  /** The Project's open Friction in ysz's own queue: everything not closed, a Friction the human is fixing (in_progress) included. */
+  listOpenFriction(project: Project): Promise<{ id: string; title: string }[]>;
+  /** An agent hit an open Friction again: comment on its Ticket, as the Orchestrator, what happened this time. The comment ends with where it came from. */
+  commentFriction(id: string, friction: FrictionReport): Promise<void>;
+  /**
+   * An agent found work in the Project's code outside the Ticket: a new Ticket in the Project's own queue, labelled
+   * needs-triage, linked discovered-from the Run's Ticket, with no parent, no ready-for-agent and bd's default type and
+   * priority. The body ends with where it came from. Returns the new id.
+   */
+  createFollowUp(followUp: FollowUpReport): Promise<string>;
 }
+
+/** One Friction an agent reported, and the Run it came from. */
+export interface FrictionReport {
+  project: Project;
+  title: string;
+  body: string;
+  ticketId: string;
+  runId: number;
+  attempt: number;
+  role: 'implement' | 'review';
+}
+
+/** One Follow-up an agent reported, and the Run it came from. */
+export type FollowUpReport = FrictionReport;
 
 /** The fields of a bead as `bd list --json` prints it that the gateway reads. */
 interface Bead {
@@ -86,11 +122,13 @@ const isInReview = (b: Pick<Bead, 'status' | 'assignee' | 'labels'>) =>
 
 export interface BeadsOptions {
   bin?: string;
+  /** The ysz checkout, whose queue holds Friction. */
+  yszRepo?: string;
   /** Every bd call is killed after this long: embedded Dolt waits on its lock with no deadline. */
   timeoutMs?: number;
 }
 
-export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOptions = {}): BeadsGateway {
+export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: BeadsOptions = {}): BeadsGateway {
   async function bd(args: string[]): Promise<string> {
     try {
       const { stdout } = await execFileAsync(bin, args, {
@@ -108,6 +146,13 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
   const write = (project: Project, args: string[]) => bd(['-C', project.repoPath, '--actor', ORCHESTRATOR, ...args]);
   const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
     JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
+  const yszQueue = () => {
+    if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
+    return yszRepo;
+  };
+  /** A Friction's text, ending with where it came from. */
+  const withSource = (text: string, { project, ticketId, runId, attempt, role }: Omit<FrictionReport, 'title' | 'body'>) =>
+    `${text ? `${text}\n\n` : ''}Project: ${project.name} · Ticket: ${ticketId} · Run: ${runId} · Attempt: ${attempt} · Agent: ${role}`;
   /** The bead is still in_progress and the Orchestrator's, as a Run left it: the human has not changed it since. */
   const held = async (project: Project, id: string) => {
     const issue = await show(project, [id]);
@@ -194,7 +239,7 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
         .filter((d: { dependency_type: string; status: string }) => d.dependency_type === 'blocks' && d.status === 'closed')
         .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
       const reviewing = (ticket.dependencies ?? []).find((d: Bead & { dependency_type: string }) => d.dependency_type === 'blocks' && isInReview(d));
-      return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null };
+      return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null, openFriction: [] };
     },
 
     async markInReview(project, id, prUrl) {
@@ -218,6 +263,32 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       await write(project, ['comment', id, `PR closed unmerged: ${prUrl}`]);
       await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--remove-label', 'in-review', '--assignee', '', '--status', 'open']);
       return true;
+    },
+
+    async createFriction({ project, title, body, ticketId, runId, attempt, role }) {
+      const out = await bd([
+        '-C', yszQueue(), '--actor', ORCHESTRATOR, 'create', '--silent',
+        '--title', title, '-d', withSource(body, { project, ticketId, runId, attempt, role }),
+        '-l', `friction,project:${project.name},needs-triage`,
+      ]);
+      return out.trim();
+    },
+
+    async createFollowUp({ project, title, body, ticketId, runId, attempt, role }) {
+      const out = await write(project, [
+        'create', '--silent', '--title', title, '-d', withSource(body, { project, ticketId, runId, attempt, role }),
+        '-l', 'needs-triage', '--deps', `discovered-from:${ticketId}`,
+      ]);
+      return out.trim();
+    },
+
+    async listOpenFriction(project) {
+      const out = await bd(['--readonly', '-C', yszQueue(), 'list', '-l', `friction,project:${project.name}`, '-s', 'open,in_progress,blocked,deferred,pinned,hooked', '-n', '0', '--json', '--brief']);
+      return (JSON.parse(out) as { id: string; title: string }[]).map(({ id, title }) => ({ id, title }));
+    },
+
+    async commentFriction(id, { title, body, ...from }) {
+      await bd(['-C', yszQueue(), '--actor', ORCHESTRATOR, 'comment', id, withSource(`Seen again: ${body ? `${title}\n${body}` : title}`, from)]); // the prefix keeps a title that starts with "-" from reading as a flag
     },
   };
 }
