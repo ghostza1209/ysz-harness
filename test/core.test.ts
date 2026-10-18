@@ -150,7 +150,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   },
 });
 
-const none: AgentResult['reports'] = { friction: [] };
+const none: AgentResult['reports'] = { followUps: [], friction: [] };
 const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
@@ -618,7 +618,7 @@ describe('a happy-path Run', () => {
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1', 'publish agent/tv1', 'removeClone /clones/tv1-1']);
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
     assert.deepEqual(o.runs().live, []);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
     const [run] = o.runs().history;
@@ -743,7 +743,7 @@ describe('the Attempt policy', () => {
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
   });
 
   it('retries a thrown implement agent once, in a fresh clone, handing over the failure', async () => {
@@ -828,7 +828,7 @@ describe('the Attempt policy', () => {
       throw new Error('idle for 600s');
     };
     const o = await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s', followUps: [] });
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
   });
@@ -836,7 +836,7 @@ describe('the Attempt policy', () => {
   it('skips the review, not the PR, when the review agent stops without a signal', async () => {
     reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it('keeps the review-skipped reason to one line of at most 300 characters', async () => {
@@ -874,8 +874,65 @@ describe('the Attempt policy', () => {
   });
 });
 
+describe('Follow-ups an agent reports', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it("gives publish the implement agent's titles, then the review agent's own", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export', 'rename the flag', 'cover the empty case']);
+  });
+
+  it("gives the implement agent's alone when the review stopped", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: followUps('half a review') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it("gives the implement agent's alone when the review threw", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => {
+      throw new Error('idle for 600s');
+    };
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it('takes them from the Attempt the PR opens from, never from a failed one', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('from the second review') });
+    await run();
+    assert.deepEqual(published(), ['from the second attempt', 'from the second review']);
+  });
+
+  it('keeps them for a retry of the host step', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    let failures = 1;
+    publish = async () => {
+      if (failures-- > 0) throw new Error('git push failed: rejected');
+      return PR_URL;
+    };
+    const o = await run();
+    publishOpts = undefined;
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+});
+
 describe('Friction an agent reports', () => {
-  const friction = (...titles: string[]): AgentResult['reports'] => ({ friction: titles.map((title) => ({ title, body: '' })) });
+  const friction = (...titles: string[]): AgentResult['reports'] => ({ followUps: [], friction: titles.map((title) => ({ title, body: '' })) });
   async function run() {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -995,7 +1052,7 @@ describe('Friction an agent reports', () => {
     assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
   });
 
-  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ friction: [{ title, body, ref }] });
+  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ followUps: [], friction: [{ title, body, ref }] });
 
   it('comments on an open Friction a report refers to, instead of opening a duplicate, and the Run shows it as seen again', async () => {
     openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
@@ -1115,7 +1172,7 @@ describe('a host step that fails', () => {
     const o = await parkedRun();
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it("writes each Push & PR try to the Run's log: the host step's lines, then the PR or why it failed", async () => {
@@ -1741,6 +1798,15 @@ describe('restart recovery', () => {
     assert.match(o.runs().history[0].note!, /releasing the Ticket failed: bd timed out/);
   });
 
+  it('resumes a host job that holds Follow-ups with them', async () => {
+    const id = leftBehind('host', { hostJob: true });
+    store.setHostJob(id, JSON.stringify({ ...JSON.parse(HOST_JOB), followUps: [{ title: 'drop the old export', body: 'it is unused' }] }));
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: ['drop the old export'] });
+  });
+
   it('resumes a host-phase Run from its host step to in-review, without another agent run', async () => {
     let finishPublish!: () => void;
     publish = () => new Promise((resolve) => (finishPublish = () => resolve(PR_URL)));
@@ -1753,7 +1819,7 @@ describe('restart recovery', () => {
     await o.whenIdle();
 
     assert.deepEqual(hostSteps, ['publish agent/tv1', 'removeClone /clones/tv1-9']);
-    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review' });
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: [] });
     assert.deepEqual(writes, ['markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(agentCalls, []);
     const run = store.getRun(id)!;

@@ -42,14 +42,14 @@ export interface HostSteps {
    * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). A blocker PR that merged meanwhile
    * has the agent's commits replayed onto its base instead, which the PR then targets, unstacked; one that cannot be
    * read fails the publish. Returns the PR URL and the branch it targets.
-   * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
+   * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review; `followUps` are the titles its "## Follow-ups" section lists;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
   publish(
     project: Project,
     ticket: { id: string; title: string },
     prepared: Prepared,
-    opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal; log?: (line: string) => void },
+    opts?: { tip?: string; reviewSkipped?: string; followUps?: string[]; signal?: AbortSignal; log?: (line: string) => void },
   ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
@@ -172,7 +172,6 @@ const PR_BODY_PROMPT = (ticket: { id: string; title: string }, base: string, log
   `add a scope only when the change sits in one clear module; never mark a breaking change with ! or BREAKING CHANGE. ` +
   `The subject restates the Ticket title, starting lower-case unless it starts with an identifier, and names no Ticket id or Jira key. ` +
   `Write the body with the mattpocock-skills:pr skill. ` +
-  `End the body with a "## Follow-ups" section listing the follow-up work noted in the commit messages or that you notice in the change, or "None". ` +
   `Output only the title line, a blank line, then the Markdown body.\n\n<git-log>\n${log}\n</git-log>\n\n<git-diff>\n${diff}\n</git-diff>`;
 
 /** What a Ticket is named by: its own Jira key from external_ref, else its parent epic's, else its own id. */
@@ -267,7 +266,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       return { tip, commits };
     },
 
-    async publish(project, ticket, prepared, { tip, reviewSkipped, signal, log: step = () => {} } = {}) {
+    async publish(project, ticket, prepared, { tip, reviewSkipped, followUps = [], signal, log: step = () => {} } = {}) {
       const { run, text } = within(signal);
       const repo = project.repoPath;
       const { branch, stack } = prepared;
@@ -321,7 +320,8 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         // A host job saved before Prepared had a key resumes without one.
         const { title, body } = prTitleAndBody(output, prepared.key ?? ticket.id, ticket.title);
         if (!body) throw new Error('claude -p returned an empty PR body');
-        writeFileSync(join(tmp, 'body.md'), reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n${body}` : body);
+        const followUpsSection = followUps.length ? `\n\n## Follow-ups\n\n${followUps.map((t) => `- ${t}`).join('\n')}` : '';
+        writeFileSync(join(tmp, 'body.md'), `${reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n` : ''}${body}${followUpsSection}`);
         // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
         step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
         const out = await text(

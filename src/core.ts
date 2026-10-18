@@ -94,9 +94,12 @@ export interface Clock {
 
 /** How one Attempt ended. A failed Attempt keeps its clone so the caller can remove it or leave it for inspection. */
 type Attempted =
-  | { kind: 'done'; prepared: Prepared; tip?: string; reviewSkipped?: string }
+  | { kind: 'done'; prepared: Prepared; followUps: FollowUp[]; tip?: string; reviewSkipped?: string }
   | { kind: 'failed'; prepared: Prepared; reason: string }
   | { kind: 'needs-info'; agent: 'implement' | 'review'; question: string };
+
+/** Work in the Project's code outside the Ticket, as an agent reported it. */
+type FollowUp = AgentReports['followUps'][number];
 
 /** What a Run needs to resume its host steps. */
 interface HostJob {
@@ -105,6 +108,8 @@ interface HostJob {
   prepared: Prepared;
   tip?: string;
   reviewSkipped?: string;
+  /** The Follow-ups of the Attempt the PR opens from. */
+  followUps: FollowUp[];
   /** Set once the PR is open, so a retry does not open a second one. */
   prUrl: string | null;
 }
@@ -178,11 +183,11 @@ export function createOrchestrator(deps: {
     store.updateRun(runId, { state: 'host', note: null });
     log(`--- Push & PR started: ${new Date(clock.now()).toISOString()} ---`);
     // What recover() needs to pick the job up again; the PR url is already on the row.
-    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped }));
+    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
+        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps.map((f) => f.title), signal, log });
         job.prUrl = pr.url;
         store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
@@ -292,14 +297,14 @@ export function createOrchestrator(deps: {
           await recordFriction(n, 'review', reviewed.reports);
           signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
-          if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
+          if (reviewed.outcome === 'complete') return { kind: 'done', prepared, followUps: [...implemented.reports.followUps, ...reviewed.reports.followUps] };
           skipped = 'the review agent stopped without signalling COMPLETE';
         } catch (err) {
           signal.throwIfAborted();
           skipped = `the review agent failed: ${message(err)}`;
         }
         // An unfinished review may have left half a change, so the PR opens from the implement commits.
-        return { kind: 'done', prepared, tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
+        return { kind: 'done', prepared, followUps: implemented.reports.followUps, tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
       }
 
       let result = await attempt(1);
@@ -323,8 +328,8 @@ export function createOrchestrator(deps: {
         return;
       }
 
-      const { prepared, tip, reviewSkipped } = result;
-      await finish(runId, control, { project, ticket, prepared, tip, reviewSkipped, prUrl: null });
+      const { prepared, tip, reviewSkipped, followUps } = result;
+      await finish(runId, control, { project, ticket, prepared, tip, reviewSkipped, followUps, prUrl: null });
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       failed.add(key(project.name, ticket.id));
@@ -497,7 +502,8 @@ export function createOrchestrator(deps: {
         if (saved) {
           // Past the agents: the clone holds the finished work, so only the host steps are left.
           const control: Control = { ctl: new AbortController() };
-          const job: HostJob = { project, ticket: { id: run.ticketId, title: run.title }, ...JSON.parse(saved), prUrl: run.prUrl };
+          // A host job saved before Follow-ups travelled in it resumes with none.
+          const job: HostJob = { project, ticket: { id: run.ticketId, title: run.title }, followUps: [], ...JSON.parse(saved), prUrl: run.prUrl };
           controls.set(run.id, control);
           if (run.state === 'needs-attention') control.parked = job;
           else track(control, finish(run.id, control, job));

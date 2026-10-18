@@ -376,6 +376,25 @@ describe('host steps against real git', () => {
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
   });
 
+  it('lists the given Follow-up titles in a ## Follow-ups section at the end of the PR body, and leaves it out when there are none', async () => {
+    const withTitles = await host.prepare(project, 't-17', context);
+    commit(join(withTitles.dir, 'repo'), 'e.txt', 'e');
+    await host.publish(project, ticket('t-17'), withTitles, { reviewSkipped: 'no review', followUps: ['drop the old export', 'cover the empty case'] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '> review skipped: no review\n\nthe PR body\n\n## Follow-ups\n\n- drop the old export\n- cover the empty case');
+
+    const without = await host.prepare(project, 't-18', context);
+    commit(join(without.dir, 'repo'), 'f.txt', 'f');
+    await host.publish(project, ticket('t-18'), without, { followUps: [] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
+  });
+
+  it('does not ask claude to collect or invent follow-ups for the PR body', async () => {
+    const prepared = await host.prepare(project, 't-19', context);
+    commit(join(prepared.dir, 'repo'), 'g.txt', 'g');
+    await host.publish(project, ticket('t-19'), prepared);
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /Follow-ups/i);
+  });
+
   it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
     const prepared = await host.prepare(project, 't-14', context);
     const clone = join(prepared.dir, 'repo');

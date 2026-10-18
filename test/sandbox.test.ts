@@ -11,6 +11,14 @@ const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
 const execFileAsync = promisify(execFile);
 
+it('has neither agent prompt ask for a Follow-ups: heading in commit messages, and both ask for <follow-up> tags', () => {
+  for (const role of ['implement', 'review']) {
+    const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+    assert.doesNotMatch(prompt, /Follow-ups:/, role);
+    assert.match(prompt, /<follow-up>\n[^\n]*\n[^\n]*\n<\/follow-up>/, role);
+  }
+});
+
 it('keeps the agent prompts free of !`…`, which sandcastle runs as a shell command', () => {
   for (const role of ['implement', 'review']) {
     const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
@@ -47,24 +55,24 @@ it('reports usage once per message, keeps a subagent out of the context, and end
 });
 
 it('reads COMPLETE as complete', () => {
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { followUps: [], friction: [] } });
 });
 
 it('takes the last <question> of the output as the question for NEEDS_INFO', () => {
   const stdout = 'I may ask <question>first?</question> later.\n<question>\n  Which of the two APIs?\nBoth fit.\n</question>\n' + NEEDS_INFO;
-  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { followUps: [], friction: [] } });
 });
 
 it('goes by the signal the agent ended on, not the one sandcastle matched first', () => {
   const stdout = `I will print ${COMPLETE} once done, but first: <question>Which API?</question>\n${NEEDS_INFO}`;
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { friction: [] } });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { followUps: [], friction: [] } });
 });
 
 it('still ends needs-info, with a stand-in question, when the agent forgot the <question>', () => {
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: NEEDS_INFO }), {
     outcome: 'needs-info',
     question: 'the agent signalled NEEDS_INFO without a <question>',
-    reports: { friction: [] },
+    reports: { followUps: [], friction: [] },
   });
 });
 
@@ -129,6 +137,43 @@ describe('the <friction> reports', () => {
     assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.friction, expected);
     assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.friction, expected);
     assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: tag }).reports.friction, expected);
+  });
+});
+
+describe('the <follow-up> reports', () => {
+  const followUps = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.followUps;
+
+  it('takes the title from the first non-empty line and the rest as the body', () => {
+    assert.deepEqual(followUps('<follow-up>\n\n  Drop the old export \nNothing imports it.\nIt can go.\n</follow-up>'), [
+      { title: 'Drop the old export', body: 'Nothing imports it.\nIt can go.' },
+    ]);
+    assert.deepEqual(followUps('<follow-up>Title only</follow-up>'), [{ title: 'Title only', body: '' }]);
+  });
+
+  it('reads every tag of the message and keeps the first 3', () => {
+    const stdout = ['one', 'two', 'three', 'four'].map((t) => `<follow-up>${t}</follow-up>`).join('\ntext between\n');
+    assert.deepEqual(followUps(stdout).map((f) => f.title), ['one', 'two', 'three']);
+  });
+
+  it('drops empty titles before counting, and a tag that is never closed or opened inside another', () => {
+    const stdout = '<follow-up>  \n </follow-up><follow-up></follow-up><follow-up>a</follow-up><follow-up>b</follow-up><follow-up>c</follow-up><follow-up>d</follow-up>';
+    assert.deepEqual(followUps(stdout).map((f) => f.title), ['a', 'b', 'c']);
+    assert.deepEqual(followUps('<follow-up>never closed\nand more text'), []);
+    assert.deepEqual(followUps('<follow-up>outer <follow-up>inner</follow-up>').map((f) => f.title), ['inner']);
+  });
+
+  it('bounds the title to 200 characters and the body to 2000', () => {
+    const [found] = followUps(`<follow-up>${'t'.repeat(300)}\n${'b'.repeat(3000)}</follow-up>`);
+    assert.deepEqual([found.title.length, found.body.length], [200, 2000]);
+  });
+
+  it('counts apart from Friction, and is reported on needs-info and stopped as well as complete', () => {
+    const tag = '<follow-up>drop it</follow-up>';
+    const expected = [{ title: 'drop it', body: '' }];
+    const frictions = '<friction>a</friction><friction>b</friction><friction>c</friction>';
+    assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: frictions + tag }).reports.followUps, expected);
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.followUps, expected);
+    assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.followUps, expected);
   });
 });
 

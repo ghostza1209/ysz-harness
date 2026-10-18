@@ -21,6 +21,8 @@ export type AgentResult = (
 
 /** What the agent reported in its final message, whatever its outcome. */
 export interface AgentReports {
+  /** Work in the Project's code outside the Ticket. */
+  followUps: { title: string; body: string }[];
   /** `ref` is the id of an open Friction the agent saw again; its title and body then say what happened this time. */
   friction: { title: string; body: string; ref?: string }[];
 }
@@ -73,17 +75,21 @@ const MAX_REPORTS = 3;
 const MAX_TITLE = 200;
 const MAX_BODY = 2000;
 
-/** The `<friction>` tags of the output: the first line is the title, the rest the body. A tag opened inside another is malformed, and dropped. */
-function parseReports(stdout: string): AgentReports {
-  const friction = [...stdout.matchAll(/<friction(?:\s+ref="([^"]*)")?>((?:(?!<friction[\s>])[\s\S])*?)<\/friction>/g)]
+/** The `<tag>`s of the output, first 3 kept: the first line is the title, the rest the body. A tag opened inside another is malformed, and dropped. */
+function parseTags(stdout: string, tag: string) {
+  return [...stdout.matchAll(new RegExp(`<${tag}(?:\\s+ref="([^"]*)")?>((?:(?!<${tag}[\\s>])[\\s\\S])*?)</${tag}>`, 'g'))]
     .map(([, ref, text]) => {
       const [title = '', ...rest] = text.trim().split('\n');
       return { title: title.trim().slice(0, MAX_TITLE), body: rest.join('\n').trim().slice(0, MAX_BODY), ...(ref && { ref }) };
     })
     .filter((f) => f.title)
     .slice(0, MAX_REPORTS);
-  return { friction };
 }
+
+const parseReports = (stdout: string): AgentReports => ({
+  followUps: parseTags(stdout, 'follow-up').map(({ title, body }) => ({ title, body })),
+  friction: parseTags(stdout, 'friction'),
+});
 
 export function agentResult({ completionSignal, stdout }: { completionSignal?: string; stdout: string }): AgentResult {
   const reports = parseReports(stdout);
