@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Children, createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
@@ -362,6 +362,22 @@ function Copy({ text }: { text: string }) {
   );
 }
 
+/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first. */
+function More({ id, children }: { id: number; children: ReactNode }) {
+  const t = useT();
+  if (!Children.toArray(children).length) return null;
+  return (
+    <>
+      <button className="act dots" popoverTarget={`more-${id}`} aria-label={t.moreActions} title={t.moreActions} style={{ anchorName: `--more-${id}` }}>
+        ⋯
+      </button>
+      <div className="more-menu" id={`more-${id}`} popover="auto" style={{ positionAnchor: `--more-${id}` }} onClickCapture={(e) => e.currentTarget.hidePopover()}>
+        {children}
+      </div>
+    </>
+  );
+}
+
 function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
   return (
     <div className="empty">
@@ -599,30 +615,32 @@ export function App() {
           </button>
         )}
         {retryable.has(r.id) && (
-          <button {...pending(r, 'requeue', 'small')} onClick={() => void act(r, 'requeue', t.requeued)}>
+          <button {...pending(r, 'requeue', 'act')} onClick={() => void act(r, 'requeue', t.requeued)}>
             {t.requeue}
           </button>
         )}
-        {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
-          <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
-            {t.cleanUp}
-          </button>
-        )}
-        {(r.state === 'failed' || r.state === 'interrupted' || r.state === 'killed') && (
-          <button {...pending(r, 'delete', 'small danger')} onClick={() => remove(r)}>
-            {t.delete}
-          </button>
-        )}
-        {(r.state === 'merged' || r.state === 'pr-closed') &&
-          (r.archivedAt ? (
-            <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
-              {t.unarchive}
+        <More id={r.id}>
+          {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+            <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
+              {t.cleanUp}
             </button>
-          ) : (
-            <button {...pending(r, 'archive', 'small')} onClick={() => void act(r, 'archive', t.archivedDone)}>
-              {t.archive}
+          )}
+          {(r.state === 'failed' || r.state === 'interrupted' || r.state === 'killed') && (
+            <button {...pending(r, 'delete', 'small danger')} onClick={() => remove(r)}>
+              {t.delete}
             </button>
-          ))}
+          )}
+          {(r.state === 'merged' || r.state === 'pr-closed') &&
+            (r.archivedAt ? (
+              <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
+                {t.unarchive}
+              </button>
+            ) : (
+              <button {...pending(r, 'archive', 'small')} onClick={() => void act(r, 'archive', t.archivedDone)}>
+                {t.archive}
+              </button>
+            ))}
+        </More>
       </div>
     </div>
   );
