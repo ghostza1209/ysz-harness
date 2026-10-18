@@ -1,8 +1,8 @@
 import type { BeadsGateway, Ticket } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
-import type { AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, BacklogPoint, RunRow, Store } from './store';
+import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
+import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -21,7 +21,7 @@ export interface QueueItem {
 }
 
 /** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
-export type StatsRun = Omit<RunRow, 'note' | 'cloneDir'>;
+export type StatsRun = Omit<RunRow, 'note' | 'cloneDir' | 'reports'>;
 
 export interface ProjectStatus {
   name: string;
@@ -214,6 +214,22 @@ export function createOrchestrator(deps: {
         context.inReviewBlocker = { ...blocker, prUrl };
       }
 
+      /** What the Run's agents reported so far, across Attempts. */
+      const recorded: Reports = { followUps: [], friction: [] };
+      /** Record an agent's Friction as Tickets in ysz's own queue. A failed write is a log line and nothing more; a kill stops it. */
+      async function recordFriction(attempt: number, role: 'implement' | 'review', { friction }: AgentReports) {
+        for (const { title, body } of friction) {
+          if (signal.aborted) return;
+          try {
+            const id = await beads.createFriction({ project, title, body, ticketId: ticket.id, runId, attempt, role });
+            recorded.friction.push({ id, title, seenAgain: false });
+            store.setReports(runId, recorded);
+          } catch (err) {
+            logRun(runId, `Recording Friction "${title}" failed: ${message(err)}`);
+          }
+        }
+      }
+
       /**
        * One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch, or of the
        * In review blocker's branch. A kill throws out of it.
@@ -234,6 +250,7 @@ export function createOrchestrator(deps: {
           return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
         }
         signal.throwIfAborted();
+        await recordFriction(n, 'implement', implemented.reports);
         if (implemented.outcome === 'needs-info') return { kind: 'needs-info', agent: 'implement', question: implemented.question };
         if (implemented.outcome === 'stopped') {
           return { kind: 'failed', prepared, reason: `the implement agent stopped without signalling COMPLETE${implemented.tail && `: ${implemented.tail}`}` };
@@ -254,6 +271,7 @@ export function createOrchestrator(deps: {
         try {
           const reviewed = await sandbox.review({ ...req, onUsage: usage('review') });
           signal.throwIfAborted();
+          await recordFriction(n, 'review', reviewed.reports);
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
           if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
           skipped = 'the review agent stopped without signalling COMPLETE';
@@ -581,7 +599,7 @@ export function createOrchestrator(deps: {
 
     stats() {
       // ponytail: every Run on each visit, ~0.4 kB each; filter by range here if the page grows slow.
-      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, ...r }) => r), backlog: store.backlogHistory() };
+      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, reports: _reports, ...r }) => r), backlog: store.backlogHistory() };
     },
 
     readyQueue,

@@ -15,7 +15,7 @@ const port = Number(process.env.PORT ?? 4000);
 /** bd serializes all access to a Project's DB, so every poll briefly blocks the user's own bd calls. */
 const POLL_INTERVAL_MS = 30_000;
 
-const beads = createBeadsGateway();
+const beads = createBeadsGateway({ yszRepo: root });
 const orchestrator = createOrchestrator({
   projects,
   beads,

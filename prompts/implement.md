@@ -14,6 +14,19 @@ The Ticket is in `{{TICKET_JSON}}` (relative to the repo root). Read it first. I
 5. **Commit**: make one commit for the Ticket. Its subject is a Conventional Commit naming the Ticket as `{{KEY}}`: `type(scope): {{KEY}} subject`, e.g. `fix(chat): {{KEY}} render the badge for an unknown sender`. Pick the type from the change, add a scope only when the change sits in one clear module, and never mark a breaking change with an exclamation mark or `BREAKING CHANGE`. The message names the key decisions and the files changed. If you noticed follow-up work that is out of scope, list it under a `Follow-ups:` heading in the commit message, because the pull request description is written from the commits. Do not leave commented-out code or TODO comments in the code.
 6. **Stop**: output the completion signal below and do no further work.
 
+## Reporting friction
+
+If ysz or this sandbox got in your way, say so in your final message, after your last tool call and in the same message as the signal below. Friction is something that made you skip a step, guess or work around: a check that cannot run, a missing tool, a check hint or instruction that is wrong or misleading. It is not "the install was slow", and it is not a problem in this repository's own code (that is a follow-up, step 5).
+
+Report each one in its own tag. The first non-empty line is the title; the rest says what happened and what you did instead:
+
+<friction>
+Short title
+What happened, and what you skipped, guessed or worked around.
+</friction>
+
+Report at most 3, the ones that cost you most, and write them in the language of the Ticket. Report nothing when nothing got in your way. Do this also when you stop or ask a question.
+
 ## Rules
 
 - This sandbox has no `bd` and no access to the issue tracker. Do not try to install or run it. Do not create issues: follow-ups go in the commit message.

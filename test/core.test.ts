@@ -54,6 +54,9 @@ let claimed: string[];
 let interruptError: Error | undefined;
 let releaseError: Error | undefined;
 let leftoverSweeps: number;
+/** Titles of the Friction whose write fails, and the Friction ids handed out so far. */
+let failingFriction: Set<string>;
+let frictionIds: number;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
@@ -130,9 +133,15 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     writes.push(`prClosed ${project.name}/${id} ${prUrl}`);
     return true;
   },
+  async createFriction({ project, title, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `ysz-${++frictionIds}`;
+  },
 });
 
-const complete: AgentResult = { outcome: 'complete' };
+const none: AgentResult['reports'] = { friction: [] };
+const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
 const fakeSandbox: SandboxRunner = {
@@ -221,6 +230,8 @@ beforeEach(() => {
   interruptError = undefined;
   releaseError = undefined;
   leftoverSweeps = 0;
+  failingFriction = new Set();
+  frictionIds = 0;
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
@@ -690,7 +701,7 @@ describe('a Run that does not reach a PR', () => {
   const historyOf = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.state, r.attempt, r.note]);
 
   it('does not pick a Ticket again once handing it back failed while the process lives', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     await o.poll(); // the released bead is Ready again
@@ -699,7 +710,7 @@ describe('a Run that does not reach a PR', () => {
   });
 
   it('falls back to a plain release, keeping the reason, when the failed hand-back itself fails', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
@@ -748,7 +759,7 @@ describe('the Attempt policy', () => {
   });
 
   it('retries an agent that stops without a signal, passing the end of its output', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database' } : complete);
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database', reports: none } : complete);
     await run();
     assert.equal(agentCalls[1], 'implement attempt 2 Attempt 1 failed: the implement agent stopped without signalling COMPLETE: the build needs a database');
   });
@@ -812,7 +823,7 @@ describe('the Attempt policy', () => {
   });
 
   it('skips the review, not the PR, when the review agent stops without a signal', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     await run();
     assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
   });
@@ -828,7 +839,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the implement agent needs info', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nWhich of the two APIs?']);
@@ -837,7 +848,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the review agent needs info', async () => {
-    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?' });
+    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The review agent needs information:\nIs the old export still wanted?']);
@@ -846,9 +857,137 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question when Attempt 2 needs info after a failed Attempt 1', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '' } : { outcome: 'needs-info', question: 'Which API?' });
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '', reports: none } : { outcome: 'needs-info', question: 'Which API?', reports: none });
     const o = await run();
     assert.deepEqual(historyOf(o), [['failed', 2, 'The implement agent needs information:\nWhich API?']]);
+  });
+});
+
+describe('Friction an agent reports', () => {
+  const friction = (...titles: string[]): AgentResult['reports'] => ({ friction: titles.map((title) => ({ title, body: '' })) });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const recorded = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => r.reports);
+
+  it('writes each agent\'s Friction as a new Ticket, in order, and the Run records them', async () => {
+    agent = async () => ({ outcome: 'complete', reports: friction('no php in the sandbox', 'stale check hint') });
+    reviewer = async () => ({ outcome: 'complete', reports: friction('lint cannot run') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no php in the sandbox',
+      'friction thaivis/tv1 attempt 1 implement: stale check hint',
+      'friction thaivis/tv1 attempt 1 review: lint cannot run',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o), [
+      {
+        followUps: [],
+        friction: [
+          { id: 'ysz-1', title: 'no php in the sandbox', seenAgain: false },
+          { id: 'ysz-2', title: 'stale check hint', seenAgain: false },
+          { id: 'ysz-3', title: 'lint cannot run', seenAgain: false },
+        ],
+      },
+    ]);
+  });
+
+  it('has nothing recorded for a Run whose agents reported nothing', async () => {
+    assert.deepEqual(recorded(await run()), [null]);
+  });
+
+  it('writes the Friction of an agent that needs info, before handing the Ticket back', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('check hint is wrong') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: check hint is wrong',
+      'fail thaivis/tv1: The implement agent needs information:\nwhich API?',
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'check hint is wrong', seenAgain: false }]);
+  });
+
+  it('writes the Friction of a review agent that needs info', async () => {
+    reviewer = async () => ({ outcome: 'needs-info', question: 'keep the export?', reports: friction('review hint is wrong') });
+    await run();
+    assert.deepEqual(writes.slice(1, 2), ['friction thaivis/tv1 attempt 1 review: review hint is wrong']);
+  });
+
+  it('writes the Friction of an agent that stopped, in both Attempts, and keeps both on the Run', async () => {
+    agent = async (attempt) =>
+      attempt === 1
+        ? { outcome: 'stopped', tail: 'no database', reports: friction('no database in the sandbox') }
+        : { outcome: 'complete', reports: friction('still no database') };
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('review stopped too') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no database in the sandbox',
+      'friction thaivis/tv1 attempt 2 implement: still no database',
+      'friction thaivis/tv1 attempt 2 review: review stopped too',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction.map((f) => f.id), ['ysz-1', 'ysz-2', 'ysz-3']);
+  });
+
+  it('writes nothing for an agent that finishes after the Run was killed', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    agent = async () => {
+      await gate;
+      return { outcome: 'complete', reports: friction('too late') };
+    };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await flush();
+    const killed = o.kill(o.runs().live[0].id);
+    finish(); // the agent ignores the abort and still reports
+    await killed;
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(recorded(o), [null]);
+  });
+
+  it('stops writing the rest of an agent\'s Friction once the Run is killed', async () => {
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    agent = async () => ({ outcome: 'complete', reports: friction('first', 'second') });
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFriction: async (f) => { const id = await base.createFriction(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), ['friction thaivis/tv1 attempt 1 implement: first']);
+  });
+
+  it('logs a failed write and goes on: the other Friction is written and the Run ends In review', async () => {
+    failingFriction.add('broken one');
+    agent = async () => ({ outcome: 'complete', reports: friction('broken one', 'fine one') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "broken one" failed: ysz bd is down']);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: fine one', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
+  });
+
+  it('ends a failed Run as it otherwise would when its Friction cannot be written', async () => {
+    failingFriction.add('lost');
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('lost') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nwhich API?']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['failed', null]]);
   });
 });
 
@@ -907,7 +1046,7 @@ describe('a host step that fails', () => {
   });
 
   it('a retry publishes the same commit and review note as the first try', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     const o = await parkedRun();
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
@@ -1151,7 +1290,7 @@ describe('Kill', () => {
 
 describe('Retry a failed Run', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1195,7 +1334,7 @@ describe('Retry a failed Run', () => {
 
 describe('Clean up', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'stopped', tail: 'blocked' });
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1219,7 +1358,7 @@ describe('Clean up', () => {
   });
 
   it('also removes the clone a NEEDS_INFO Run left behind', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();

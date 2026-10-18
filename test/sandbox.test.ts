@@ -47,23 +47,24 @@ it('reports usage once per message, keeps a subagent out of the context, and end
 });
 
 it('reads COMPLETE as complete', () => {
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete' });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { friction: [] } });
 });
 
 it('takes the last <question> of the output as the question for NEEDS_INFO', () => {
   const stdout = 'I may ask <question>first?</question> later.\n<question>\n  Which of the two APIs?\nBoth fit.\n</question>\n' + NEEDS_INFO;
-  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.' });
+  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { friction: [] } });
 });
 
 it('goes by the signal the agent ended on, not the one sandcastle matched first', () => {
   const stdout = `I will print ${COMPLETE} once done, but first: <question>Which API?</question>\n${NEEDS_INFO}`;
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?' });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { friction: [] } });
 });
 
 it('still ends needs-info, with a stand-in question, when the agent forgot the <question>', () => {
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: NEEDS_INFO }), {
     outcome: 'needs-info',
     question: 'the agent signalled NEEDS_INFO without a <question>',
+    reports: { friction: [] },
   });
 });
 
@@ -72,6 +73,45 @@ it('reads no signal as stopped and keeps only the last 500 characters of what th
   assert.equal(result.outcome, 'stopped');
   assert.equal(result.outcome === 'stopped' && result.tail.length, 500);
   assert.ok(result.outcome === 'stopped' && result.tail.endsWith('blocked: no database'));
+});
+
+describe('the <friction> reports', () => {
+  const friction = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.friction;
+
+  it('takes the title from the first non-empty line and the rest as the body', () => {
+    assert.deepEqual(friction('<friction>\n\n  No php in the sandbox \nphpunit exited 127.\nI skipped it.\n</friction>'), [
+      { title: 'No php in the sandbox', body: 'phpunit exited 127.\nI skipped it.' },
+    ]);
+    assert.deepEqual(friction('<friction>Title only</friction>'), [{ title: 'Title only', body: '' }]);
+  });
+
+  it('reads every tag in the output, not just the last, and keeps the first 3', () => {
+    const stdout = ['one', 'two', 'three', 'four'].map((t) => `<friction>${t}</friction>`).join('\ntext between\n');
+    assert.deepEqual(friction(stdout).map((f) => f.title), ['one', 'two', 'three']);
+  });
+
+  it('drops tags with an empty title, before counting to 3', () => {
+    const stdout = '<friction>  \n </friction><friction></friction><friction>a</friction><friction>b</friction><friction>c</friction><friction>d</friction>';
+    assert.deepEqual(friction(stdout).map((f) => f.title), ['a', 'b', 'c']);
+  });
+
+  it('drops a tag that never closes, and a tag opened inside another', () => {
+    assert.deepEqual(friction('<friction>never closed\nand more text'), []);
+    assert.deepEqual(friction('<friction>outer <friction>inner</friction>').map((f) => f.title), ['inner']);
+  });
+
+  it('bounds the title to 200 characters and the body to 2000', () => {
+    const [found] = friction(`<friction>${'t'.repeat(300)}\n${'b'.repeat(3000)}</friction>`);
+    assert.deepEqual([found.title.length, found.body.length], [200, 2000]);
+  });
+
+  it('is reported on needs-info and stopped as well as complete', () => {
+    const tag = '<friction>check hint is wrong</friction>';
+    const expected = [{ title: 'check hint is wrong', body: '' }];
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.friction, expected);
+    assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.friction, expected);
+    assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: tag }).reports.friction, expected);
+  });
 });
 
 /** teeCommand on a fake sandbox handle: its exec streams one stdout line, then fails with stderr, as a broken pnpm install does. */

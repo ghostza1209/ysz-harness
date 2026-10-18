@@ -378,3 +378,44 @@ describe('Beads gateway with In review blockers, against real bd', () => {
     assert.deepEqual(context.closedBlockers.map((b) => b.id), [ids.done]);
   });
 });
+
+describe('Friction in ysz\'s own queue, against real bd', () => {
+  let yszDir: string;
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const project = { name: 'PopDeal', repoPath: '/not/used', baseBranch: 'main' };
+
+  before(async () => {
+    yszDir = await mkdtemp(join(tmpdir(), 'beads-ysz-'));
+    await run('bd', ['init', '-p', 'ysz', '--non-interactive', '--skip-agents', '--skip-hooks'], { cwd: yszDir, env });
+  });
+
+  after(() => rm(yszDir, { recursive: true, force: true }));
+
+  it('creates a needs-triage Ticket with the Project label, as the orchestrator, at default type and priority, ending with where it came from', async () => {
+    const id = await createBeadsGateway({ yszRepo: yszDir }).createFriction({
+      project, title: '--phpunit cannot run', body: 'It exited 127.\nI skipped it.', ticketId: 'pd-42', runId: 17, attempt: 2, role: 'review',
+    });
+    const [issue] = JSON.parse((await run('bd', ['show', id, '--json'], { cwd: yszDir, env })).stdout);
+    assert.match(id, /^ysz-/);
+    assert.deepEqual(
+      [issue.title, issue.status, issue.priority, issue.issue_type, issue.created_by, [...issue.labels].sort()],
+      ['--phpunit cannot run', 'open', 2, 'task', 'orchestrator', ['friction', 'needs-triage', 'project:PopDeal']],
+    );
+    assert.equal(issue.description, 'It exited 127.\nI skipped it.\n\nProject: PopDeal · Ticket: pd-42 · Run: 17 · Attempt: 2 · Agent: review');
+  });
+
+  it('puts only the provenance line in the body of a Friction with no body', async () => {
+    const id = await createBeadsGateway({ yszRepo: yszDir }).createFriction({
+      project, title: 'lint is slow to start', body: '', ticketId: 'pd-43', runId: 18, attempt: 1, role: 'implement',
+    });
+    const [issue] = JSON.parse((await run('bd', ['show', id, '--json'], { cwd: yszDir, env })).stdout);
+    assert.equal(issue.description, 'Project: PopDeal · Ticket: pd-43 · Run: 18 · Attempt: 1 · Agent: implement');
+  });
+
+  it('refuses to write Friction when no ysz checkout is configured', async () => {
+    await assert.rejects(
+      createBeadsGateway().createFriction({ project, title: 't', body: '', ticketId: 'x', runId: 1, attempt: 1, role: 'implement' }),
+      /ysz checkout is not configured/,
+    );
+  });
+});

@@ -65,6 +65,22 @@ export interface BeadsGateway {
    * and release the claim. false, writing nothing, when the human changed the bead since.
    */
   prClosed(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
+   * An agent hit Friction: a new Ticket in ysz's own queue, labelled friction, project:<name> and needs-triage, at bd's
+   * default type and priority. The body ends with where it came from. Returns the new id.
+   */
+  createFriction(friction: FrictionReport): Promise<string>;
+}
+
+/** One Friction an agent reported, and the Run it came from. */
+export interface FrictionReport {
+  project: Project;
+  title: string;
+  body: string;
+  ticketId: string;
+  runId: number;
+  attempt: number;
+  role: 'implement' | 'review';
 }
 
 /** The fields of a bead as `bd list --json` prints it that the gateway reads. */
@@ -86,11 +102,13 @@ const isInReview = (b: Pick<Bead, 'status' | 'assignee' | 'labels'>) =>
 
 export interface BeadsOptions {
   bin?: string;
+  /** The ysz checkout, whose queue holds Friction. */
+  yszRepo?: string;
   /** Every bd call is killed after this long: embedded Dolt waits on its lock with no deadline. */
   timeoutMs?: number;
 }
 
-export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOptions = {}): BeadsGateway {
+export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: BeadsOptions = {}): BeadsGateway {
   async function bd(args: string[]): Promise<string> {
     try {
       const { stdout } = await execFileAsync(bin, args, {
@@ -218,6 +236,17 @@ export function createBeadsGateway({ bin = 'bd', timeoutMs = 30_000 }: BeadsOpti
       await write(project, ['comment', id, `PR closed unmerged: ${prUrl}`]);
       await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--remove-label', 'in-review', '--assignee', '', '--status', 'open']);
       return true;
+    },
+
+    async createFriction({ project, title, body, ticketId, runId, attempt, role }) {
+      if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
+      const source = `Project: ${project.name} · Ticket: ${ticketId} · Run: ${runId} · Attempt: ${attempt} · Agent: ${role}`;
+      const out = await bd([
+        '-C', yszRepo, '--actor', ORCHESTRATOR, 'create', '--silent',
+        '--title', title, '-d', body ? `${body}\n\n${source}` : source,
+        '-l', `friction,project:${project.name},needs-triage`,
+      ]);
+      return out.trim();
     },
   };
 }

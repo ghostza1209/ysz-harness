@@ -13,10 +13,16 @@ export const MODEL = 'claude-sonnet-5-5';
 export const TICKET_JSON = '.orchestrator/ticket.json';
 
 /** How an agent ended without throwing. `stopped` = no signal: it ran out of iterations or said it was blocked. */
-export type AgentResult =
+export type AgentResult = (
   | { outcome: 'complete' }
   | { outcome: 'needs-info'; question: string }
-  | { outcome: 'stopped'; tail: string };
+  | { outcome: 'stopped'; tail: string }
+) & { reports: AgentReports };
+
+/** What the agent reported in its final message, whatever its outcome. */
+export interface AgentReports {
+  friction: { title: string; body: string }[];
+}
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
 type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void } & Prepared;
@@ -62,15 +68,32 @@ export async function imageExists(image: string, dockerBin = 'docker'): Promise<
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
 
+const MAX_REPORTS = 3;
+const MAX_TITLE = 200;
+const MAX_BODY = 2000;
+
+/** The `<friction>` tags of the output: the first line is the title, the rest the body. A tag opened inside another is malformed, and dropped. */
+function parseReports(stdout: string): AgentReports {
+  const friction = [...stdout.matchAll(/<friction>((?:(?!<friction>)[\s\S])*?)<\/friction>/g)]
+    .map(([, text]) => {
+      const [title = '', ...rest] = text.trim().split('\n');
+      return { title: title.trim().slice(0, MAX_TITLE), body: rest.join('\n').trim().slice(0, MAX_BODY) };
+    })
+    .filter((f) => f.title)
+    .slice(0, MAX_REPORTS);
+  return { friction };
+}
+
 export function agentResult({ completionSignal, stdout }: { completionSignal?: string; stdout: string }): AgentResult {
+  const reports = parseReports(stdout);
   // sandcastle reports the first signal in its list that the output holds anywhere, so COMPLETE wins over a NEEDS_INFO
   // given after it. The signal the agent ended on is the one that counts.
-  if (completionSignal === undefined) return { outcome: 'stopped', tail: stdout.trim().slice(-500) };
+  if (completionSignal === undefined) return { outcome: 'stopped', tail: stdout.trim().slice(-500), reports };
   if (stdout.lastIndexOf(NEEDS_INFO) > stdout.lastIndexOf(COMPLETE)) {
     const question = [...stdout.matchAll(/<question>([\s\S]*?)<\/question>/g)].at(-1)?.[1].trim();
-    return { outcome: 'needs-info', question: question || 'the agent signalled NEEDS_INFO without a <question>' };
+    return { outcome: 'needs-info', question: question || 'the agent signalled NEEDS_INFO without a <question>', reports };
   }
-  return { outcome: 'complete' };
+  return { outcome: 'complete', reports };
 }
 
 type Usage = { input_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number; output_tokens: number };
