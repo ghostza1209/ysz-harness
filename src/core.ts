@@ -1,8 +1,8 @@
 import type { BeadsGateway, Ticket } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
-import type { AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, BacklogPoint, RunRow, Store } from './store';
+import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
+import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -21,7 +21,7 @@ export interface QueueItem {
 }
 
 /** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
-export type StatsRun = Omit<RunRow, 'note' | 'cloneDir'>;
+export type StatsRun = Omit<RunRow, 'note' | 'cloneDir' | 'reports'>;
 
 export interface ProjectStatus {
   name: string;
@@ -94,9 +94,12 @@ export interface Clock {
 
 /** How one Attempt ended. A failed Attempt keeps its clone so the caller can remove it or leave it for inspection. */
 type Attempted =
-  | { kind: 'done'; prepared: Prepared; tip?: string; reviewSkipped?: string }
+  | { kind: 'done'; prepared: Prepared; followUps: FollowUp[]; tip?: string; reviewSkipped?: string }
   | { kind: 'failed'; prepared: Prepared; reason: string }
   | { kind: 'needs-info'; agent: 'implement' | 'review'; question: string };
+
+/** Work in the Project's code outside the Ticket, as an agent reported it, with the Attempt and agent that did. */
+type FollowUp = AgentReports['followUps'][number] & { attempt: number; role: 'implement' | 'review' };
 
 /** What a Run needs to resume its host steps. */
 interface HostJob {
@@ -105,6 +108,8 @@ interface HostJob {
   prepared: Prepared;
   tip?: string;
   reviewSkipped?: string;
+  /** The Follow-ups of the Attempt the PR opens from that have no Ticket yet. */
+  followUps: FollowUp[];
   /** Set once the PR is open, so a retry does not open a second one. */
   prUrl: string | null;
 }
@@ -168,9 +173,10 @@ export function createOrchestrator(deps: {
   }
 
   /**
-   * The host steps after a successful Attempt: publish, mark the bead, end in-review. A failure never burns an Attempt:
-   * the Run parks in needs-attention (freeing its slot) with the clone and the bead claim kept, for Retry or Kill.
-   * A step that already succeeded is not repeated: once the PR exists, a retry only marks the bead. Never rejects.
+   * The host steps after a successful Attempt: publish, create a Ticket for each Follow-up, mark the bead, end in-review.
+   * A failure never burns an Attempt: the Run parks in needs-attention (freeing its slot) with the clone and the bead
+   * claim kept, for Retry or Kill. A step that already succeeded is not repeated: once the PR exists, a retry creates
+   * only the Follow-ups still missing, then marks the bead. Never rejects.
    */
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
@@ -178,14 +184,24 @@ export function createOrchestrator(deps: {
     store.updateRun(runId, { state: 'host', note: null });
     log(`--- Push & PR started: ${new Date(clock.now()).toISOString()} ---`);
     // What recover() needs to pick the job up again; the PR url is already on the row.
-    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped }));
+    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
+        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps.map((f) => f.title), signal, log });
         job.prUrl = pr.url;
         store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
+      }
+      // One at a time; each id is on the Run before the next write, and out of the job, so a retry or a restart does only the rest.
+      while (job.followUps.length) {
+        signal.throwIfAborted();
+        const { title, body, attempt, role } = job.followUps[0];
+        const id = await beads.createFollowUp({ project: job.project, title, body, ticketId: job.ticket.id, runId, attempt, role });
+        const reports = store.getRun(runId)!.reports ?? { followUps: [], friction: [] };
+        store.setReports(runId, { ...reports, followUps: [...reports.followUps, { id, title }] });
+        job.followUps = job.followUps.slice(1);
+        store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
       }
       signal.throwIfAborted();
       await beads.markInReview(job.project, job.ticket.id, job.prUrl);
@@ -239,6 +255,38 @@ export function createOrchestrator(deps: {
         context.inReviewBlocker = { ...blocker, prUrl };
       }
 
+      /** What the Run's agents reported so far, across Attempts. */
+      const recorded: Reports = { followUps: [], friction: [] };
+      /** The Project's open Friction as this Attempt's agents saw it; what an agent refers to by id is commented on, not duplicated. */
+      let openFriction: { id: string; title: string }[] = [];
+      /**
+       * Record an agent's Friction in ysz's own queue: a comment on the open Ticket it refers to, else a new Ticket (so a
+       * mistaken reference loses nothing). A failed write is a log line and nothing more; a kill stops it.
+       */
+      async function recordFriction(attempt: number, role: 'implement' | 'review', { friction }: AgentReports) {
+        const written: Reports['friction'] = [];
+        for (const { title, body, ref } of friction) {
+          if (signal.aborted) break;
+          try {
+            const report = { project, title, body, ticketId: ticket.id, runId, attempt, role };
+            const open = openFriction.find((f) => f.id === ref);
+            if (open) {
+              await beads.commentFriction(open.id, report);
+              written.push({ id: open.id, title: open.title, seenAgain: true });
+            } else {
+              const id = await beads.createFriction(report);
+              openFriction = [...openFriction, { id, title }]; // open now: a later agent's reference to it is a comment
+              written.push({ id, title, seenAgain: false });
+            }
+            recorded.friction.push(written.at(-1)!);
+            store.setReports(runId, recorded);
+          } catch (err) {
+            logRun(runId, `Recording Friction "${title}" failed: ${message(err)}`);
+          }
+        }
+        return written;
+      }
+
       /**
        * One Attempt: implement, then review, each in a fresh sandbox on a fresh clone of the base branch, or of the
        * In review blocker's branch. A kill throws out of it.
@@ -246,7 +294,14 @@ export function createOrchestrator(deps: {
       async function attempt(n: number, previousAttemptSummary?: string): Promise<Attempted> {
         signal.throwIfAborted();
         store.updateRun(runId, { state: 'claimed', attempt: n });
-        const prepared = await host.prepare(project, ticket.id, context, signal);
+        const found = ({ reports }: AgentResult, role: FollowUp['role']): FollowUp[] => reports.followUps.map((f) => ({ ...f, attempt: n, role }));
+        // A Friction the human closed since the last Attempt must not be commented on, so each Attempt asks again.
+        openFriction = await beads.listOpenFriction(project).catch((err) => {
+          logRun(runId, `Fetching the open Friction failed, so the agents get none: ${message(err)}`);
+          return [];
+        });
+        signal.throwIfAborted();
+        const prepared = await host.prepare(project, ticket.id, { ...context, openFriction }, signal);
         store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
         const usage = (role: string) => (u: AgentUsage) => store.setUsage(runId, `attempt${n}-${role}`, u);
@@ -258,6 +313,8 @@ export function createOrchestrator(deps: {
           signal.throwIfAborted();
           return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
         }
+        signal.throwIfAborted();
+        const implementFriction = await recordFriction(n, 'implement', implemented.reports);
         signal.throwIfAborted();
         if (implemented.outcome === 'needs-info') return { kind: 'needs-info', agent: 'implement', question: implemented.question };
         if (implemented.outcome === 'stopped') {
@@ -274,20 +331,36 @@ export function createOrchestrator(deps: {
         signal.throwIfAborted();
         if (collected.commits === 0) return { kind: 'failed', prepared, reason: 'the agent made no commits' };
 
+        // The Ticket file, not the prompt, carries what the implement agent wrote: sandcastle runs a !-backtick span in a prompt as a shell command.
+        const implementReports = { followUps: implemented.reports.followUps.map((f, i) => ({ ref: `F${i + 1}`, ...f })), friction: implementFriction };
+        try {
+          await host.writeTicket(prepared, { ...context, openFriction, implementReports });
+        } catch (err) {
+          signal.throwIfAborted();
+          return { kind: 'failed', prepared, reason: `the implement agent's reports could not be handed to the review agent: ${message(err)}` };
+        }
+
         store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
           const reviewed = await sandbox.review({ ...req, onUsage: usage('review') });
           signal.throwIfAborted();
+          await recordFriction(n, 'review', reviewed.reports);
+          signal.throwIfAborted();
           if (reviewed.outcome === 'needs-info') return { kind: 'needs-info', agent: 'review', question: reviewed.question };
-          if (reviewed.outcome === 'complete') return { kind: 'done', prepared };
+          if (reviewed.outcome === 'complete') {
+            // What the review says nothing about stays; a ref it makes up matches nothing.
+            const fixed = new Set(reviewed.reports.fixedFollowUps);
+            const kept = found(implemented, 'implement').filter((_, i) => !fixed.has(`F${i + 1}`));
+            return { kind: 'done', prepared, followUps: [...kept, ...found(reviewed, 'review')] };
+          }
           skipped = 'the review agent stopped without signalling COMPLETE';
         } catch (err) {
           signal.throwIfAborted();
           skipped = `the review agent failed: ${message(err)}`;
         }
         // An unfinished review may have left half a change, so the PR opens from the implement commits.
-        return { kind: 'done', prepared, tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
+        return { kind: 'done', prepared, followUps: found(implemented, 'implement'), tip: collected.tip, reviewSkipped: skipped.replace(/\s+/g, ' ').slice(0, 300) };
       }
 
       let result = await attempt(1);
@@ -311,8 +384,8 @@ export function createOrchestrator(deps: {
         return;
       }
 
-      const { prepared, tip, reviewSkipped } = result;
-      await finish(runId, control, { project, ticket, prepared, tip, reviewSkipped, prUrl: null });
+      const { prepared, tip, reviewSkipped, followUps } = result;
+      await finish(runId, control, { project, ticket, prepared, tip, reviewSkipped, followUps, prUrl: null });
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       failed.add(key(project.name, ticket.id));
@@ -485,7 +558,8 @@ export function createOrchestrator(deps: {
         if (saved) {
           // Past the agents: the clone holds the finished work, so only the host steps are left.
           const control: Control = { ctl: new AbortController() };
-          const job: HostJob = { project, ticket: { id: run.ticketId, title: run.title }, ...JSON.parse(saved), prUrl: run.prUrl };
+          // A host job saved before Follow-ups travelled in it resumes with none.
+          const job: HostJob = { project, ticket: { id: run.ticketId, title: run.title }, followUps: [], ...JSON.parse(saved), prUrl: run.prUrl };
           controls.set(run.id, control);
           if (run.state === 'needs-attention') control.parked = job;
           else track(control, finish(run.id, control, job));
@@ -606,7 +680,7 @@ export function createOrchestrator(deps: {
 
     stats() {
       // ponytail: every Run on each visit, ~0.4 kB each; filter by range here if the page grows slow.
-      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, ...r }) => r), backlog: store.backlogHistory() };
+      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, reports: _reports, ...r }) => r), backlog: store.backlogHistory() };
     },
 
     readyQueue,

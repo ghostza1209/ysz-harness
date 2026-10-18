@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -16,7 +16,7 @@ describe('host steps against real git', () => {
   let log: string;
   let project: Project;
   let host: ReturnType<typeof createHostSteps>;
-  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null };
+  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null, openFriction: [] };
   const ticket = (id: string) => ({ id, title: 'a ticket' });
   const savedPath = process.env.PATH;
 
@@ -376,6 +376,25 @@ describe('host steps against real git', () => {
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
   });
 
+  it('lists the given Follow-up titles in a ## Follow-ups section at the end of the PR body, and leaves it out when there are none', async () => {
+    const withTitles = await host.prepare(project, 't-17', context);
+    commit(join(withTitles.dir, 'repo'), 'e.txt', 'e');
+    await host.publish(project, ticket('t-17'), withTitles, { reviewSkipped: 'no review', followUps: ['drop the old export', 'cover the empty case'] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '> review skipped: no review\n\nthe PR body\n\n## Follow-ups\n\n- drop the old export\n- cover the empty case');
+
+    const without = await host.prepare(project, 't-18', context);
+    commit(join(without.dir, 'repo'), 'f.txt', 'f');
+    await host.publish(project, ticket('t-18'), without, { followUps: [] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
+  });
+
+  it('does not ask claude to collect or invent follow-ups for the PR body', async () => {
+    const prepared = await host.prepare(project, 't-19', context);
+    commit(join(prepared.dir, 'repo'), 'g.txt', 'g');
+    await host.publish(project, ticket('t-19'), prepared);
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /Follow-ups/i);
+  });
+
   it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
     const prepared = await host.prepare(project, 't-14', context);
     const clone = join(prepared.dir, 'repo');
@@ -497,6 +516,53 @@ describe('host steps against real git', () => {
     assert.equal(git(origin, 'branch', '--list', 'agent/t-12'), '');
   });
 
+  describe('writeTicket', () => {
+    const ticketPath = (dir: string) => join(dir, 'repo/.orchestrator/ticket.json');
+    const handed = { ...context, implementReports: { followUps: [{ ref: 'F1', title: 'drop it', body: 'why' }], friction: [] } };
+
+    it('rewrites the Ticket file with the given context', async () => {
+      const prepared = await host.prepare(project, 't-wt1', context);
+      await host.writeTicket(prepared, handed);
+      assert.deepEqual(JSON.parse(readFileSync(ticketPath(prepared.dir), 'utf8')), handed);
+    });
+
+    it('refuses a ticket.json that is a symlink and leaves its target untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt2', context);
+      const target = join(root, 'wt2-target');
+      writeFileSync(target, 'host file');
+      rmSync(ticketPath(prepared.dir));
+      symlinkSync(target, ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+      assert.equal(readFileSync(target, 'utf8'), 'host file');
+    });
+
+    it('refuses an .orchestrator that is a symlink and leaves the directory it points at untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt3', context);
+      const targetDir = join(root, 'wt3-target');
+      mkdirSync(targetDir);
+      writeFileSync(join(targetDir, 'ticket.json'), 'host file');
+      rmSync(join(prepared.dir, 'repo/.orchestrator'), { recursive: true });
+      symlinkSync(targetDir, join(prepared.dir, 'repo/.orchestrator'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.equal(readFileSync(join(targetDir, 'ticket.json'), 'utf8'), 'host file');
+    });
+
+    it('refuses a clone whose repo is a symlink', async () => {
+      const prepared = await host.prepare(project, 't-wt4', context);
+      const moved = join(root, 'wt4-moved');
+      renameSync(join(prepared.dir, 'repo'), moved);
+      symlinkSync(moved, join(prepared.dir, 'repo'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.deepEqual(JSON.parse(readFileSync(join(moved, '.orchestrator/ticket.json'), 'utf8')), context);
+    });
+
+    it('refuses when the sandbox deleted the Ticket file', async () => {
+      const prepared = await host.prepare(project, 't-wt5', context);
+      rmSync(ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+    });
+  });
+
   it('refuses a clone whose refs reach out of it through a symlink', async () => {
     const prepared = await host.prepare(project, 't-9', context);
     const clone = join(prepared.dir, 'repo');
@@ -575,7 +641,7 @@ describe('host steps against real git', () => {
 
 describe('PR title', () => {
   it('names a Ticket by its own Jira key, else its parent epic\'s, else its own id', () => {
-    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null });
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null, openFriction: [] });
     assert.equal(key({ external_ref: 'jira-OP-7' }, { external_ref: 'jira-OP-1' }), 'OP-7');
     assert.equal(key({}, { external_ref: 'jira-OP-1' }), 'OP-1');
     assert.equal(key({ external_ref: 'gh-12' }, null), 't-9');

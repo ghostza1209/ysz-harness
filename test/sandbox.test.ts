@@ -11,6 +11,14 @@ const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
 const execFileAsync = promisify(execFile);
 
+it('has neither agent prompt ask for a Follow-ups: heading in commit messages, and both ask for <follow-up> tags', () => {
+  for (const role of ['implement', 'review']) {
+    const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+    assert.doesNotMatch(prompt, /Follow-ups:/, role);
+    assert.match(prompt, /<follow-up>\n[^\n]*\n[^\n]*\n<\/follow-up>/, role);
+  }
+});
+
 it('keeps the agent prompts free of !`…`, which sandcastle runs as a shell command', () => {
   for (const role of ['implement', 'review']) {
     const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
@@ -47,23 +55,24 @@ it('reports usage once per message, keeps a subagent out of the context, and end
 });
 
 it('reads COMPLETE as complete', () => {
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete' });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: 'done' }), { outcome: 'complete', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('takes the last <question> of the output as the question for NEEDS_INFO', () => {
   const stdout = 'I may ask <question>first?</question> later.\n<question>\n  Which of the two APIs?\nBoth fit.\n</question>\n' + NEEDS_INFO;
-  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.' });
+  assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout }), { outcome: 'needs-info', question: 'Which of the two APIs?\nBoth fit.', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('goes by the signal the agent ended on, not the one sandcastle matched first', () => {
   const stdout = `I will print ${COMPLETE} once done, but first: <question>Which API?</question>\n${NEEDS_INFO}`;
-  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?' });
+  assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout }), { outcome: 'needs-info', question: 'Which API?', reports: { followUps: [], friction: [], fixedFollowUps: [] } });
 });
 
 it('still ends needs-info, with a stand-in question, when the agent forgot the <question>', () => {
   assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: NEEDS_INFO }), {
     outcome: 'needs-info',
     question: 'the agent signalled NEEDS_INFO without a <question>',
+    reports: { followUps: [], friction: [], fixedFollowUps: [] },
   });
 });
 
@@ -72,6 +81,123 @@ it('reads no signal as stopped and keeps only the last 500 characters of what th
   assert.equal(result.outcome, 'stopped');
   assert.equal(result.outcome === 'stopped' && result.tail.length, 500);
   assert.ok(result.outcome === 'stopped' && result.tail.endsWith('blocked: no database'));
+});
+
+describe('the <friction> reports', () => {
+  const friction = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.friction;
+
+  it('takes the title from the first non-empty line and the rest as the body', () => {
+    assert.deepEqual(friction('<friction>\n\n  No php in the sandbox \nphpunit exited 127.\nI skipped it.\n</friction>'), [
+      { title: 'No php in the sandbox', body: 'phpunit exited 127.\nI skipped it.' },
+    ]);
+    assert.deepEqual(friction('<friction>Title only</friction>'), [{ title: 'Title only', body: '' }]);
+  });
+
+  it('reads every tag in the output, not just the last, and keeps the first 3', () => {
+    const stdout = ['one', 'two', 'three', 'four'].map((t) => `<friction>${t}</friction>`).join('\ntext between\n');
+    assert.deepEqual(friction(stdout).map((f) => f.title), ['one', 'two', 'three']);
+  });
+
+  it('drops tags with an empty title, before counting to 3', () => {
+    const stdout = '<friction>  \n </friction><friction></friction><friction>a</friction><friction>b</friction><friction>c</friction><friction>d</friction>';
+    assert.deepEqual(friction(stdout).map((f) => f.title), ['a', 'b', 'c']);
+  });
+
+  it('drops a tag that never closes, and a tag opened inside another', () => {
+    assert.deepEqual(friction('<friction>never closed\nand more text'), []);
+    assert.deepEqual(friction('<friction>outer <friction>inner</friction>').map((f) => f.title), ['inner']);
+  });
+
+  it('bounds the title to 200 characters and the body to 2000', () => {
+    const [found] = friction(`<friction>${'t'.repeat(300)}\n${'b'.repeat(3000)}</friction>`);
+    assert.deepEqual([found.title.length, found.body.length], [200, 2000]);
+  });
+
+  it('reads ref as the id of an open Friction, and leaves it off a tag without one', () => {
+    const stdout = '<friction ref="ysz-12">\nphpunit exited 127 again\nskipped it\n</friction><friction>new one</friction>';
+    assert.deepEqual(friction(stdout), [
+      { title: 'phpunit exited 127 again', body: 'skipped it', ref: 'ysz-12' },
+      { title: 'new one', body: '' },
+    ]);
+  });
+
+  it('counts references towards the cap of 3', () => {
+    const stdout = ['<friction ref="ysz-1">a</friction>', '<friction>b</friction>', '<friction ref="ysz-2">c</friction>', '<friction ref="ysz-3">d</friction>', '<friction>e</friction>'].join('\n');
+    assert.deepEqual(friction(stdout).map((f) => [f.title, f.ref]), [['a', 'ysz-1'], ['b', undefined], ['c', 'ysz-2']]);
+  });
+
+  it('drops a reference with no text, and a tag opened inside a reference', () => {
+    assert.deepEqual(friction('<friction ref="ysz-1">  </friction>'), []);
+    assert.deepEqual(friction('<friction ref="ysz-1">outer <friction>inner</friction>').map((f) => f.title), ['inner']);
+  });
+
+  it('is reported on needs-info and stopped as well as complete', () => {
+    const tag = '<friction>check hint is wrong</friction>';
+    const expected = [{ title: 'check hint is wrong', body: '' }];
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.friction, expected);
+    assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.friction, expected);
+    assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: tag }).reports.friction, expected);
+  });
+});
+
+describe('the <follow-up> reports', () => {
+  const followUps = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.followUps;
+
+  it('takes the title from the first non-empty line and the rest as the body', () => {
+    assert.deepEqual(followUps('<follow-up>\n\n  Drop the old export \nNothing imports it.\nIt can go.\n</follow-up>'), [
+      { title: 'Drop the old export', body: 'Nothing imports it.\nIt can go.' },
+    ]);
+    assert.deepEqual(followUps('<follow-up>Title only</follow-up>'), [{ title: 'Title only', body: '' }]);
+  });
+
+  it('reads every tag of the message and keeps the first 3', () => {
+    const stdout = ['one', 'two', 'three', 'four'].map((t) => `<follow-up>${t}</follow-up>`).join('\ntext between\n');
+    assert.deepEqual(followUps(stdout).map((f) => f.title), ['one', 'two', 'three']);
+  });
+
+  it('drops empty titles before counting, and a tag that is never closed or opened inside another', () => {
+    const stdout = '<follow-up>  \n </follow-up><follow-up></follow-up><follow-up>a</follow-up><follow-up>b</follow-up><follow-up>c</follow-up><follow-up>d</follow-up>';
+    assert.deepEqual(followUps(stdout).map((f) => f.title), ['a', 'b', 'c']);
+    assert.deepEqual(followUps('<follow-up>never closed\nand more text'), []);
+    assert.deepEqual(followUps('<follow-up>outer <follow-up>inner</follow-up>').map((f) => f.title), ['inner']);
+  });
+
+  it('bounds the title to 200 characters and the body to 2000', () => {
+    const [found] = followUps(`<follow-up>${'t'.repeat(300)}\n${'b'.repeat(3000)}</follow-up>`);
+    assert.deepEqual([found.title.length, found.body.length], [200, 2000]);
+  });
+
+  it('counts apart from Friction, and is reported on needs-info and stopped as well as complete', () => {
+    const tag = '<follow-up>drop it</follow-up>';
+    const expected = [{ title: 'drop it', body: '' }];
+    const frictions = '<friction>a</friction><friction>b</friction><friction>c</friction>';
+    assert.deepEqual(agentResult({ completionSignal: COMPLETE, stdout: frictions + tag }).reports.followUps, expected);
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${tag}<question>q?</question>${NEEDS_INFO}` }).reports.followUps, expected);
+    assert.deepEqual(agentResult({ stdout: `blocked ${tag}` }).reports.followUps, expected);
+  });
+});
+
+describe('the <fixed-follow-up> marks', () => {
+  const fixed = (stdout: string) => agentResult({ completionSignal: COMPLETE, stdout }).reports.fixedFollowUps;
+
+  it('reads the ref of every self-closing mark, and nothing from other tags', () => {
+    assert.deepEqual(fixed('done <fixed-follow-up ref="F1"/> and <fixed-follow-up ref="F3" />\n<fixed-follow-up   ref="F2"/>'), ['F1', 'F3', 'F2']);
+    assert.deepEqual(fixed('<fixed-follow-up/><fixed-follow-up ref="F1">'), []);
+    assert.deepEqual(fixed('<follow-up>F1</follow-up><friction ref="F1">x</friction>'), []);
+  });
+
+  it('is reported on needs-info and stopped as well as complete', () => {
+    const mark = '<fixed-follow-up ref="F2"/>';
+    assert.deepEqual(agentResult({ completionSignal: NEEDS_INFO, stdout: `${mark}<question>q?</question>${NEEDS_INFO}` }).reports.fixedFollowUps, ['F2']);
+    assert.deepEqual(agentResult({ stdout: `blocked ${mark}` }).reports.fixedFollowUps, ['F2']);
+  });
+});
+
+it('has the review prompt point at implementReports in the Ticket file and ask for <fixed-follow-up> marks, and not the implement prompt', () => {
+  const prompt = (role: string) => readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+  assert.match(prompt('review'), /implementReports/);
+  assert.match(prompt('review'), /<fixed-follow-up ref="F1"\/>/);
+  assert.doesNotMatch(prompt('implement'), /fixed-follow-up/);
 });
 
 /** teeCommand on a fake sandbox handle: its exec streams one stdout line, then fails with stderr, as a broken pnpm install does. */

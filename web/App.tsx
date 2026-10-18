@@ -207,6 +207,37 @@ function Usage({ usage, brief }: { usage: RunRow['usage']; brief?: boolean }) {
   );
 }
 
+/** A Run's Follow-ups and Friction as one chip each, shown only when the kind has some; opening a chip lists each title with its Ticket id. */
+function Reports({ reports }: { reports: RunRow['reports'] }) {
+  const t = useT();
+  if (!reports) return null;
+  const kinds = [
+    { name: t.followUps, items: reports.followUps.map((f) => ({ ...f, seenAgain: false })) },
+    { name: t.friction, items: reports.friction },
+  ].filter((k) => k.items.length);
+  if (!kinds.length) return null;
+  return (
+    <div className="reports">
+      {kinds.map((k) => (
+        <details key={k.name} className="report">
+          <summary className="tag">
+            {k.name} {k.items.length}
+          </summary>
+          <ul>
+            {/* By position: a Friction seen again in the same Run repeats its id. */}
+            {k.items.map((i, n) => (
+              <li key={n}>
+                <code>{i.id}</code> {i.title}
+                {i.seenAgain && <span className="mute"> · {t.seenAgain}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 /** A log part's name (`attempt2-review`, `host`) as its stage on the stage bar, with its Attempt once there are two. */
 const partLabel = (name: string, attempts: boolean) => {
   const m = /^attempt(\d+)-(implement|review)$/.exec(name);
@@ -601,6 +632,7 @@ export function App() {
           {r.title}
         </div>
         <Usage usage={r.usage} brief={density === 'compact'} />
+        <Reports reports={r.reports} />
         {r.note && <div className="note">{r.note}</div>}
       </div>
       <div className="when">
@@ -805,6 +837,7 @@ export function App() {
                         {t.started(time(r.startedAt, t))} · <span className="elapsed">{span(now - r.startedAt, t)}</span>
                       </div>
                       <Usage usage={r.usage} />
+                      <Reports reports={r.reports} />
                       {r.state === 'needs-attention' ? (
                         <div className="note">{r.note}</div>
                       ) : (

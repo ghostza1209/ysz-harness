@@ -42,6 +42,14 @@ export interface RunRow {
   usage: Record<string, AgentUsage>;
   /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
   prClosedAt: number | null;
+  /** What the Run's agents reported and ysz recorded as Tickets; null when nothing was. Not a live view of bd. */
+  reports: Reports | null;
+}
+
+/** Follow-ups go to the Project's queue, Friction to ysz's own; `seenAgain` marks a Friction that only got a comment. */
+export interface Reports {
+  followUps: { id: string; title: string }[];
+  friction: { id: string; title: string; seenAgain: boolean }[];
 }
 
 type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt' | 'prClosedAt'>>;
@@ -77,6 +85,8 @@ export interface Store {
   getRun(id: number): RunRow | undefined;
   /** Record one agent's usage so far, under its log part name. */
   setUsage(id: number, part: string, usage: AgentUsage): void;
+  /** Replace what the Run reported. */
+  setReports(id: number, reports: Reports): void;
   deleteRun(id: number): void;
   /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
   setHostJob(id: number, job: string): void;
@@ -133,6 +143,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 8) {
     db.exec('ALTER TABLE runs ADD COLUMN pr_closed_at INTEGER; PRAGMA user_version = 8');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 9) {
+    db.exec('ALTER TABLE runs ADD COLUMN reports TEXT; PRAGMA user_version = 9');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
@@ -169,6 +182,7 @@ export function openStore(path: string): Store {
     model: r.model as string | null,
     usage: JSON.parse((r.usage as string | null) ?? '{}'),
     prClosedAt: r.pr_closed_at as number | null,
+    reports: r.reports ? JSON.parse(r.reports as string) : null,
   });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),
@@ -190,6 +204,7 @@ export function openStore(path: string): Store {
       return row && toRow(row);
     },
     setUsage: (id, part, usage) => void setUsage.run(`$."${part}"`, JSON.stringify(usage), id),
+    setReports: (id, reports) => void db.prepare('UPDATE runs SET reports = ? WHERE id = ?').run(JSON.stringify(reports), id),
     deleteRun: (id) => void db.prepare('DELETE FROM runs WHERE id = ?').run(id),
     setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),
     hostJob: (id) => (db.prepare('SELECT host_job FROM runs WHERE id = ?').get(id)?.host_job as string | null | undefined) ?? null,
