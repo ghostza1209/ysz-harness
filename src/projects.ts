@@ -83,13 +83,17 @@ export const projects: readonly Project[] = [
     // Prisma's client is left to the hint: generating it takes 25s, and only backend changes need it.
     installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX} && pnpm -F @repo/shared build`,
     // Not `test -- --changed`: it sees only uncommitted files, so it finds nothing once implement has committed.
+    // Backend eslint heap: measured 2026-10-18 on booking.service.ts (12k lines) in ysz-harness/app, node's default
+    // 4144MiB heap runs out at 68s; 8192MiB passes in 64s at a 5.2GiB container peak.
     checkHint:
       'Run each check from the directory of the package you changed, with paths relative to it: ' +
       '`pnpm check-types`, `pnpm exec eslint <changed files>`, then the tests related to those files: ' +
       '`pnpm exec vitest related --run <changed files>`, or in apps/mobile-internal, which uses jest, ' +
       '`pnpm exec jest --findRelatedTests --passWithNoTests <changed files>`. ' +
-      'In apps/backend, run `pnpm exec prisma generate` first and add `--config vitest.unit.config.ts`; ' +
-      'its integration tests need a database, which this sandbox lacks, so CI covers them. ' +
+      'In apps/backend, run `pnpm exec prisma generate` first, run eslint as ' +
+      '`NODE_OPTIONS=--max-old-space-size=8192 pnpm exec eslint <changed files>` like the backend `lint` script, ' +
+      'and add `--config vitest.unit.config.ts` to vitest; ' +
+      'the backend integration tests need a database, which this sandbox lacks, so CI covers them. ' +
       'Apps import packages/shared from its build: after changing it, run `pnpm build` there before checking them.',
   },
 ];
