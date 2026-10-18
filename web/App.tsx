@@ -224,8 +224,9 @@ function Reports({ reports }: { reports: RunRow['reports'] }) {
             {k.name} {k.items.length}
           </summary>
           <ul>
-            {k.items.map((i) => (
-              <li key={i.id}>
+            {/* By position: a Friction seen again in the same Run repeats its id. */}
+            {k.items.map((i, n) => (
+              <li key={n}>
                 <code>{i.id}</code> {i.title}
                 {i.seenAgain && <span className="mute"> · {t.seenAgain}</span>}
               </li>

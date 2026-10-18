@@ -702,6 +702,12 @@ button.link {
   display: inline;
 }
 
+/* An open report chip's list has no room on one line: stack the row as comfortable does. */
+.table.compact .what:has(.report[open]) {
+  display: grid;
+  white-space: normal;
+}
+
 .table.compact .model,
 .table.compact .note {
   display: none;
