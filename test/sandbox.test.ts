@@ -19,6 +19,14 @@ it('has neither agent prompt ask for a Follow-ups: heading in commit messages, a
   }
 });
 
+it('has both agent prompts ask a <friction> report, new or seen again, for the command and the output it printed', () => {
+  for (const role of ['implement', 'review']) {
+    const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');
+    assert.match(prompt, /<friction>\n[^\n]*\n[^\n]*command[^\n]*output[^\n]*\n/, role);
+    assert.match(prompt, /<friction ref="the-id">\n(?:[^\n]*\n)?[^\n]*command[^\n]*output[^\n]*\n/, role);
+  }
+});
+
 it('keeps the agent prompts free of !`…`, which sandcastle runs as a shell command', () => {
   for (const role of ['implement', 'review']) {
     const prompt = readFileSync(join(import.meta.dirname, `../prompts/${role}.md`), 'utf8');

@@ -22,13 +22,17 @@ Report each one in its own tag. The first non-empty line is the title; the rest 
 
 <friction>
 Short title
-What happened, and what you skipped, guessed or worked around.
+The command you ran, and the output it printed, quoted.
+What you skipped, guessed or worked around.
 </friction>
+
+Name the exact command and quote its output as it printed it, untranslated: the lines that show the failure, not the whole log. Report only a command you ran yourself in this Run, never one you only expect to fail: when you suspect a tool, run it and quote what it prints. When an instruction or check hint got in your way, quote it in place of a command.
 
 `{{TICKET_JSON}}` lists the open Friction of this Project under `openFriction`, each with an id and a title. When what got in your way is one of them, do not report it as new: refer to it by id, and say what happened this time.
 
 <friction ref="the-id">
-What happened this time, and what you skipped, guessed or worked around.
+What happened this time: the command you ran, and the output it printed, quoted.
+What you skipped, guessed or worked around.
 </friction>
 
 A reference counts towards the same limit of 3.
