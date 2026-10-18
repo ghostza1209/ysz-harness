@@ -2,7 +2,7 @@ import type { BeadsGateway, Ticket } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, RunRow, Store } from './store';
+import type { AgentUsage, BacklogPoint, RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -38,6 +38,8 @@ export interface Orchestrator {
   whenIdle(): Promise<void>;
   /** Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived ones (newest first). */
   runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
+  /** What the Stats page graphs: every Run, archived ones too, and every change of each Project's Backlog and Ready counts. */
+  stats(): { runs: RunRow[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
   slots(): { used: number; total: number };
@@ -572,6 +574,10 @@ export function createOrchestrator(deps: {
           snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
         }
       });
+    },
+
+    stats() {
+      return { runs: store.allRuns(), backlog: store.backlogHistory() };
     },
 
     readyQueue,

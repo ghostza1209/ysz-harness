@@ -41,9 +41,21 @@ _Avoid_: code review, review (alone).
 **Dashboard**: The web page where the human watches and steers ysz: Runs, Ready Tickets, Run logs, pausing Projects. Only the human may use it, never an agent.
 _Avoid_: UI, web app.
 
+**Stats**: The Dashboard's page of graphs about past Runs, from archived ones too, and how each Project's Backlog and Ready Tickets grew and shrank over time.
+_Avoid_: statistics, analytics, report.
+
 **In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
 **Merged**: A Run's end once the human merges its pull request. The Ticket is then closed.
 
 **PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again.
 _Avoid_: closed, rejected.
+
+**Review wait**: How long a Run spends In review before it is Merged or PR closed: the human's time, never the Review agent's.
+_Avoid_: review time, PR age.
+
+**Merge rate**: The share of Runs left to finish that ended Merged, against those that ended PR closed or failed (a ysz restart cutting a Run short counts as failed). Killed Runs and Runs still In review are left out.
+_Avoid_: success rate.
+
+**First-Attempt pass**: A Run that got its pull request from its first Attempt alone.
+_Avoid_: first-try.

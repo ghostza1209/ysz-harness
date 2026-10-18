@@ -19,6 +19,7 @@ const orchestrator = {
   readyQueue: () => [],
   runs: (limit?: number) => (runLimits.push(limit), { live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
+  stats: () => ({ runs: [{ id: 3 }], backlog: [{ project: 'a', at: 1, backlog: 2, ready: 1 }] }),
   kill: async (id: number) => {
     if (id === 13) throw new Error('docker rm failed');
     actions.push(`kill ${id}`);
@@ -104,6 +105,7 @@ it('refuses every API route without the Dashboard cookie, as a sandbox sends it,
   actions.length = 0;
   const forged = { origin: `http://localhost:${port}`, cookie: '' };
   assert.equal((await send('/api/state', forged)).status, 401);
+  assert.equal((await send('/api/stats', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log/stream', forged)).status, 401);
   assert.equal((await send('/api/runs/7/kill', forged, 'POST')).status, 401);
@@ -116,6 +118,11 @@ it('asks for the ?limit Runs the page wants, within 1..500, else the default', a
   runLimits.length = 0;
   for (const q of ['', '?limit=120', '?limit=abc', '?limit=0', '?limit=-1', '?limit=99999']) assert.equal((await get(`/api/state${q}`)).status, 200);
   assert.deepEqual(runLimits, [undefined, 120, undefined, undefined, undefined, 500]);
+});
+
+it("serves every Run and the Backlog counts at /api/stats", async () => {
+  const res = await get('/api/stats');
+  assert.deepEqual([res.status, res.headers['content-type'], JSON.parse(res.body)], [200, 'application/json', { runs: [{ id: 3 }], backlog: [{ project: 'a', at: 1, backlog: 2, ready: 1 }] }]);
 });
 
 it('will not start without a token, which would let every request through', () => {

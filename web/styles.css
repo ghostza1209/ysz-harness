@@ -2008,3 +2008,52 @@ button {
     transition: none !important;
   }
 }
+
+/* Stats */
+
+a.chip {
+  text-decoration: none;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.card.chart h3,
+.card.rate h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.card.chart p,
+.card.rate p {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.rates {
+  display: grid;
+  gap: 16px;
+}
+
+.card.rate .num {
+  font-size: 40px;
+  font-weight: 650;
+  line-height: 1.1;
+}
+
+.chart-tip {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .stats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

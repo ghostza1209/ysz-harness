@@ -72,6 +72,8 @@ export interface Store {
   history(limit: number): RunRow[];
   /** Archived Runs, newest first. */
   archived(limit: number): RunRow[];
+  /** Every Run, live and archived ones too, oldest first. */
+  allRuns(): RunRow[];
   getRun(id: number): RunRow | undefined;
   /** Record one agent's usage so far, under its log part name. */
   setUsage(id: number, part: string, usage: AgentUsage): void;
@@ -142,6 +144,7 @@ export function openStore(path: string): Store {
   const shelved = db.prepare('SELECT * FROM runs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?');
   const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
+  const every = db.prepare('SELECT * FROM runs ORDER BY id');
   const setUsage = db.prepare("UPDATE runs SET usage = json_set(coalesce(usage, '{}'), ?, json(?)) WHERE id = ?");
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
@@ -181,6 +184,7 @@ export function openStore(path: string): Store {
     inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
     archived: (limit) => shelved.all(limit).map(toRow),
+    allRuns: () => every.all().map(toRow),
     getRun: (id) => {
       const row = byId.get(id);
       return row && toRow(row);

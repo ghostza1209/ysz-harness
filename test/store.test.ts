@@ -58,6 +58,15 @@ it('lists archived Runs apart from the history, and deletes a Run', () => {
   assert.equal(store.getRun(kept)?.ticketId, 'kept');
 });
 
+it('lists every Run for the Stats page, live and archived ones too, oldest first', () => {
+  const store = openStore(':memory:');
+  const run = (ticketId: string, state: Parameters<typeof store.insertRun>[0]['state']) => store.insertRun({ project: 'a', ticketId, title: 't', state, startedAt: 1 });
+  run('ended', 'merged');
+  store.updateRun(run('shelved', 'merged'), { archivedAt: 5 });
+  run('live', 'agent');
+  assert.deepEqual(store.allRuns().map((r) => r.ticketId), ['ended', 'shelved', 'live']);
+});
+
 it('keeps a Run\'s host job across a reopen, and has none until one is saved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'store-'));
   try {

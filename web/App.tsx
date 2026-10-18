@@ -1,9 +1,10 @@
-import { Children, createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
 import { muted, openedPrs, play, setMuted, stageCue } from './sound';
+import type { Range } from './stats';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
 
@@ -17,6 +18,9 @@ export interface State {
 const REFRESH_MS = 5_000;
 /** History rows shown at first and added by each Show more; each also fetches this many more past the first 50. */
 const PAGE = 20;
+
+/** Its own chunk, so the overview never loads the chart library. */
+const Stats = lazy(() => import('./StatsPage'));
 
 const T = createContext<Dict>(en);
 const useT = () => useContext(T);
@@ -429,6 +433,8 @@ export function App() {
   const [lang, setLang] = useState(savedLang);
   const [group, setGroup] = useState<GroupBy>(() => saved('historyGroup', ['none', 'epic', 'day'] as const));
   const [density, setDensity] = useState(() => saved('historyDensity', ['comfortable', 'compact'] as const));
+  const [range, setRange] = useState<Range>(() => saved('statsRange', ['30', '7', 'all'] as const));
+  const [hash, setHash] = useState(location.hash);
   // History rows shown ungrouped; Show more raises it and the Runs fetched alike.
   const [visible, setVisible] = useState(PAGE);
   // A ref, since the poll's `load` is the first render's.
@@ -470,8 +476,15 @@ export function App() {
     try {
       localStorage.setItem('historyGroup', group);
       localStorage.setItem('historyDensity', density);
+      localStorage.setItem('statsRange', range);
     } catch {}
-  }, [group, density]);
+  }, [group, density, range]);
+
+  useEffect(() => {
+    const changed = () => setHash(location.hash);
+    addEventListener('hashchange', changed);
+    return () => removeEventListener('hashchange', changed);
+  }, []);
 
   // Starts once the sample state has rendered, so every step's element exists.
   useEffect(() => {
@@ -659,6 +672,8 @@ export function App() {
     </div>
   );
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
+  // The tour's steps are on the overview.
+  const onStats = hash === '#stats' && !demo;
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
     { key: 'ready', n: view.ready.length, label: 'Ready' },
@@ -682,6 +697,14 @@ export function App() {
             {slots.used}/{slots.total}
           </b>
         </div>
+        <nav className="chips">
+          <a className={`chip ${onStats ? '' : 'on'}`} href="#" aria-current={onStats ? undefined : 'page'}>
+            {t.overview}
+          </a>
+          <a className={`chip ${onStats ? 'on' : ''}`} href="#stats" aria-current={onStats ? 'page' : undefined}>
+            {t.stats}
+          </a>
+        </nav>
         <span className="grow" />
         <div className="prefs" data-tour="prefs">
           <button className="ghost theme" onClick={() => setLang(lang === 'en' ? 'th' : 'en')} aria-label={t.switchLangLabel} title={t.switchLangLabel}>
@@ -747,7 +770,11 @@ export function App() {
       )}
 
       <div className="page">
-        {!view ? (
+        {onStats ? (
+          <Suspense fallback={<div className="skeleton" />}>
+            <Stats t={t} projects={view?.projects.map((p) => p.name) ?? []} project={project} setProject={setProject} range={range} setRange={setRange} />
+          </Suspense>
+        ) : !view ? (
           <div className="skeleton-grid" aria-busy>
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="skeleton" />
