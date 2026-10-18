@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y \
 
 # pnpm comes from corepack, which installs the version the repo's packageManager field pins (pnpm 12.x for PopDeal).
 RUN corepack enable
+# Review's first pnpm call downloads pnpm again (implement's corepack cache died with its container). Without this,
+# corepack's "! Corepack is about to download" notice is all a passing `tsc --noEmit` prints, and agents read it as a stall.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
 # Rename the base image's "node" user (UID 1000) to "agent": sandcastle expects that user.
 RUN usermod -d /home/agent -m -l agent node

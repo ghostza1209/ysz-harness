@@ -79,9 +79,17 @@ export const projects: readonly Project[] = [
     baseBranch: 'develop',
     image: 'ysz-harness/app',
     copyToWorktree: ['.env', 'apps/backend/.env', 'apps/web/.env', 'apps/web-andalay/.env'],
-    installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX}`,
+    // Apps import @repo/shared from its gitignored dist/ (2s to build). Review reuses the clone, dist/ included.
+    // Prisma's client is left to the hint: generating it takes 25s, and only backend changes need it.
+    installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX} && pnpm -F @repo/shared build`,
+    // Not `test -- --changed`: it sees only uncommitted files, so it finds nothing once implement has committed.
     checkHint:
-      'Run `pnpm run check-types`, then the unit tests of the packages you changed (`pnpm -F <package> test -- --changed`). ' +
-      'Backend tests that need a database cannot run here; CI covers them.',
+      'Run each check from the directory of the package you changed, with paths relative to it: ' +
+      '`pnpm check-types`, `pnpm exec eslint <changed files>`, then the tests related to those files: ' +
+      '`pnpm exec vitest related --run <changed files>`, or in apps/mobile-internal, which uses jest, ' +
+      '`pnpm exec jest --findRelatedTests --passWithNoTests <changed files>`. ' +
+      'In apps/backend, run `pnpm exec prisma generate` first and add `--config vitest.unit.config.ts`; ' +
+      'its integration tests need a database, which this sandbox lacks, so CI covers them. ' +
+      'Apps import packages/shared from its build: after changing it, run `pnpm build` there before checking them.',
   },
 ];
