@@ -26,6 +26,8 @@ export interface RunRow {
   /** Attempts started so far: 0 until the agent starts. */
   attempt: number;
   prUrl: string | null;
+  /** The branch the PR targets when it is not the Project's baseBranch: an epic branch or a stacked-on blocker's. Null otherwise, and for Runs from before it was recorded. */
+  prBase: string | null;
   /** Why a Run failed. */
   note: string | null;
   startedAt: number;
@@ -38,13 +40,23 @@ export interface RunRow {
   model: string | null;
   /** Each agent's usage by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
   usage: Record<string, AgentUsage>;
+  /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
+  prClosedAt: number | null;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt' | 'prClosedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
 };
+
+/** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
+export interface BacklogPoint {
+  project: string;
+  at: number;
+  backlog: number;
+  ready: number;
+}
 
 export interface Store {
   /** Returns the new Run's id. */
@@ -60,6 +72,8 @@ export interface Store {
   history(limit: number): RunRow[];
   /** Archived Runs, newest first. */
   archived(limit: number): RunRow[];
+  /** Every Run, live and archived ones too, oldest first. */
+  allRuns(): RunRow[];
   getRun(id: number): RunRow | undefined;
   /** Record one agent's usage so far, under its log part name. */
   setUsage(id: number, part: string, usage: AgentUsage): void;
@@ -72,6 +86,10 @@ export interface Store {
   /** Pause or resume a Project's picking. Survives a restart. */
   setPaused(project: string, paused: boolean): void;
   pausedProjects(): string[];
+  /** Record a Project's counts from a poll, unless they equal the last ones recorded for it. */
+  recordBacklog(project: string, at: number, counts: { backlog: number; ready: number }): void;
+  /** Every recorded change of every Project's counts, oldest first. */
+  backlogHistory(): BacklogPoint[];
 }
 
 /** `:memory:` or a file path; the parent directory is created. */
@@ -109,7 +127,15 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 6) {
     db.exec('ALTER TABLE runs ADD COLUMN usage TEXT; PRAGMA user_version = 6');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 7) {
+    db.exec('ALTER TABLE runs ADD COLUMN pr_base TEXT; PRAGMA user_version = 7');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 8) {
+    db.exec('ALTER TABLE runs ADD COLUMN pr_closed_at INTEGER; PRAGMA user_version = 8');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
+  db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
   const inStates = (states: string[]) => `state IN (${states.map(() => '?').join(',')})`;
   const insert = db.prepare('INSERT INTO runs (project, ticket_id, title, state, started_at, model) VALUES (?, ?, ?, ?, ?, ?)');
   const slotted = db.prepare(`SELECT * FROM runs WHERE ${inStates(SLOT_STATES)} ORDER BY id`);
@@ -118,10 +144,14 @@ export function openStore(path: string): Store {
   const shelved = db.prepare('SELECT * FROM runs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?');
   const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
+  const every = db.prepare('SELECT * FROM runs ORDER BY id');
   const setUsage = db.prepare("UPDATE runs SET usage = json_set(coalesce(usage, '{}'), ?, json(?)) WHERE id = ?");
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
   const paused = db.prepare('SELECT project FROM paused_projects');
+  const lastCounts = db.prepare('SELECT backlog, ready FROM backlog WHERE project = ? ORDER BY at DESC LIMIT 1');
+  const addCounts = db.prepare('INSERT INTO backlog (project, at, backlog, ready) VALUES (?, ?, ?, ?)');
+  const counts = db.prepare('SELECT project, at, backlog, ready FROM backlog ORDER BY at, rowid');
   const toRow = (r: Record<string, unknown>): RunRow => ({
     id: r.id as number,
     project: r.project as string,
@@ -130,6 +160,7 @@ export function openStore(path: string): Store {
     state: r.state as RunState,
     attempt: r.attempt as number,
     prUrl: r.pr_url as string | null,
+    prBase: r.pr_base as string | null,
     note: r.note as string | null,
     startedAt: r.started_at as number,
     endedAt: r.ended_at as number | null,
@@ -137,6 +168,7 @@ export function openStore(path: string): Store {
     archivedAt: r.archived_at as number | null,
     model: r.model as string | null,
     usage: JSON.parse((r.usage as string | null) ?? '{}'),
+    prClosedAt: r.pr_closed_at as number | null,
   });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),
@@ -152,6 +184,7 @@ export function openStore(path: string): Store {
     inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
     archived: (limit) => shelved.all(limit).map(toRow),
+    allRuns: () => every.all().map(toRow),
     getRun: (id) => {
       const row = byId.get(id);
       return row && toRow(row);
@@ -164,5 +197,10 @@ export function openStore(path: string): Store {
       db.prepare('SELECT state FROM runs WHERE project = ? AND ticket_id = ? ORDER BY id DESC LIMIT 1').get(project, ticketId)?.state as RunState | undefined,
     setPaused: (project, on) => void (on ? pause : resume).run(project),
     pausedProjects: () => paused.all().map((row) => row.project as string),
+    recordBacklog(project, at, { backlog, ready }) {
+      const last = lastCounts.get(project);
+      if (last?.backlog !== backlog || last?.ready !== ready) addCounts.run(project, at, backlog, ready);
+    },
+    backlogHistory: () => counts.all().map((row) => ({ ...row }) as unknown as BacklogPoint),
   };
 }

@@ -22,8 +22,8 @@ it('keeps the Runs of a version-1 database and adds the clone column to them', (
     const store = openStore(path);
     const [row] = store.history(10);
     assert.deepEqual(
-      [row.ticketId, row.state, row.prUrl, row.startedAt, row.endedAt, row.cloneDir, row.archivedAt, row.model, row.usage],
-      ['tv-1', 'in-review', 'https://pr/1', 5, 9, null, null, null, {}],
+      [row.ticketId, row.state, row.prUrl, row.prBase, row.startedAt, row.endedAt, row.cloneDir, row.archivedAt, row.model, row.usage],
+      ['tv-1', 'in-review', 'https://pr/1', null, 5, 9, null, null, null, {}],
     );
     store.updateRun(row.id, { cloneDir: '/clones/x' });
     assert.equal(store.getRun(row.id)?.cloneDir, '/clones/x');
@@ -58,6 +58,15 @@ it('lists archived Runs apart from the history, and deletes a Run', () => {
   assert.equal(store.getRun(kept)?.ticketId, 'kept');
 });
 
+it('lists every Run for the Stats page, live and archived ones too, oldest first', () => {
+  const store = openStore(':memory:');
+  const run = (ticketId: string, state: Parameters<typeof store.insertRun>[0]['state']) => store.insertRun({ project: 'a', ticketId, title: 't', state, startedAt: 1 });
+  run('ended', 'merged');
+  store.updateRun(run('shelved', 'merged'), { archivedAt: 5 });
+  run('live', 'agent');
+  assert.deepEqual(store.allRuns().map((r) => r.ticketId), ['ended', 'shelved', 'live']);
+});
+
 it('keeps a Run\'s host job across a reopen, and has none until one is saved', () => {
   const dir = mkdtempSync(join(tmpdir(), 'store-'));
   try {
@@ -79,4 +88,28 @@ it('keeps each agent\'s latest usage under its log part name', () => {
   store.setUsage(id, 'attempt1-review', { context: 5, tokens: 6 });
   store.setUsage(id, 'attempt1-implement', { context: 30, tokens: 90 });
   assert.deepEqual(store.getRun(id)?.usage, { 'attempt1-implement': { context: 30, tokens: 90 }, 'attempt1-review': { context: 5, tokens: 6 } });
+});
+
+it("keeps a Project's Backlog counts only when they change from its last ones, across a reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const store = openStore(path);
+    store.recordBacklog('a', 1, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 2, { backlog: 5, ready: 2 });
+    store.recordBacklog('b', 3, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 4, { backlog: 6, ready: 2 });
+    openStore(path).recordBacklog('a', 5, { backlog: 6, ready: 2 }); // a restart compares against the stored row
+    store.recordBacklog('a', 6, { backlog: 5, ready: 2 });
+    store.recordBacklog('a', 7, { backlog: 5, ready: 3 });
+    assert.deepEqual(store.backlogHistory(), [
+      { project: 'a', at: 1, backlog: 5, ready: 2 },
+      { project: 'b', at: 3, backlog: 5, ready: 2 },
+      { project: 'a', at: 4, backlog: 6, ready: 2 },
+      { project: 'a', at: 6, backlog: 5, ready: 2 },
+      { project: 'a', at: 7, backlog: 5, ready: 3 },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

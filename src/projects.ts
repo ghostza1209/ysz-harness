@@ -5,6 +5,8 @@ export interface Project {
   name: string;
   repoPath: string;
   baseBranch: string;
+  /** ADR 0006: the children of an epic labelled `epic-branch` open their PRs onto `<prefix><epic-id>`. Default `epic/`. */
+  epicBranchPrefix?: string;
   /** Sandbox image (built by `npm run images`). A Project without one is not onboarded: its Tickets are never claimed. */
   image?: string;
   /** Host command (argv) run in the repo before each claim; a non-zero exit means infrastructure is down (e.g. a compose service) and nothing is claimed. */

@@ -1,9 +1,10 @@
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
-import { dicts, en, type Dict, type Lang } from './i18n';
+import { dicts, en, span, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
-import { muted, play, setMuted, stageCue } from './sound';
+import { muted, openedPrs, play, setMuted, stageCue } from './sound';
+import type { Range } from './stats';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
 
@@ -17,6 +18,9 @@ export interface State {
 const REFRESH_MS = 5_000;
 /** History rows shown at first and added by each Show more; each also fetches this many more past the first 50. */
 const PAGE = 20;
+
+/** Its own chunk, so the overview never loads the chart library. */
+const Stats = lazy(() => import('./StatsPage'));
 
 const T = createContext<Dict>(en);
 const useT = () => useContext(T);
@@ -299,14 +303,6 @@ function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
 
 // English keeps the browser's own clock format.
 const time = (ms: number, t: Dict) => new Date(ms).toLocaleTimeString(t === en ? [] : t.locale, { hour: '2-digit', minute: '2-digit' });
-const span = (ms: number, { units: u }: Dict) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}${u.s}`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}${u.m} ${String(s % 60).padStart(2, '0')}${u.s}`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}${u.h} ${m % 60}${u.m}` : `${Math.floor(h / 24)}${u.d} ${h % 24}${u.h}`;
-};
 const ago = (ms: number, t: Dict) => {
   const m = Math.floor(ms / 60_000);
   if (m < 1) return t.justNow;
@@ -362,6 +358,22 @@ function Copy({ text }: { text: string }) {
   );
 }
 
+/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first. */
+function More({ id, children }: { id: number; children: ReactNode }) {
+  const t = useT();
+  if (!Children.toArray(children).length) return null;
+  return (
+    <>
+      <button className="act dots" popoverTarget={`more-${id}`} aria-label={t.moreActions} title={t.moreActions} style={{ anchorName: `--more-${id}` }}>
+        ⋯
+      </button>
+      <div className="more-menu" id={`more-${id}`} popover="auto" style={{ positionAnchor: `--more-${id}` }} onClickCapture={(e) => e.currentTarget.hidePopover()}>
+        {children}
+      </div>
+    </>
+  );
+}
+
 function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
   return (
     <div className="empty">
@@ -378,7 +390,12 @@ interface Toast {
   id: number;
   text: string;
   bad: boolean;
+  /** A Run that just opened its PR: the toast links to it and stays until handled. Its text is worded at render, in the current language. */
+  pr?: { ticketId: string; url: string };
 }
+
+/** PR toasts kept on screen at once; older ones drop first. */
+const MAX_PR_TOASTS = 3;
 
 const FILTERS = {
   all: () => true,
@@ -408,6 +425,8 @@ export function App() {
   const [lang, setLang] = useState(savedLang);
   const [group, setGroup] = useState<GroupBy>(() => saved('historyGroup', ['none', 'epic', 'day'] as const));
   const [density, setDensity] = useState(() => saved('historyDensity', ['comfortable', 'compact'] as const));
+  const [range, setRange] = useState<Range>(() => saved('statsRange', ['30', '7', 'all'] as const));
+  const [hash, setHash] = useState(location.hash);
   // History rows shown ungrouped; Show more raises it and the Runs fetched alike.
   const [visible, setVisible] = useState(PAGE);
   // A ref, since the poll's `load` is the first render's.
@@ -425,6 +444,13 @@ export function App() {
         const runs = [...s.runs.live, ...s.runs.history];
         const cue = seen.current && stageCue(seen.current, runs);
         if (cue) play(cue);
+        const prs = seen.current ? openedPrs(seen.current, runs) : [];
+        if (prs.length)
+          setToasts((all) => {
+            const next = [...all, ...prs.map((r) => ({ id: Date.now() + Math.random(), text: '', bad: false, pr: { ticketId: r.ticketId, url: r.prUrl! } }))];
+            const old = next.filter((x) => x.pr).slice(0, -MAX_PR_TOASTS);
+            return next.filter((x) => !old.includes(x));
+          });
         seen.current = new Map(runs.map((r) => [r.id, r.state]));
         setState(s);
         setError(null);
@@ -442,8 +468,15 @@ export function App() {
     try {
       localStorage.setItem('historyGroup', group);
       localStorage.setItem('historyDensity', density);
+      localStorage.setItem('statsRange', range);
     } catch {}
-  }, [group, density]);
+  }, [group, density, range]);
+
+  useEffect(() => {
+    const changed = () => setHash(location.hash);
+    addEventListener('hashchange', changed);
+    return () => removeEventListener('hashchange', changed);
+  }, []);
 
   // Starts once the sample state has rendered, so every step's element exists.
   useEffect(() => {
@@ -465,10 +498,11 @@ export function App() {
     };
   }, []);
 
+  const dropToast = (id: number) => setToasts((all) => all.filter((x) => x.id !== id));
   const toast = (text: string, bad = false) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t, { id, text, bad }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 8000 : 3500);
+    setTimeout(() => dropToast(id), bad ? 8000 : 3500);
   };
 
   /** A control: POST it (marked busy until the refresh lands), toast the outcome (or why the server refused), and refresh. */
@@ -561,6 +595,7 @@ export function App() {
           <span className="tag">{r.project}</span>
           <Copy text={r.ticketId} />
           {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
+          {r.prBase && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
         </div>
         <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
           {r.title}
@@ -599,34 +634,41 @@ export function App() {
           </button>
         )}
         {retryable.has(r.id) && (
-          <button {...pending(r, 'requeue', 'small')} onClick={() => void act(r, 'requeue', t.requeued)}>
+          <button {...pending(r, 'requeue', 'act')} onClick={() => void act(r, 'requeue', t.requeued)}>
             {t.requeue}
           </button>
         )}
-        {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
-          <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
-            {t.cleanUp}
-          </button>
-        )}
-        {(r.state === 'failed' || r.state === 'interrupted' || r.state === 'killed') && (
-          <button {...pending(r, 'delete', 'small danger')} onClick={() => remove(r)}>
-            {t.delete}
-          </button>
-        )}
-        {(r.state === 'merged' || r.state === 'pr-closed') &&
-          (r.archivedAt ? (
-            <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
-              {t.unarchive}
+        <More id={r.id}>
+          {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+            <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
+              {t.cleanUp}
             </button>
-          ) : (
-            <button {...pending(r, 'archive', 'small')} onClick={() => void act(r, 'archive', t.archivedDone)}>
-              {t.archive}
+          )}
+          {(r.state === 'failed' || r.state === 'interrupted' || r.state === 'killed') && (
+            <button {...pending(r, 'delete', 'small danger')} onClick={() => remove(r)}>
+              {t.delete}
             </button>
-          ))}
+          )}
+          {(r.state === 'merged' || r.state === 'pr-closed') &&
+            (r.archivedAt ? (
+              <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
+                {t.unarchive}
+              </button>
+            ) : (
+              <button {...pending(r, 'archive', 'small')} onClick={() => void act(r, 'archive', t.archivedDone)}>
+                {t.archive}
+              </button>
+            ))}
+        </More>
       </div>
     </div>
   );
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
+  // The tour's steps are on the overview.
+  const onStats = hash === '#stats' && !demo;
+  // The same array until the Projects change, so the Stats page skips the polls' re-renders.
+  const projectList = view?.projects.map((p) => p.name).join('\n') ?? '';
+  const projectNames = useMemo(() => (projectList ? projectList.split('\n') : []), [projectList]);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
     { key: 'ready', n: view.ready.length, label: 'Ready' },
@@ -650,6 +692,14 @@ export function App() {
             {slots.used}/{slots.total}
           </b>
         </div>
+        <nav className="chips">
+          <a className={`chip ${onStats ? '' : 'on'}`} href="#" aria-current={onStats ? undefined : 'page'}>
+            {t.overview}
+          </a>
+          <a className={`chip ${onStats ? 'on' : ''}`} href="#stats" aria-current={onStats ? 'page' : undefined}>
+            {t.stats}
+          </a>
+        </nav>
         <span className="grow" />
         <div className="prefs" data-tour="prefs">
           <button className="ghost theme" onClick={() => setLang(lang === 'en' ? 'th' : 'en')} aria-label={t.switchLangLabel} title={t.switchLangLabel}>
@@ -715,7 +765,11 @@ export function App() {
       )}
 
       <div className="page">
-        {!view ? (
+        {onStats ? (
+          <Suspense fallback={<div className="skeleton" />}>
+            <Stats t={t} projects={projectNames} project={project} setProject={setProject} range={range} setRange={setRange} />
+          </Suspense>
+        ) : !view ? (
           <div className="skeleton-grid" aria-busy>
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="skeleton" />
@@ -891,8 +945,27 @@ export function App() {
       <div className="toasts" aria-live="polite">
         {toasts.map((x) => (
           <div key={x.id} className={`toast ${x.bad ? 'bad' : ''}`} role={x.bad ? 'alert' : 'status'}>
-            <span className="grow">{x.text}</span>
-            <button className="ghost small" aria-label={t.dismiss} onClick={() => setToasts((all) => all.filter((y) => y.id !== x.id))}>
+            <span className="grow">{x.pr ? t.prOpened(x.pr.ticketId) : x.text}</span>
+            {x.pr && (
+              <>
+                <a className="act" href={x.pr.url} target="_blank" rel="noreferrer" onClick={() => dropToast(x.id)}>
+                  #{prNumber(x.pr.url) ?? '?'}
+                  <span className="arrow">↗</span>
+                </a>
+                <button
+                  className="act"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(x.pr!.url).then(() => {
+                      dropToast(x.id);
+                      toast(t.copied);
+                    });
+                  }}
+                >
+                  {t.copy}
+                </button>
+              </>
+            )}
+            <button className="ghost small" aria-label={t.dismiss} onClick={() => dropToast(x.id)}>
               ✕
             </button>
           </div>

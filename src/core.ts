@@ -2,7 +2,7 @@ import type { BeadsGateway, Ticket } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, RunRow, Store } from './store';
+import type { AgentUsage, BacklogPoint, RunRow, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -20,6 +20,9 @@ export interface QueueItem {
   runNow: boolean;
 }
 
+/** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
+export type StatsRun = Omit<RunRow, 'note' | 'cloneDir'>;
+
 export interface ProjectStatus {
   name: string;
   ready: number;
@@ -30,7 +33,7 @@ export interface ProjectStatus {
 }
 
 export interface Orchestrator {
-  /** Query every Project's Beads queue in parallel. One failing Project never blocks the others. */
+  /** Query every Project's Beads queue in parallel, recording its Backlog and Ready counts when they change. One failing Project never blocks the others. */
   poll(): Promise<void>;
   /** Claim the Ready Tickets that fit the free slots and start a Run for each; resolves once they are started, not finished. */
   tick(): Promise<void>;
@@ -38,6 +41,8 @@ export interface Orchestrator {
   whenIdle(): Promise<void>;
   /** Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived ones (newest first). */
   runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
+  /** What the Stats page graphs: every Run, archived ones too, and every change of each Project's Backlog and Ready counts. */
+  stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
   slots(): { used: number; total: number };
@@ -78,7 +83,7 @@ export interface Orchestrator {
   /**
    * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
    * one closed unmerged ends it pr-closed and hands the bead back. A bead the human changed is left alone. endedAt keeps the
-   * time the Run reached in-review. Never rejects: a Run whose check failed stays in-review for the next call.
+   * time the Run reached in-review; prClosedAt gets GitHub's. Never rejects: a Run whose check failed stays in-review for the next call.
    */
   watchReviews(): Promise<string[]>;
 }
@@ -177,8 +182,9 @@ export function createOrchestrator(deps: {
     try {
       if (!job.prUrl) {
         signal.throwIfAborted();
-        job.prUrl = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
-        store.updateRun(runId, { prUrl: job.prUrl });
+        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, signal, log });
+        job.prUrl = pr.url;
+        store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
       }
       signal.throwIfAborted();
@@ -541,12 +547,12 @@ export function createOrchestrator(deps: {
           continue;
         }
         try {
-          const state = await host.prState(project, run.prUrl);
+          const { state, closedAt } = await host.prState(project, run.prUrl);
           if (state !== 'MERGED' && state !== 'CLOSED') continue;
           const merged = state === 'MERGED';
           // Bead first: if its write fails the Run stays in-review, so the next call tries again.
           const written = merged ? await beads.merged(project, run.ticketId, run.prUrl) : await beads.prClosed(project, run.ticketId, run.prUrl);
-          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed' });
+          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed', prClosedAt: closedAt });
           logRun(run.id, `PR ${merged ? 'merged' : 'closed unmerged'}: ${run.prUrl}`);
           if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
         } catch (err) {
@@ -561,14 +567,21 @@ export function createOrchestrator(deps: {
       results.forEach((result, i) => {
         const snapshot = snapshots.get(projects[i].name)!;
         if (result.status === 'fulfilled') {
-          snapshot.tickets = result.value;
+          const { tickets, backlog } = result.value;
+          snapshot.tickets = tickets;
           // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
-          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !result.value.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
+          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !tickets.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
           snapshot.error = null;
+          store.recordBacklog(projects[i].name, clock.now(), { backlog, ready: tickets.length });
         } else {
           snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
         }
       });
+    },
+
+    stats() {
+      // ponytail: every Run on each visit, ~0.4 kB each; filter by range here if the page grows slow.
+      return { runs: store.allRuns().map(({ note: _note, cloneDir: _cloneDir, ...r }) => r), backlog: store.backlogHistory() };
     },
 
     readyQueue,

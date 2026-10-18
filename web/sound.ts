@@ -5,16 +5,27 @@ export type Cue = 'click' | 'step' | 'good' | 'bad';
 const BAD: RunState[] = ['failed', 'killed', 'needs-attention', 'interrupted'];
 
 /**
- * The cue for what changed since the last poll: the worst news wins, a new Run counts as a step. An unseen Run older than
- * every seen one is not new: it came back into the list (unarchived, or moved up as newer rows were deleted or archived).
+ * The Runs that changed state since the last poll, new ones included. An unseen Run older than every seen one is not new:
+ * it came back into the list (unarchived, paged in by Show more, or moved up as newer rows were deleted or archived).
  */
-export function stageCue(prev: Map<number, RunState>, runs: RunRow[]): Cue | null {
+function changed(prev: Map<number, RunState>, runs: RunRow[]): RunRow[] {
   const newest = Math.max(...prev.keys());
-  const moved = runs.filter((r) => (prev.has(r.id) ? prev.get(r.id) !== r.state : r.id > newest)).map((r) => r.state);
+  return runs.filter((r) => (prev.has(r.id) ? prev.get(r.id) !== r.state : r.id > newest));
+}
+
+/** The cue for what changed since the last poll: the worst news wins, a new Run counts as a step. */
+export function stageCue(prev: Map<number, RunState>, runs: RunRow[]): Cue | null {
+  const moved = changed(prev, runs).map((r) => r.state);
   if (moved.some((s) => BAD.includes(s))) return 'bad';
   if (moved.includes('in-review')) return 'good';
   return moved.length ? 'step' : null;
 }
+
+/** The Runs that reached In review with a PR since the last poll, oldest first: the newest stacks last and survives a cap. */
+export const openedPrs = (prev: Map<number, RunState>, runs: RunRow[]) =>
+  changed(prev, runs)
+    .filter((r) => r.state === 'in-review' && r.prUrl)
+    .sort((a, b) => a.id - b.id);
 
 /** Notes in Hz and how long each lasts, in seconds. */
 const NOTES: Record<Cue, [number[], number]> = {

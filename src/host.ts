@@ -16,10 +16,12 @@ const execFileAsync = promisify(execFile);
 export interface Prepared {
   branch: string;
   dir: string;
-  /** The sha the clone was made at: the tip of origin/<baseBranch>, or of the stacked-on branch. */
+  /** The sha the clone was made at: the tip of origin/<baseBranch>, of the epic branch, or of the stacked-on branch. */
   base: string;
-  /** The In review blocker's branch and PR the clone starts on, which the PR then targets unless the blocker merged meanwhile. Absent: baseBranch. */
+  /** The In review blocker's branch and PR the clone starts on, which the PR then targets unless the blocker merged meanwhile. Absent: the epic branch, else baseBranch. */
   stack?: { branch: string; prUrl: string };
+  /** The labelled parent epic's branch (ADR 0006), which the clone starts on and the PR targets when there is no stack. Absent: baseBranch. */
+  epic?: string;
   /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
   key: string;
 }
@@ -29,7 +31,8 @@ export interface HostSteps {
   preflight(project: Project): Promise<void>;
   /**
    * A fresh clone on `agent/<ticket-id>` with the Ticket context in place, at the just-fetched origin/<baseBranch>,
-   * or at the In review blocker's `agent/<id>` when the context names one with its PR.
+   * at the In review blocker's `agent/<id>` when the context names one with its PR, or else at the epic branch when the
+   * parent epic is labelled `epic-branch`, which is first pushed from origin/<baseBranch> if origin lacks it.
    */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /** Bring the agent's commits on the branch into the Project repo. Returns the branch tip and how many commits it has over what it was cloned onto. */
@@ -38,7 +41,7 @@ export interface HostSteps {
    * Bring the agent's branch back into the Project repo, push it and open the PR against what it was cloned onto, then
    * link a stacked PR to its blocker's with `gh stack link` (a failure only logs). A blocker PR that merged meanwhile
    * has the agent's commits replayed onto its base instead, which the PR then targets, unstacked; one that cannot be
-   * read fails the publish. Returns the PR URL.
+   * read fails the publish. Returns the PR URL and the branch it targets.
    * `tip` publishes that commit instead of the clone's current tip; `reviewSkipped` is the reason the PR body gives for a missing review;
    * aborting `signal` kills the git, claude and gh processes in flight; `log` gets a line as each step starts.
    */
@@ -47,11 +50,11 @@ export interface HostSteps {
     ticket: { id: string; title: string },
     prepared: Prepared,
     opts?: { tip?: string; reviewSkipped?: string; signal?: AbortSignal; log?: (line: string) => void },
-  ): Promise<string>;
+  ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
-  /** The PR's state on GitHub, asked as the Project's gh account. */
-  prState(project: Project, prUrl: string): Promise<'OPEN' | 'MERGED' | 'CLOSED'>;
+  /** The PR's state on GitHub and when it merged or closed (null while open), asked as the Project's gh account. */
+  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; closedAt: number | null }>;
 }
 
 /** Under /Users, which Docker Desktop shares, and outside every repo's working tree. */
@@ -192,7 +195,13 @@ export function prTitleAndBody(output: string, key: string, ticketTitle: string)
 }
 
 /** The branch a Run's clone was made on, which its PR targets. */
-const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? project.baseBranch;
+const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? prepared.epic ?? project.baseBranch;
+
+/** ADR 0006: the branch the children of a parent epic labelled `epic-branch` share. */
+function epicBranch(project: Project, { parent }: TicketContext): string | undefined {
+  const labels = parent?.labels;
+  if (Array.isArray(labels) && labels.includes('epic-branch')) return `${project.epicBranchPrefix ?? 'epic/'}${parent!.id}`;
+}
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -209,9 +218,15 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const repo = project.repoPath;
       const blocker = context.inReviewBlocker;
       const stack = blocker?.prUrl ? { branch: `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
-      const base = stack?.branch ?? project.baseBranch;
+      const epic = epicBranch(project, context);
+      const base = stack?.branch ?? epic ?? project.baseBranch;
       const branch = `agent/${ticketId}`;
 
+      if (base === epic && !(await text('git', ['ls-remote', '--heads', 'origin', `refs/heads/${epic}`], repo))) {
+        // The epic's first child: cut its branch from the base. One Run per Project, so no other Run races this push.
+        await run('git', ['fetch', 'origin', project.baseBranch], repo);
+        await run('git', ['push', 'origin', `refs/remotes/origin/${project.baseBranch}:refs/heads/${epic}`], repo);
+      }
       await run('git', ['fetch', 'origin', base], repo);
       const sha = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);
       const url = await text('git', ['remote', 'get-url', 'origin'], repo);
@@ -220,9 +235,11 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const dir = mkdtempSync(join(clonesDir, `${project.name}-${ticketId}-`));
       const clone = join(dir, 'repo');
       try {
-        // Only origin/<base>'s history: a local clone would copy the whole object dir, stashes and local branches included.
+        // Only origin's branches, which a Ticket may port from: a local clone would copy the whole object dir, stashes and local branches included.
+        // ponytail: they are as fresh as the repo's last fetch of them; fetch them all here if a Ticket names a branch pushed since.
+        // Git writes a first fetch's refs to packed-refs, so assertSelfContained never meets a loose branch named like `TV-122(new)`.
         await run('git', ['init', '--quiet', clone], dir);
-        await run('git', ['fetch', '--quiet', '--no-tags', repo, `refs/remotes/origin/${base}`], clone, { timeout: 10 * 60_000 });
+        await run('git', ['fetch', '--quiet', '--no-tags', repo, 'refs/remotes/origin/*:refs/remotes/origin/*'], clone, { timeout: 10 * 60_000 });
         await run('git', ['remote', 'add', 'origin', url], clone);
         await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
         await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);
@@ -241,7 +258,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }) };
+      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }) };
     },
 
     async collect(project, prepared, signal) {
@@ -322,15 +339,17 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
           await text('gh', ['stack', 'link', '--base', blocker.baseRefName, stack.prUrl, prUrl], repo, { env })
             .catch((err) => step(`Could not stack it on ${stack.prUrl}, so it stays a plain PR onto ${base}: ${message(err)}`));
         }
-        return prUrl;
+        return { url: prUrl, base };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
     },
 
     async prState(project, prUrl) {
-      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state'], project.repoPath, { env: await ghEnv(project) });
-      return JSON.parse(out).state;
+      // GitHub sets closedAt on a merge too, to the merge time.
+      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,closedAt'], project.repoPath, { env: await ghEnv(project) });
+      const { state, closedAt } = JSON.parse(out);
+      return { state, closedAt: closedAt ? Date.parse(closedAt) : null };
     },
 
     async removeClone({ dir }) {

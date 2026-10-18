@@ -560,7 +560,7 @@ button.link {
 
 .tr {
   display: grid;
-  grid-template-columns: 130px minmax(0, 1fr) auto 200px;
+  grid-template-columns: 130px minmax(0, 1fr) auto 220px;
   gap: 16px;
   align-items: start;
   padding: 12px 16px;
@@ -1139,6 +1139,41 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+.act.dots {
+  --c: var(--mute);
+  padding: 0 9px;
+  font-size: 14px;
+}
+
+/* A Run's ⋯ menu: a popover under its button, flipped where the viewport has no room. */
+.more-menu {
+  position-area: bottom span-left;
+  position-try-fallbacks: flip-block, flip-inline;
+  inset: auto;
+  margin: 4px 0;
+  padding: 4px;
+  min-width: 120px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 8px 24px rgb(16 24 40 / 16%);
+}
+
+.more-menu:popover-open {
+  display: grid;
+  gap: 2px;
+}
+
+.more-menu button {
+  border: none;
+  text-align: start;
+}
+
+.more-menu button:not(:hover) {
+  background: none;
+}
+
 .empty-icon {
   font-size: 22px;
   margin-bottom: 4px;
@@ -1199,6 +1234,13 @@ input:focus-visible {
 .toast button {
   color: inherit;
   opacity: 0.7;
+}
+
+/* The toast's own ink: --ok on its inverted background fails contrast in dark mode. */
+.toast .act {
+  --c: currentColor;
+  color: inherit;
+  opacity: 1;
 }
 
 /* Ambient: a slow-drifting aurora over a faint neural grid, so the board feels alive even when idle. */
@@ -1964,5 +2006,123 @@ button {
   *::after {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Stats */
+
+a.chip {
+  text-decoration: none;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.card.chart h3,
+.card.rate h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.card.chart p,
+.card.rate p {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.rates {
+  display: grid;
+  gap: 16px;
+}
+
+.card.rate .num {
+  font-size: 40px;
+  font-weight: 650;
+  line-height: 1.1;
+}
+
+.card.chart.wide {
+  grid-column: 1 / -1;
+}
+
+.waiting {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.waiting li {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) 80px 56px;
+  align-items: center;
+  gap: 8px;
+}
+
+.waiting a {
+  white-space: nowrap;
+}
+
+.waiting .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waiting .bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--soft);
+}
+
+.waiting .bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ok);
+}
+
+.waiting li > .mute {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-tip {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .stats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A phone's topbar has no room left for the tabs: they take the next row. */
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .topbar > nav {
+    order: 1;
+  }
+
+  /* The title needs the bar's room; the age still says how long. */
+  .waiting li {
+    grid-template-columns: auto auto minmax(0, 1fr) 56px;
+  }
+
+  .waiting .bar {
+    display: none;
   }
 }
