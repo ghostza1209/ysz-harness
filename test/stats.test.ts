@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import type { RunRow } from '../src/store';
-import { agentTimes, daysOf, firstAttemptPass, mergeRate, outcomeOf, runsPerDay, tokensPerDay } from '../web/stats';
+import type { BacklogPoint, RunRow } from '../src/store';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
 
 const run = (over: Partial<RunRow>): RunRow => ({
   id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, prBase: null, note: null,
@@ -75,4 +75,51 @@ it("gives each ended Run's agent time in minutes, and none for a live Run", () =
     run({ id: 5, state: 'agent', startedAt: oct(17, 9) }),
   ]);
   assert.deepEqual(times, [{ id: 4, ticketId: 'x', at: oct(17, 9), minutes: 30, outcome: 'in-review' }]);
+});
+
+it('gives the Review wait in hours of each Run whose PR merged or closed since it was recorded', () => {
+  const waits = reviewWaits([
+    run({ id: 1, ticketId: 'm', state: 'merged', endedAt: oct(17, 9), prClosedAt: oct(17, 11) }),
+    run({ id: 2, ticketId: 'c', state: 'pr-closed', endedAt: oct(17, 9), prClosedAt: oct(18, 9) }),
+    run({ id: 3, state: 'merged', endedAt: oct(17, 9) }),
+    run({ id: 4, state: 'in-review', endedAt: oct(17, 9) }),
+  ]);
+  assert.deepEqual(waits, [
+    { id: 1, ticketId: 'm', at: oct(17, 9), hours: 2, outcome: 'merged' },
+    { id: 2, ticketId: 'c', at: oct(17, 9), hours: 24, outcome: 'pr-closed' },
+  ]);
+});
+
+it('lists the Runs In review now, longest waiting first', () => {
+  const waiting = waitingNow(
+    [
+      run({ id: 1, state: 'in-review', endedAt: oct(18, 9) }),
+      run({ id: 2, state: 'merged', endedAt: oct(16, 9) }),
+      run({ id: 3, state: 'in-review', endedAt: oct(17, 9) }),
+    ],
+    oct(18, 12),
+  );
+  assert.deepEqual(waiting.map((w) => [w.run.id, w.ms]), [[3, 27 * 3_600_000], [1, 3 * 3_600_000]]);
+});
+
+it("sums the selected Projects' Backlog and Ready counts in force at each change, from the range start to now", () => {
+  const points: BacklogPoint[] = [
+    { project: 'a', at: 1, backlog: 5, ready: 2 },
+    { project: 'b', at: 1, backlog: 3, ready: 1 },
+    { project: 'a', at: 2, backlog: 4, ready: 2 },
+    { project: 'a', at: 5, backlog: 6, ready: 2 },
+    { project: 'b', at: 7, backlog: 2, ready: 0 },
+  ];
+  assert.deepEqual(backlogOverTime(points, '', 3, 10), [
+    { at: 3, backlog: 7, ready: 3 },
+    { at: 5, backlog: 9, ready: 3 },
+    { at: 7, backlog: 8, ready: 2 },
+    { at: 10, backlog: 8, ready: 2 },
+  ]);
+  assert.deepEqual(backlogOverTime(points, 'b', 0, 10), [
+    { at: 1, backlog: 3, ready: 1 },
+    { at: 7, backlog: 2, ready: 0 },
+    { at: 10, backlog: 2, ready: 0 },
+  ]);
+  assert.deepEqual(backlogOverTime(points, 'c', 0, 10), []);
 });

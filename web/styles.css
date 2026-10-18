@@ -2044,6 +2044,52 @@ a.chip {
   line-height: 1.1;
 }
 
+.card.chart.wide {
+  grid-column: 1 / -1;
+}
+
+.waiting {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.waiting li {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) 80px 56px;
+  align-items: center;
+  gap: 8px;
+}
+
+.waiting .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waiting .bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--soft);
+}
+
+.waiting .bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ok);
+}
+
+.waiting li > .mute {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .chart-tip {
   background: var(--card);
   border: 1px solid var(--line);
@@ -2055,5 +2101,15 @@ a.chip {
 @media (max-width: 900px) {
   .stats-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A phone's topbar has no room left for the tabs: they take the next row. */
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .topbar > nav {
+    order: 1;
   }
 }

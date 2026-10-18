@@ -1,4 +1,4 @@
-import type { RunRow, RunState } from '../src/store';
+import type { BacklogPoint, RunRow, RunState } from '../src/store';
 
 export type Range = '7' | '30' | 'all';
 /** Where a Run is now, as the Stats page groups it; bottom of a stack first. */
@@ -61,3 +61,32 @@ export function tokensPerDay(runs: RunRow[], days: number[]) {
 /** How long each ended Run's agents took: from its start to In review, or to its end. */
 export const agentTimes = (runs: RunRow[]) =>
   runs.flatMap((r) => (r.endedAt === null ? [] : [{ id: r.id, ticketId: r.ticketId, at: r.startedAt, minutes: (r.endedAt - r.startedAt) / 60_000, outcome: outcomeOf(r.state) }]));
+
+/** Each Review wait recorded: from reaching In review until the PR merged or closed. */
+export const reviewWaits = (runs: RunRow[]) =>
+  runs.flatMap((r) =>
+    r.endedAt === null || r.prClosedAt === null ? [] : [{ id: r.id, ticketId: r.ticketId, at: r.endedAt, hours: (r.prClosedAt - r.endedAt) / 3_600_000, outcome: outcomeOf(r.state) }],
+  );
+
+/** The Runs In review now and how long each has waited, longest first. */
+export const waitingNow = (runs: RunRow[], now: number) =>
+  runs.flatMap((r) => (r.state === 'in-review' && r.endedAt !== null ? [{ run: r, ms: now - r.endedAt }] : [])).sort((a, b) => b.ms - a.ms);
+
+/**
+ * The Backlog and Ready counts of `project` (every Project when '') at each change, summed over Projects: a step from
+ * `from`, starting at the counts in force then, to `now`. Expects `points` oldest first.
+ */
+export function backlogOverTime(points: BacklogPoint[], project: string, from: number, now: number) {
+  const last = new Map<string, BacklogPoint>();
+  const steps: { at: number; backlog: number; ready: number }[] = [];
+  for (const p of points) {
+    if (project && p.project !== project) continue;
+    last.set(p.project, p);
+    const at = Math.max(p.at, from);
+    // One step per instant: a poll records every Project at once, and the range start gathers all before it.
+    if (steps.at(-1)?.at === at) steps.pop();
+    const counts = [...last.values()];
+    steps.push({ at, backlog: counts.reduce((n, c) => n + c.backlog, 0), ready: counts.reduce((n, c) => n + c.ready, 0) });
+  }
+  return steps.length ? [...steps, { ...steps.at(-1)!, at: now }] : steps;
+}

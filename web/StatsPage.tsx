@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis } from 'recharts';
 import type { BacklogPoint, RunRow } from '../src/store';
+import { span } from './App';
 import type { Dict } from './i18n';
-import { agentTimes, daysOf, firstAttemptPass, mergeRate, OUTCOMES, runsPerDay, tokensPerDay, type Outcome, type Range } from './stats';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, mergeRate, OUTCOMES, reviewWaits, runsPerDay, tokensPerDay, waitingNow, type Outcome, type Range } from './stats';
 
 /** The History pills' colours, so a state reads the same on both pages. Names stay English, as pills do. */
 const OUTCOME_STYLE: Record<Outcome, { name: string; color: string }> = {
@@ -19,9 +20,9 @@ const TIP = { contentStyle: { background: 'var(--card)', border: '1px solid var(
 const LEGEND = { itemSorter: null, wrapperStyle: { fontSize: 12 }, formatter: (name: string) => <span style={{ color: 'var(--ink)' }}>{name}</span> };
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
-function Panel({ title, hint, children }: { title: string; hint: string; children: ReactNode }) {
+function Panel({ title, hint, wide, children }: { title: string; hint: string; wide?: boolean; children: ReactNode }) {
   return (
-    <section className="card chart">
+    <section className={`card chart ${wide ? 'wide' : ''}`}>
       <h3>{title}</h3>
       <p className="mute">{hint}</p>
       {children}
@@ -81,6 +82,11 @@ export default function Stats(props: { t: Dict; projects: string[]; project: str
   const merge = mergeRate(runs);
   const pass = firstAttemptPass(runs);
   const times = agentTimes(runs);
+  // By when the Run reached In review, so a wait shows up once its Run has one.
+  const waits = reviewWaits(ofProject.filter((r) => r.endedAt !== null && r.endedAt >= days[0]));
+  const waiting = waitingNow(ofProject, now);
+  const backlog = backlogOverTime(data.backlog, project, days[0], now);
+  const dateTime = (ms: number) => new Date(ms).toLocaleString(t.locale, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
   return (
     <section>
@@ -140,6 +146,74 @@ export default function Stats(props: { t: Dict; projects: string[]; project: str
                 })}
               </ScatterChart>
             </ResponsiveContainer>
+          </Panel>
+          <Panel title={t.reviewWait} hint={t.reviewWaitHint}>
+            {waits.length === 0 ? (
+              <p className="mute">{t.noReviewWait}</p>
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <ScatterChart>
+                  <CartesianGrid stroke="var(--line)" />
+                  <XAxis type="number" dataKey="at" domain={[days[0], now]} scale="time" tickFormatter={dayLabel} {...AXIS} />
+                  <YAxis type="number" dataKey="hours" unit={t.units.h} width={48} {...AXIS} />
+                  <Tooltip
+                    {...TIP}
+                    content={({ active, payload }) => {
+                      const p = active && (payload?.[0]?.payload as (typeof waits)[number] | undefined);
+                      return p ? <div className="chart-tip">{p.ticketId} · {span(p.hours * 3_600_000, t)}</div> : null;
+                    }}
+                  />
+                  <Legend {...LEGEND} />
+                  {(['merged', 'pr-closed'] as const).map((o) => (
+                    <Scatter key={o} name={OUTCOME_STYLE[o].name} data={waits.filter((w) => w.outcome === o)} fill={OUTCOME_STYLE[o].color} />
+                  ))}
+                </ScatterChart>
+              </ResponsiveContainer>
+            )}
+          </Panel>
+          <Panel title={t.inReviewNow} hint={t.inReviewNowHint}>
+            {waiting.length === 0 ? (
+              <p className="mute">{t.nothingInReview}</p>
+            ) : (
+              <ol className="waiting">
+                {waiting.map(({ run, ms }) => (
+                  <li key={run.id}>
+                    <span className="tag">{run.project}</span>
+                    {run.prUrl ? (
+                      <a href={run.prUrl} target="_blank" rel="noreferrer">
+                        {run.ticketId}
+                      </a>
+                    ) : (
+                      run.ticketId
+                    )}
+                    <span className="title" title={run.title}>
+                      {run.title}
+                    </span>
+                    <span className="bar">
+                      <span style={{ width: `${(ms / waiting[0].ms) * 100}%` }} />
+                    </span>
+                    <span className="mute">{span(ms, t)}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Panel>
+          <Panel title={t.backlogOverTime} hint={t.backlogOverTimeHint} wide>
+            {backlog.length === 0 ? (
+              <p className="mute">{t.noBacklogYet}</p>
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={backlog}>
+                  <CartesianGrid vertical={false} stroke="var(--line)" />
+                  <XAxis type="number" dataKey="at" domain={[days[0], now]} scale="time" tickFormatter={dayLabel} {...AXIS} />
+                  <YAxis allowDecimals={false} width={32} {...AXIS} />
+                  <Tooltip {...TIP} cursor={{ stroke: 'var(--line)' }} labelFormatter={(at) => dateTime(Number(at))} />
+                  <Legend {...LEGEND} />
+                  <Line type="stepAfter" dataKey="backlog" name="Backlog" stroke="var(--accent)" strokeWidth={2} dot={false} />
+                  <Line type="stepAfter" dataKey="ready" name="Ready" stroke="var(--ok)" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </Panel>
         </div>
       )}

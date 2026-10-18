@@ -303,7 +303,7 @@ function LogDialog({ run, onClose }: { run: RunRow; onClose: () => void }) {
 
 // English keeps the browser's own clock format.
 const time = (ms: number, t: Dict) => new Date(ms).toLocaleTimeString(t === en ? [] : t.locale, { hour: '2-digit', minute: '2-digit' });
-const span = (ms: number, { units: u }: Dict) => {
+export const span = (ms: number, { units: u }: Dict) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}${u.s}`;
   const m = Math.floor(s / 60);
