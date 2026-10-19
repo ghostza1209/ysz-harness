@@ -941,24 +941,40 @@ export function App() {
                     ) : (
                       // Today's opens; every epic and older day starts folded.
                       <details key={g.key} className="group" open={group === 'day' && i === 0}>
-                        <summary>
-                          {group === 'epic' ? (
-                            <>
-                              <span className="tag">{g.runs[0].project}</span>
-                              <b>{epicOf(g.runs[0].ticketId)}</b>
-                            </>
-                          ) : (
-                            <b>{dayLabel(g.runs[0].endedAt ?? g.runs[0].startedAt)}</b>
-                          )}
-                          <span className="count">{g.runs.length}</span>
-                          {stateCounts(g.runs).map(([s, n]) => (
-                            <span key={s} className={`pill ${s}`}>
-                              {n} {label(s)}
+                        {group === 'epic' ? (
+                          // Laid out as a Run row, so the epic's columns line up with its Tickets'.
+                          <summary className="tr">
+                            <span className="pills">
+                              {stateCounts(g.runs).map(([s, n]) => (
+                                <span key={s} className={`pill ${s}`}>
+                                  {n} {label(s)}
+                                </span>
+                              ))}
                             </span>
-                          ))}
-                          <span className="grow" />
-                          {group === 'epic' && <time className="mute">{ago(now - (g.runs[0].endedAt ?? g.runs[0].startedAt), t)}</time>}
-                        </summary>
+                            <div className="what">
+                              <div className="row">
+                                <span className="tag">{g.runs[0].project}</span>
+                                <code>{epicOf(g.runs[0].ticketId)}</code>
+                                <span className="count">{g.runs.length}</span>
+                              </div>
+                              {/* The Spec's own title, when ysz broke it down and so has its Run. */}
+                              <div className="title">{g.runs.find((r) => r.ticketId === epicOf(r.ticketId))?.title}</div>
+                            </div>
+                            <div className="when">
+                              <time>{ago(now - (g.runs[0].endedAt ?? g.runs[0].startedAt), t)}</time>
+                            </div>
+                          </summary>
+                        ) : (
+                          <summary>
+                            <b>{dayLabel(g.runs[0].endedAt ?? g.runs[0].startedAt)}</b>
+                            <span className="count">{g.runs.length}</span>
+                            {stateCounts(g.runs).map(([s, n]) => (
+                              <span key={s} className={`pill ${s}`}>
+                                {n} {label(s)}
+                              </span>
+                            ))}
+                          </summary>
+                        )}
                         {g.runs.map(row)}
                       </details>
                     ),

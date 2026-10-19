@@ -648,14 +648,35 @@ button.link {
 }
 
 .group > summary {
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+}
+
+.group > summary:not(.tr) {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
   padding: 10px 16px;
   font-size: 13px;
-  cursor: pointer;
-  list-style: none;
+}
+
+/* An epic's summary is a Run row: its chevron sits in the gutter, off the grid. */
+.group > summary.tr::before {
+  position: absolute;
+  left: 4px;
+  top: 12px;
+}
+
+.table.compact .group > summary.tr::before {
+  top: 6px;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .group > summary::-webkit-details-marker {
