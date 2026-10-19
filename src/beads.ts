@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Project } from './projects';
 
@@ -11,6 +14,16 @@ export interface Ticket {
   priority: number;
   /** RFC 3339. */
   createdAt: string;
+  /** A Spec: its Run breaks it down into child Tickets instead of implementing it (ADR 0007). */
+  spec?: true;
+}
+
+/** One child Ticket a breakdown agent planned; `blockedBy` holds the keys of other planned Tickets. */
+export interface PlannedTicket {
+  key: string;
+  title: string;
+  body: string;
+  blockedBy: string[];
 }
 
 /**
@@ -38,12 +51,19 @@ export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no unclosed children,
    * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
+   * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, and no children at all.
    */
   listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
   /** Hand a claimed Ticket back: open and unassigned. */
   release(project: Project, id: string): Promise<void>;
+  /**
+   * Create `plan` as children of the claimed Spec in one bd write, each labelled ready-for-agent at the Spec's priority
+   * with its blocking edges, comment their ids on the Spec, then release it. Returns the new ids in plan order, or null,
+   * creating nothing, when the Spec has children by now. Rejects, writing nothing, on a plan bd refuses (a cycle).
+   */
+  breakDown(project: Project, spec: Pick<Ticket, 'id' | 'priority'>, plan: PlannedTicket[]): Promise<string[] | null>;
   /** The Run failed: comment why, then label needs-info, drop ready-for-agent and release the claim. */
   fail(project: Project, id: string, reason: string): Promise<void>;
   /** Retry a failed Run's Ticket: drop needs-info and label ready-for-agent again, so it is Ready once its blockers allow. */
@@ -147,6 +167,9 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
   const write = (project: Project, args: string[]) => bd(['-C', project.repoPath, '--actor', ORCHESTRATOR, ...args]);
   const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
     JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
+  const hasChildren = async (project: Project, id: string) => JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'children', id, '--json'])).length > 0;
+  /** Epics seen with children ("repo/id"), which never become a Spec again, so a poll asks bd only about new ones. ponytail: in memory, so a restart asks again once. */
+  const parentEpics = new Set<string>();
   const yszQueue = () => {
     if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
     return yszRepo;
@@ -177,7 +200,18 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         return blockers.length === 1 && isInReview(blockers[0]);
       });
       const issues: { id: string; title: string; priority: number; created_at: string }[] = [...JSON.parse(out), ...stacked];
-      const tickets = issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      const tickets: Ticket[] = issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      // An epic whose children all closed has none in the unclosed list, so only bd children tells it from a Spec.
+      const candidates = beads.filter(
+        (b) =>
+          b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('ready-for-agent') && !b.labels.includes('orchestrator:skip') &&
+          !parents.has(b.id) && !parentEpics.has(`${project.repoPath}/${b.id}`) &&
+          (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
+      );
+      for (const b of candidates) {
+        if (await hasChildren(project, b.id)) parentEpics.add(`${project.repoPath}/${b.id}`);
+        else tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
+      }
       return { tickets, backlog: beads.length };
     },
 
@@ -194,6 +228,38 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
 
     async release(project, id) {
       await write(project, ['update', id, '--assignee', '', '--status', 'open']);
+    },
+
+    async breakDown(project, spec, plan) {
+      let created: string[] | null = null;
+      // The human may have split the Spec by hand while its agent ran.
+      if (!(await hasChildren(project, spec.id))) {
+        const keys = new Map(plan.map((t, i) => [t.key, `t${i}`])); // bd's own keys, so an agent's key never reaches bd
+        const graph = {
+          nodes: plan.map((t) => ({ key: keys.get(t.key), title: t.title, description: t.body, parent_id: spec.id, labels: ['ready-for-agent'], priority: spec.priority })),
+          edges: plan.flatMap((t) => t.blockedBy.map((b) => ({ from_key: keys.get(t.key), to_key: keys.get(b), type: 'blocks' }))),
+        };
+        const dir = await mkdtemp(join(tmpdir(), 'ysz-plan-'));
+        let ids: Record<string, string>;
+        try {
+          await writeFile(join(dir, 'plan.json'), JSON.stringify(graph));
+          const out = await write(project, ['create', '--graph', join(dir, 'plan.json'), '--json']).catch((err) => {
+            // With --json, bd prints why it refused the plan (a cycle) on stdout, which the error's message leaves out.
+            let why = (err as Error).message;
+            try {
+              why = `bd refused the plan: ${JSON.parse((err as { stdout: string }).stdout).error}`;
+            } catch {}
+            throw new Error(why);
+          });
+          ids = JSON.parse(out).ids;
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+        created = plan.map((t) => ids[keys.get(t.key)!]);
+        await write(project, ['comment', spec.id, `Broken down into ${created.join(', ')}`]);
+      }
+      await write(project, ['update', spec.id, '--assignee', '', '--status', 'open']);
+      return created;
     },
 
     async fail(project, id, reason) {

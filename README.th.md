@@ -18,6 +18,8 @@
    Ticket ที่ epic แม่ติด label `epic-branch` จะ clone และเปิด PR เข้า `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) แทน ทำให้ `baseBranch` ได้ PR เดียวต่อ epic ดู [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
+epic ที่ติด label `ready-for-agent` และยังไม่มี child เลยเรียกว่า **Spec** Run ของ Spec ไม่มี Review agent และไม่เปิด PR: breakdown agent จะแตก Spec เป็น child Ticket แล้ว ysz สร้างไว้ใต้ epic โดยติด `ready-for-agent` ให้เลย Ticket เหล่านี้จะเข้าคิวใน poll ถัดไป ดู [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md)
+
 ## สิ่งที่ต้องมี
 
 - Node.js 22 ขึ้นไป และ npm
@@ -51,6 +53,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | --- | --- |
 | ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
 | กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
+| ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic ที่ยังไม่มี child เมื่อ Spec เขียนเสร็จแล้ว |
 | รวม PR ของ epic ไว้ใน branch เดียว | `bd update <epic-id> --add-label epic-branch` แล้วเปิด PR `epic/<epic-id>` → `baseBranch` เองเมื่อ merge child ครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseEnv, promisify } from 'node:util';
 import { claudeCode, createBindMountSandboxProvider, createWorktree } from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
+import type { PlannedTicket } from './beads';
 import { startCheckServer } from './checks';
 import type { Prepared } from './host';
 import type { Project } from './projects';
@@ -39,6 +40,8 @@ export interface SandboxRunner {
   implement(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult>;
   /** One review agent in a fresh sandbox on the same clone, after the implement agent. Throws like `implement`. */
   review(req: AgentRequest): Promise<AgentResult>;
+  /** One breakdown agent in a fresh sandbox on a clone of the Spec's base, with no install. `plan` is the child Tickets it planned, or why its output holds no usable plan. Throws like `implement`. */
+  breakDown(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult & { plan: PlannedTicket[] | string }>;
   /** Remove the Run's sandbox container now, if any is left. Throws unless it is gone afterwards: sandcastle's own teardown ignores docker errors. */
   stop(prepared: Pick<Prepared, 'dir'>): Promise<void>;
   /** Remove every leftover sandcastle container, of any Run. Throws unless none is left. */
@@ -93,6 +96,47 @@ const parseReports = (stdout: string): AgentReports => ({
   friction: parseTags(stdout, 'friction'),
   fixedFollowUps: [...stdout.matchAll(/<fixed-follow-up\s+ref="([^"]*)"\s*\/>/g)].map(([, ref]) => ref),
 });
+
+const MAX_TICKETS = 30;
+const MAX_TICKET_BODY = 8000;
+
+/** The `<ticket>`s of a breakdown agent's output, or why they make no plan to create. */
+export function planOf(stdout: string): PlannedTicket[] | string {
+  const plan = [...stdout.matchAll(/<ticket\s+key="([^"]+)"(?:\s+blocked-by="([^"]*)")?\s*>([\s\S]*?)<\/ticket>/g)].map(([, key, blockedBy = '', text]) => {
+    const [title = '', ...rest] = text.trim().split('\n');
+    return { key, title: title.trim(), body: rest.join('\n').trim(), blockedBy: blockedBy.split(',').map((k) => k.trim()).filter(Boolean) };
+  });
+  if (!plan.length) return 'it output no <ticket> tags';
+  if (plan.length > MAX_TICKETS) return `it planned ${plan.length} tickets, more than ${MAX_TICKETS}`;
+  const keys = new Set(plan.map((t) => t.key));
+  if (keys.size < plan.length) return 'it gave two tickets the same key';
+  for (const t of plan) {
+    if (!t.title || t.title.length > MAX_TITLE) return `ticket ${t.key} has no title, or one over ${MAX_TITLE} characters`;
+    if (t.body.length > MAX_TICKET_BODY) return `ticket ${t.key} has a body over ${MAX_TICKET_BODY} characters`;
+    const unknown = t.blockedBy.find((k) => !keys.has(k));
+    if (unknown) return `ticket ${t.key} is blocked by ${unknown}, which is no ticket in the plan`;
+  }
+  // bd refuses a cycle too, but finding it here lets the next Attempt hear about it.
+  const byKey = new Map(plan.map((t) => [t.key, t]));
+  const done = new Set<string>();
+  const onPath = new Set<string>();
+  const cycleAt = (key: string): string | undefined => {
+    if (onPath.has(key)) return key;
+    if (done.has(key)) return undefined;
+    onPath.add(key);
+    for (const b of byKey.get(key)!.blockedBy) {
+      const found = cycleAt(b);
+      if (found) return found;
+    }
+    onPath.delete(key);
+    done.add(key);
+  };
+  for (const t of plan) {
+    const key = cycleAt(t.key);
+    if (key) return `ticket ${key} is blocked by itself through its blockers`;
+  }
+  return plan;
+}
 
 export function agentResult({ completionSignal, stdout }: { completionSignal?: string; stdout: string }): AgentResult {
   const reports = parseReports(stdout);
@@ -165,10 +209,10 @@ export function teeCommand(handle: SandboxHandle, command: string, logPath: stri
 /** `root` is the ysz-harness checkout: it holds the central .env and prompts/; logs go to `<root>/data/logs/<runId>-attempt<n>-<role>.log`. */
 export function createSandboxRunner(root: string): SandboxRunner {
   async function runAgent(
-    role: 'implement' | 'review',
+    role: 'implement' | 'review' | 'breakdown',
     { project, runId, attempt, branch, dir, key, signal, onUsage }: AgentRequest,
     promptArgs: Record<string, string>,
-  ): Promise<AgentResult> {
+  ): Promise<{ completionSignal?: string; stdout: string }> {
     signal.throwIfAborted();
     // Read per Run, so adding the token needs no restart. It reaches the sandbox only through the agent's env.
     const token = parseEnv(readFileSync(join(root, '.env'), 'utf8')).CLAUDE_CODE_OAUTH_TOKEN;
@@ -198,7 +242,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
     });
 
     // ADR 0002: the agent's only way to run PHP checks; it ends with the agent.
-    const checks = project.checkContainer && (await startCheckServer({ ...project.checkContainer, clone: join(dir, 'repo') }));
+    const checks = project.checkContainer && role !== 'breakdown' ? await startCheckServer({ ...project.checkContainer, clone: join(dir, 'repo') }) : undefined;
     const env = { CLAUDE_CODE_OAUTH_TOKEN: token, ...(checks && { PHP_CHECK_URL: checks.url, PHP_CHECK_TOKEN: checks.token }) };
 
     const track = onUsage && usageTracker(onUsage);
@@ -220,21 +264,23 @@ export function createSandboxRunner(root: string): SandboxRunner {
           ? { sandbox: { onSandboxReady: [{ command: installCommand, timeoutMs: 600_000 }] } }
           : undefined,
       });
-      return agentResult(result);
+      return result;
     } finally {
       await checks?.close();
     }
   }
 
+  const previousAttempt = (summary?: string) =>
+    summary ? `## Previous attempt\n\nAn earlier attempt at this Ticket failed, and its work is discarded. Do not repeat its mistake:\n\n${summary}\n` : '';
+
   return {
     hasImage: (project) => imageExists(project.image!),
-    implement: ({ previousAttemptSummary, ...req }) =>
-      runAgent('implement', req, {
-        PREVIOUS_ATTEMPT: previousAttemptSummary
-          ? `## Previous attempt\n\nAn earlier attempt at this Ticket failed, and its work is discarded. Do not repeat its mistake:\n\n${previousAttemptSummary}\n`
-          : '',
-      }),
-    review: (req) => runAgent('review', req, { BASE: req.base }),
+    implement: async ({ previousAttemptSummary, ...req }) => agentResult(await runAgent('implement', req, { PREVIOUS_ATTEMPT: previousAttempt(previousAttemptSummary) })),
+    review: async (req) => agentResult(await runAgent('review', req, { BASE: req.base })),
+    breakDown: async ({ previousAttemptSummary, ...req }) => {
+      const result = await runAgent('breakdown', req, { PREVIOUS_ATTEMPT: previousAttempt(previousAttemptSummary) });
+      return { ...agentResult(result), plan: planOf(result.stdout) };
+    },
     stop: (prepared) => stopSandbox(prepared),
     removeLeftovers: () => removeLeftoverSandboxes(),
   };

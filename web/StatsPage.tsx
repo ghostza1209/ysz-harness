@@ -10,6 +10,7 @@ const OUTCOME_STYLE: Record<Outcome, { name: string; color: string }> = {
   merged: { name: 'Merged', color: 'var(--violet)' },
   'in-review': { name: 'In review', color: 'var(--ok)' },
   'pr-closed': { name: 'PR closed', color: 'var(--mute)' },
+  'broken-down': { name: 'Broken down', color: 'var(--ink)' },
   failed: { name: 'Failed', color: 'var(--bad)' },
   killed: { name: 'Killed', color: 'var(--warn)' },
   running: { name: 'Running', color: 'var(--accent)' },

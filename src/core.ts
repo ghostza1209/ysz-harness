@@ -1,4 +1,4 @@
-import type { BeadsGateway, Ticket } from './beads';
+import type { BeadsGateway, Ticket, TicketContext } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
@@ -18,6 +18,8 @@ export interface QueueItem {
   waitReason: WaitReason;
   /** The user asked to run it ahead of the queue. */
   runNow: boolean;
+  /** A Spec, which its Run breaks down into child Tickets. */
+  spec?: true;
 }
 
 /** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
@@ -78,7 +80,7 @@ export interface Orchestrator {
    * could not be removed, or if the Run was killed but its Ticket never released: recover() needs the row to keep it skipped.
    */
   deleteRun(runId: number): Promise<void>;
-  /** Archive a merged or PR-closed Run out of the history, or bring it back. */
+  /** Archive a merged, PR-closed or broken-down Run out of the history, or bring it back. */
   setArchived(runId: number, archived: boolean): void;
   /**
    * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
@@ -217,11 +219,65 @@ export function createOrchestrator(deps: {
     }
   }
 
+  /**
+   * A claimed Spec's Attempts: a breakdown agent plans its child Tickets, which bd then creates under it and hands it
+   * back. No review agent and no PR. Returns null once broken down, else the note to hand the Spec back with. No host
+   * job is saved, so after a crash recover() hands the Spec back, and once its children exist it is a Spec no more.
+   */
+  async function breakDown(runId: number, project: Project, spec: Pick<Ticket, 'id' | 'priority'>, context: TicketContext, signal: AbortSignal): Promise<string | null> {
+    let note = '';
+    for (let n = 1; n <= 2; n++) {
+      signal.throwIfAborted();
+      store.updateRun(runId, { state: 'claimed', attempt: n });
+      const prepared = await host.prepare(project, spec.id, context, signal);
+      store.updateRun(runId, { state: 'agent', cloneDir: prepared.dir });
+      let result: Awaited<ReturnType<SandboxRunner['breakDown']>> | undefined;
+      let reason: string;
+      try {
+        result = await sandbox.breakDown({ project, runId, attempt: n, signal, ...prepared, previousAttemptSummary: note || undefined, onUsage: (u) => store.setUsage(runId, `attempt${n}-breakdown`, u) });
+      } catch (err) {
+        signal.throwIfAborted();
+        reason = `the breakdown agent failed: ${message(err)}`;
+      } finally {
+        // The agent writes no code, so its clone holds nothing to inspect.
+        await host.removeClone(prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
+      }
+      signal.throwIfAborted();
+      if (result?.outcome === 'needs-info') return `The breakdown agent needs information:\n${result.question}`;
+      if (result?.outcome === 'complete' && typeof result.plan !== 'string') {
+        store.updateRun(runId, { state: 'host' });
+        const ids = await beads.breakDown(project, spec, result.plan);
+        const done = ids ? `Broken down into ${ids.join(', ')}` : 'The Spec got children by hand meanwhile, so none were created.';
+        logRun(runId, done);
+        end(runId, { state: 'broken-down', note: done });
+        return null;
+      }
+      if (result?.outcome === 'stopped') reason = `the breakdown agent stopped without signalling COMPLETE${result.tail && `: ${result.tail}`}`;
+      else if (result) reason = `the breakdown agent's plan is unusable: ${result.plan}`;
+      note += `${note && '\n'}Attempt ${n} failed: ${reason!}`;
+    }
+    return note;
+  }
+
   /** Run one claimed Ticket to its end: in-review with a PR, parked in needs-attention, or failed and handed back. Never rejects. */
-  async function execute(runId: number, project: Project, ticket: { id: string; title: string }, control: Control): Promise<void> {
+  async function execute(runId: number, project: Project, ticket: Pick<Ticket, 'id' | 'title' | 'priority' | 'spec'>, control: Control): Promise<void> {
     const { signal } = control.ctl;
+    /** End the Run failed, handing the Ticket back with `note`. */
+    async function handBack(note: string) {
+      try {
+        await beads.fail(project, ticket.id, note);
+      } catch (err) {
+        throw new Error(`${note}\nhanding the Ticket back failed: ${message(err)}`); // execute's catch releases the claim
+      }
+      end(runId, { state: 'failed', note });
+    }
     try {
       const context = await beads.showContext(project, ticket.id);
+      if (ticket.spec) {
+        const note = await breakDown(runId, project, ticket, context, signal);
+        if (note !== null) await handBack(note);
+        return;
+      }
       // A closed blocker whose PR merged into another Run's agent/<id> branch, while that Run's own PR was still In review,
       // has its code only on that branch, so the Run stacks there too. Follow Runs that merged into one that merged in turn.
       const newest = new Map(store.allRuns().filter((r) => r.project === project.name).map((r) => [r.ticketId, r]));
@@ -375,12 +431,7 @@ export function createOrchestrator(deps: {
 
       if (result.kind !== 'done') {
         if (result.kind === 'needs-info') note = `The ${result.agent} agent needs information:\n${result.question}`;
-        try {
-          await beads.fail(project, ticket.id, note);
-        } catch (err) {
-          throw new Error(`${note}\nhanding the Ticket back failed: ${message(err)}`); // the catch below releases the claim
-        }
-        end(runId, { state: 'failed', note });
+        await handBack(note);
         return;
       }
 
@@ -449,6 +500,7 @@ export function createOrchestrator(deps: {
         priority: ticket.priority,
         ageMs: now - Date.parse(ticket.createdAt),
         waitReason,
+        ...(ticket.spec && { spec: true as const }),
       };
     });
   }
@@ -632,7 +684,7 @@ export function createOrchestrator(deps: {
 
     setArchived(runId, archived) {
       const run = store.getRun(runId);
-      if (run?.state !== 'merged' && run?.state !== 'pr-closed') throw new Error(`Run ${runId} is not merged or PR closed`);
+      if (run?.state !== 'merged' && run?.state !== 'pr-closed' && run?.state !== 'broken-down') throw new Error(`Run ${runId} is not merged, PR closed or broken down`);
       store.updateRun(runId, { archivedAt: archived ? clock.now() : null });
     },
 

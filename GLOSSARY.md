@@ -22,6 +22,9 @@ _Avoid_: issues, beads list.
 
 **Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children left open, not claimed, and not opted out of ysz.
 
+**Spec**: An epic the human has marked as fit for an agent, with every blocker closed and no children yet. ysz picks it like a Ready Ticket, but its Run breaks it down into child Tickets, each Ready by construction, instead of opening a PR.
+_Avoid_: PRD, plan.
+
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.
 

@@ -20,13 +20,13 @@ export function createRunLogs(dir: string): RunLogs {
       if (err.code === 'ENOENT') return [];
       throw err;
     });
-    const re = new RegExp(`^${runId}-(?:attempt(\\d+)-(implement|review)|host)\\.log$`);
+    const re = new RegExp(`^${runId}-(?:attempt(\\d+)-(implement|review|breakdown)|host)\\.log$`);
     const found = names.flatMap((name) => {
       const m = re.exec(name);
       // The host log comes after every Attempt: the host steps that write it run once the agents are done.
       return m ? [{ path: join(dir, name), name: name.slice(`${runId}-`.length, -'.log'.length), attempt: m[1] ? Number(m[1]) : Infinity, role: m[2] ?? '' }] : [];
     });
-    // "implement" sorts before "review", which is the order the agents run in.
+    // "implement" sorts before "review", which is the order the agents run in; a Spec's Attempt has only "breakdown".
     found.sort((a, b) => a.attempt - b.attempt || a.role.localeCompare(b.role));
     return Promise.all(found.map(async (f) => ({ path: f.path, name: f.name, size: (await stat(f.path)).size })));
   }

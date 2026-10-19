@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import type { BeadsGateway, Ticket, TicketContext } from '../src/beads';
+import type { BeadsGateway, PlannedTicket, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
 import type { HostSteps } from '../src/host';
 import type { Project } from '../src/projects';
@@ -69,6 +69,9 @@ let writeTicketError: Error | undefined;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
+/** What each breakdown agent ends with; and whether the Spec has children by the time its plan is created. */
+let breakdowner: (attempt: number) => Promise<Awaited<ReturnType<SandboxRunner['breakDown']>>>;
+let specGotChildren: boolean;
 let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
 /** The branch the next publish reports its PR targets. */
@@ -102,6 +105,10 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async release(project, id) {
     if (releaseError && id === 'tv-a') throw releaseError;
     writes.push(`release ${project.name}/${id}`);
+  },
+  async breakDown(project, spec, plan) {
+    writes.push(`breakDown ${project.name}/${spec.id} P${spec.priority}: ${plan.map((t) => `${t.key}<${t.blockedBy.join(',')}>`).join(' ')}`);
+    return specGotChildren ? null : plan.map((_, i) => `${spec.id}.${i + 1}`);
   },
   async fail(project, id, reason) {
     if (failError) throw failError;
@@ -163,6 +170,8 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
 });
 
 const none: AgentResult['reports'] = { followUps: [], friction: [], fixedFollowUps: [] };
+const planned = (key: string, ...blockedBy: string[]): PlannedTicket => ({ key, title: `title of ${key}`, body: '', blockedBy });
+const spec = (id: string, priority: number): Ticket => ({ ...ticket(id, priority, '2026-01-01T00:00:00Z'), spec: true });
 const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
@@ -177,6 +186,10 @@ const fakeSandbox: SandboxRunner = {
   review(req) {
     agentCalls.push(`review attempt ${req.attempt}`);
     return reviewer(req.attempt, req.signal);
+  },
+  breakDown(req) {
+    agentCalls.push(`breakdown attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
+    return breakdowner(req.attempt);
   },
   async stop({ dir }) {
     if (stopError) throw stopError;
@@ -267,6 +280,8 @@ beforeEach(() => {
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
+  breakdowner = async () => ({ ...complete, plan: [planned('T1'), planned('T2', 'T1')] });
+  specGotChildren = false;
   publish = async () => PR_URL;
   publishBase = 'main';
   publishOpts = undefined;
@@ -691,6 +706,66 @@ describe('a happy-path Run', () => {
     await o.whenIdle();
     const [run] = o.runs().history;
     assert.deepEqual([run.startedAt, run.endedAt], [Date.parse('2026-10-08T12:00:00Z'), Date.parse('2026-10-08T12:01:30Z')]);
+  });
+});
+
+describe('a Spec', () => {
+  async function run() {
+    queues = { thaivis: [spec('ep1', 1)] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const historyOf = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.state, r.attempt, r.note]);
+
+  it('queues as a Spec', async () => {
+    queues = { thaivis: [spec('ep1', 1)] };
+    assert.deepEqual((await polled()).readyQueue().map((q) => [q.id, q.spec]), [['ep1', true]]);
+  });
+
+  it('is broken down by one breakdown agent, whose plan is created under it at its priority, with no review and no PR', async () => {
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/ep1', 'removeClone /clones/ep1-1']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'breakDown thaivis/ep1 P1: T1<> T2<T1>']);
+    assert.deepEqual(historyOf(o), [['broken-down', 1, 'Broken down into ep1.1, ep1.2']]);
+    assert.equal(o.runs().history[0].cloneDir, null);
+    assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it('creates nothing, and says so, when the Spec got children by hand while its agent ran', async () => {
+    specGotChildren = true;
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'The Spec got children by hand meanwhile, so none were created.']]);
+  });
+
+  it('tries a second Attempt, told why the first failed, then hands the Spec back with both reasons', async () => {
+    breakdowner = async (n) => {
+      if (n === 1) throw new Error('container exited 137');
+      return { ...complete, plan: 'it output no <ticket> tags' };
+    };
+    const o = await run();
+    const first = 'Attempt 1 failed: the breakdown agent failed: container exited 137';
+    const both = `${first}\nAttempt 2 failed: the breakdown agent's plan is unusable: it output no <ticket> tags`;
+    assert.deepEqual(agentCalls, ['breakdown attempt 1', `breakdown attempt 2 ${first}`]);
+    assert.deepEqual(hostSteps, ['prepare thaivis/ep1', 'removeClone /clones/ep1-1', 'prepare thaivis/ep1', 'removeClone /clones/ep1-2']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', `fail thaivis/ep1: ${both}`]);
+    assert.deepEqual(historyOf(o), [['failed', 2, both]]);
+  });
+
+  it('counts an agent that stopped without a signal as a failed Attempt', async () => {
+    breakdowner = async (n) => (n === 1 ? { outcome: 'stopped', tail: 'blocked: no network', reports: none, plan: 'it output no <ticket> tags' } : { ...complete, plan: [planned('T1')] });
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1', 'breakdown attempt 2 Attempt 1 failed: the breakdown agent stopped without signalling COMPLETE: blocked: no network']);
+    assert.deepEqual(historyOf(o), [['broken-down', 2, 'Broken down into ep1.1']]);
+  });
+
+  it("hands the Spec back with the agent's question, without a second Attempt", async () => {
+    breakdowner = async () => ({ outcome: 'needs-info', question: 'One epic or two?', reports: none, plan: 'it output no <ticket> tags' });
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'fail thaivis/ep1: The breakdown agent needs information:\nOne epic or two?']);
+    assert.deepEqual(historyOf(o), [['failed', 1, 'The breakdown agent needs information:\nOne epic or two?']]);
   });
 });
 
@@ -1872,24 +1947,26 @@ describe('Delete', () => {
 });
 
 describe('Archive', () => {
-  it('moves a merged or PR-closed Run from the history to the archive, and back', async () => {
+  it('moves a merged, PR-closed or broken-down Run from the history to the archive, and back', async () => {
     const o = await polled();
     const merged = startRun('thaivis', 'merged');
     const closed = startRun('fazwaz', 'pr-closed');
+    const brokenDown = startRun('PopDeal', 'broken-down');
     o.setArchived(merged, true);
     o.setArchived(closed, true);
+    o.setArchived(brokenDown, true);
     assert.deepEqual(o.runs().history, []);
-    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[closed, now], [merged, now]]);
+    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[brokenDown, now], [closed, now], [merged, now]]);
 
     o.setArchived(merged, false);
     assert.deepEqual(o.runs().history.map((r) => [r.id, r.archivedAt]), [[merged, null]]);
-    assert.deepEqual(o.runs().archived.map((r) => r.id), [closed]);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [brokenDown, closed]);
   });
 
-  it('refuses Runs that are not merged or PR closed', async () => {
+  it('refuses Runs that are not merged, PR closed or broken down', async () => {
     const o = await polled();
     for (const state of ['agent', 'in-review', 'failed', 'killed'] as const) {
-      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged or PR closed/);
+      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged, PR closed or broken down/);
     }
     assert.deepEqual(o.runs().archived, []);
   });

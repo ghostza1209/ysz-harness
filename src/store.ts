@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 export type RunState =
   | 'claimed' | 'agent' | 'agent-review' | 'host' | 'needs-attention'
-  | 'in-review' | 'merged' | 'pr-closed' | 'failed' | 'killed' | 'interrupted';
+  | 'in-review' | 'merged' | 'pr-closed' | 'broken-down' | 'failed' | 'killed' | 'interrupted';
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
 const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];

@@ -18,6 +18,8 @@
    A Ticket whose parent epic is labelled `epic-branch` clones and opens its PR onto `epic/<epic-id>` (the Project's `epicBranchPrefix`) instead, so `baseBranch` gets one PR per epic. See [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md).
 5. If the agent needs information, the bead is handed back with a comment and the `needs-info` label.
 
+An epic labelled `ready-for-agent` with no children is a **Spec**. Its Run has no Review agent and no PR: a breakdown agent splits it into child Tickets, which ysz creates under the epic already labelled `ready-for-agent`. They join the queue on the next poll. See [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md).
+
 ## Requirements
 
 - Node.js 22+ and npm
@@ -51,6 +53,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | --- | --- |
 | Queue a Ticket | `bd update <id> --add-label ready-for-agent` in the Project's repo |
 | Keep a Ticket away from ysz | `bd update <id> --add-label orchestrator:skip` |
+| Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic with no children, once the Spec is final |
 | Collect an epic's PRs on one branch | `bd update <epic-id> --add-label epic-branch`, then open `epic/<epic-id>` → `baseBranch` yourself when its children are merged |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |
 | Stop a live Run | **Kill** on its card: the Ticket gets `orchestrator:skip` |

@@ -423,6 +423,11 @@ a:focus-visible {
   background: color-mix(in srgb, var(--mute) 14%, transparent);
 }
 
+.pill.broken-down {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+}
+
 .pill.failed,
 .pill.interrupted {
   color: var(--bad);

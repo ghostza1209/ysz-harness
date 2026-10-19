@@ -40,12 +40,15 @@ describe('Beads gateway against real bd', () => {
 
   after(() => rm(dir, { recursive: true, force: true }));
 
-  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip or epic type, and counts every unclosed bead', async () => {
+  it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip or epic type, then the childless epic as a Spec, and counts every unclosed bead', async () => {
     const { tickets, backlog } = await createBeadsGateway().listReady(project);
     assert.equal(backlog, 9);
     assert.deepEqual(
-      tickets.map(({ id, title, priority }) => ({ id, title, priority })),
-      [{ id: ids.ready, title: 'ready one', priority: 1 }],
+      tickets.map(({ id, title, priority, spec }) => ({ id, title, priority, spec })),
+      [
+        { id: ids.ready, title: 'ready one', priority: 1, spec: undefined },
+        { id: ids.readyEpic, title: 'labelled epic, no children', priority: 2, spec: true },
+      ],
     );
     assert.match(tickets[0].createdAt, /^\d{4}-\d\d-\d\dT/);
   });
@@ -53,13 +56,13 @@ describe('Beads gateway against real bd', () => {
   it('releases a Ticket once its blocker is closed', async () => {
     await bd('close', ids.blocker, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
-    assert.deepEqual(found, [ids.blocked, ids.ready].sort());
+    assert.deepEqual(found, [ids.blocked, ids.ready, ids.readyEpic].sort());
   });
 
   it('holds a parent back until every child is closed', async () => {
     await bd('close', ids.child, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
-    assert.deepEqual(found, [ids.blocked, ids.parent, ids.ready].sort());
+    assert.deepEqual(found, [ids.blocked, ids.parent, ids.ready, ids.readyEpic].sort());
   });
 
   it('kills a bd call that runs past the timeout', async () => {
@@ -507,5 +510,90 @@ describe('Follow-up Tickets in the Project\'s own queue, against real bd', () =>
     const { tickets, backlog } = await createBeadsGateway().listReady(project);
     assert.deepEqual(tickets.map((t) => t.id), [ticket]);
     assert.equal(backlog, 2);
+  });
+});
+
+describe('Specs against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const ids: Record<string, string> = {};
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  async function create(key: string, title: string, ...flags: string[]) {
+    ids[key] = (await bd('create', title, '--silent', ...flags)).stdout.trim();
+  }
+  const show = async (id: string) => JSON.parse((await bd('show', id, '--json')).stdout)[0];
+  const children = async (id: string) => JSON.parse((await bd('children', id, '--json')).stdout) as { id: string }[];
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'beads-spec-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+    await create('spec', 'the Spec', '-t', 'epic', '-l', 'ready-for-agent', '-p', '1');
+    await create('finished', 'every child closed', '-t', 'epic', '-l', 'ready-for-agent');
+    await create('finishedChild', 'the only child', '--parent', ids.finished);
+    await bd('close', ids.finishedChild, '-r', 'done');
+    await create('unlabelled', 'not for agents', '-t', 'epic');
+    await create('blockedSpec', 'waits on a Ticket', '-t', 'epic', '-l', 'ready-for-agent');
+    await create('gate', 'the gate');
+    await bd('dep', 'add', ids.blockedSpec, ids.gate);
+  });
+
+  after(() => rm(dir, { recursive: true, force: true }));
+
+  it('lists a childless labelled epic as a Spec, and not one whose children all closed, an unlabelled one or a blocked one', async () => {
+    const { tickets } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(tickets.map(({ id, priority, spec }) => ({ id, priority, spec })), [{ id: ids.spec, priority: 1, spec: true }]);
+  });
+
+  it('creates the plan under the claimed Spec, labelled ready-for-agent at its priority with the blocking edges, then comments and releases it', async () => {
+    const gateway = createBeadsGateway();
+    assert.equal(await gateway.claim(project, ids.spec), true);
+    const created = await gateway.breakDown(project, { id: ids.spec, priority: 1 }, [
+      { key: 'schema', title: '--add the column', body: '## What to build\nThe column.', blockedBy: [] },
+      { key: 'ui', title: 'show it', body: '', blockedBy: ['schema'] },
+    ]);
+    assert.equal(created?.length, 2);
+    const [schema, ui] = await Promise.all(created!.map(show));
+    assert.deepEqual(
+      [schema, ui].map((i) => [i.title, i.description ?? '', i.status, i.priority, i.parent, [...i.labels], i.created_by]),
+      [
+        ['--add the column', '## What to build\nThe column.', 'open', 1, ids.spec, ['ready-for-agent'], 'orchestrator'],
+        ['show it', '', 'open', 1, ids.spec, ['ready-for-agent'], 'orchestrator'],
+      ],
+    );
+    const blockers = (i: { dependencies?: { id: string; dependency_type: string }[] }) => (i.dependencies ?? []).filter((d) => d.dependency_type === 'blocks').map((d) => d.id);
+    assert.deepEqual([blockers(schema), blockers(ui)], [[], [schema.id]]);
+
+    const [spec] = JSON.parse((await bd('show', ids.spec, '--json', '--include-comments')).stdout);
+    assert.deepEqual([spec.status, spec.assignee ?? ''], ['open', '']);
+    assert.deepEqual(spec.comments.map((c: { text: string }) => c.text), [`Broken down into ${schema.id}, ${ui.id}`]);
+    assert.deepEqual((await gateway.listReady(project)).tickets.map((t) => t.id), [schema.id]);
+  });
+
+  it('creates nothing and releases the Spec when it got children by hand meanwhile', async () => {
+    await create('splitByHand', 'split while its agent ran', '-t', 'epic', '-l', 'ready-for-agent');
+    const gateway = createBeadsGateway();
+    await gateway.claim(project, ids.splitByHand);
+    await create('handChild', 'by hand', '--parent', ids.splitByHand);
+    assert.equal(await gateway.breakDown(project, { id: ids.splitByHand, priority: 2 }, [{ key: 'a', title: 'a', body: '', blockedBy: [] }]), null);
+    assert.deepEqual((await children(ids.splitByHand)).map((c) => c.id), [ids.handChild]);
+    const spec = await show(ids.splitByHand);
+    assert.deepEqual([spec.status, spec.assignee ?? ''], ['open', '']);
+  });
+
+  it('writes nothing, leaving the Spec claimed, on a plan bd refuses', async () => {
+    await create('cyclic', 'planned in a circle', '-t', 'epic', '-l', 'ready-for-agent');
+    const gateway = createBeadsGateway();
+    await gateway.claim(project, ids.cyclic);
+    await assert.rejects(
+      gateway.breakDown(project, { id: ids.cyclic, priority: 2 }, [
+        { key: 'a', title: 'a', body: '', blockedBy: ['b'] },
+        { key: 'b', title: 'b', body: '', blockedBy: ['a'] },
+      ]),
+      /cycle/,
+    );
+    assert.deepEqual(await children(ids.cyclic), []);
+    assert.equal((await show(ids.cyclic)).status, 'in_progress');
   });
 });

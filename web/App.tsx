@@ -240,9 +240,9 @@ function Reports({ reports }: { reports: RunRow['reports'] }) {
 
 /** A log part's name (`attempt2-review`, `host`) as its stage on the stage bar, with its Attempt once there are two. */
 const partLabel = (name: string, attempts: boolean) => {
-  const m = /^attempt(\d+)-(implement|review)$/.exec(name);
+  const m = /^attempt(\d+)-(implement|review|breakdown)$/.exec(name);
   if (!m) return STAGE_NAMES.host;
-  const stage = m[2] === 'review' ? STAGE_NAMES['agent-review'] : STAGE_NAMES.agent;
+  const stage = m[2] === 'review' ? STAGE_NAMES['agent-review'] : m[2] === 'breakdown' ? 'Breakdown' : STAGE_NAMES.agent;
   return attempts ? `${stage} · ${m[1]}` : stage;
 };
 
@@ -433,6 +433,7 @@ const FILTERS = {
   'in-review': (s: string) => s === 'in-review',
   merged: (s: string) => s === 'merged',
   'pr-closed': (s: string) => s === 'pr-closed',
+  'broken-down': (s: string) => s === 'broken-down',
   failed: (s: string) => s === 'failed' || s === 'interrupted',
   killed: (s: string) => s === 'killed',
   // Lists the archived Runs instead of the history.
@@ -681,7 +682,7 @@ export function App() {
               {t.delete}
             </button>
           )}
-          {(r.state === 'merged' || r.state === 'pr-closed') &&
+          {(r.state === 'merged' || r.state === 'pr-closed' || r.state === 'broken-down') &&
             (r.archivedAt ? (
               <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
                 {t.unarchive}
@@ -876,6 +877,7 @@ export function App() {
                         <span className="pos">{i + 1}</span>
                         <span className="tag">{q.project}</span>
                         <span className={`tag prio p${q.priority}`}>P{q.priority}</span>
+                        {q.spec && <span className="tag">Spec</span>}
                         <Copy text={q.id} />
                       </div>
                       <div className="title">{q.title}</div>

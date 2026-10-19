@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, removeLeftoverSandboxes, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
+import { agentResult, imageExists, planOf, removeLeftoverSandboxes, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -90,6 +90,47 @@ it('reads no signal as stopped and keeps only the last 500 characters of what th
   assert.equal(result.outcome, 'stopped');
   assert.equal(result.outcome === 'stopped' && result.tail.length, 500);
   assert.ok(result.outcome === 'stopped' && result.tail.endsWith('blocked: no database'));
+});
+
+describe('a breakdown plan', () => {
+  it('reads each <ticket> as key, blockers, first line as title and the rest as body', () => {
+    const stdout = `Plan ready.
+<ticket key="T1">
+ Add the column
+## What to build
+The column.
+</ticket>
+<ticket key="T2" blocked-by="T1, T1b">
+Show it
+</ticket>
+<ticket key="T1b">Backfill</ticket>
+${COMPLETE}`;
+    assert.deepEqual(planOf(stdout), [
+      { key: 'T1', title: 'Add the column', body: '## What to build\nThe column.', blockedBy: [] },
+      { key: 'T2', title: 'Show it', body: '', blockedBy: ['T1', 'T1b'] },
+      { key: 'T1b', title: 'Backfill', body: '', blockedBy: [] },
+    ]);
+  });
+
+  it('takes a diamond of blockers for no cycle', () => {
+    const plan = planOf('<ticket key="A">a</ticket><ticket key="B" blocked-by="A">b</ticket><ticket key="C" blocked-by="A">c</ticket><ticket key="D" blocked-by="B,C">d</ticket>');
+    assert.deepEqual(typeof plan === 'string' ? plan : plan.map((t) => t.key), ['A', 'B', 'C', 'D']);
+  });
+
+  it('says why output makes no plan', () => {
+    for (const [stdout, why] of [
+      ['no tags here', 'it output no <ticket> tags'],
+      ['<ticket key="A">a</ticket><ticket key="A">b</ticket>', 'it gave two tickets the same key'],
+      ['<ticket key="A" blocked-by="Z">a</ticket>', 'ticket A is blocked by Z, which is no ticket in the plan'],
+      ['<ticket key="A">\n\n</ticket>', 'ticket A has no title, or one over 200 characters'],
+      [`<ticket key="A">a\n${'x'.repeat(8001)}</ticket>`, 'ticket A has a body over 8000 characters'],
+      ['<ticket key="T">t</ticket>'.repeat(31), 'it planned 31 tickets, more than 30'],
+      ['<ticket key="A" blocked-by="A">a</ticket>', 'ticket A is blocked by itself through its blockers'],
+      ['<ticket key="A">a</ticket><ticket key="B" blocked-by="A,C">b</ticket><ticket key="C" blocked-by="B">c</ticket>', 'ticket B is blocked by itself through its blockers'],
+    ]) {
+      assert.equal(planOf(stdout), why);
+    }
+  });
 });
 
 describe('the <friction> reports', () => {

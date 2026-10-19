@@ -12,8 +12,8 @@ const oct = (day: number, hour = 0, minute = 0) => new Date(2026, 9, day, hour, 
 
 it('counts an interrupted Run as failed and every live state as running', () => {
   assert.deepEqual(
-    (['interrupted', 'needs-attention', 'claimed', 'host', 'killed', 'in-review'] as const).map(outcomeOf),
-    ['failed', 'running', 'running', 'running', 'killed', 'in-review'],
+    (['interrupted', 'needs-attention', 'claimed', 'host', 'killed', 'in-review', 'broken-down'] as const).map(outcomeOf),
+    ['failed', 'running', 'running', 'running', 'killed', 'in-review', 'broken-down'],
   );
 });
 
@@ -34,13 +34,13 @@ it('counts the Runs started each day by where they are now, leaving out days out
     [oct(17), oct(18)],
   );
   assert.deepEqual(rows, [
-    { day: oct(17), merged: 1, 'in-review': 0, 'pr-closed': 0, failed: 1, killed: 0, running: 0 },
-    { day: oct(18), merged: 0, 'in-review': 0, 'pr-closed': 0, failed: 0, killed: 0, running: 1 },
+    { day: oct(17), merged: 1, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, failed: 1, killed: 0, running: 0 },
+    { day: oct(18), merged: 0, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, failed: 0, killed: 0, running: 1 },
   ]);
 });
 
-it('takes the Merge rate over Runs left to finish: killed and In review ones are left out', () => {
-  const states = ['merged', 'merged', 'pr-closed', 'failed', 'interrupted', 'killed', 'in-review'] as const;
+it('takes the Merge rate over Runs left to finish: killed, In review and broken-down ones are left out', () => {
+  const states = ['merged', 'merged', 'pr-closed', 'failed', 'interrupted', 'killed', 'in-review', 'broken-down'] as const;
   assert.deepEqual(mergeRate(states.map((state) => run({ state }))), { merged: 2, of: 5 });
 });
 
