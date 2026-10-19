@@ -673,10 +673,73 @@ button.link {
   top: 6px;
 }
 
-.pills {
+/* An epic's states: a bar split by count, and the counts under it in the same colors. */
+.mix {
+  display: grid;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.mix .bar {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+}
+
+.mix .bar > span {
+  background: currentColor;
+  box-shadow: 0 0 6px color-mix(in srgb, currentColor 40%, transparent);
+}
+
+.mix .counts {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 2px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.mix .counts > span::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  background: currentColor;
+  vertical-align: 1px;
+}
+
+.mix span {
+  color: var(--mute);
+}
+
+.mix .agent,
+.mix .agent-review {
+  color: var(--accent);
+}
+
+.mix .host,
+.mix .merged {
+  color: var(--violet);
+}
+
+.mix .in-review {
+  color: var(--ok);
+}
+
+.mix .broken-down {
+  color: var(--ink);
+}
+
+.mix .needs-attention {
+  color: var(--warn);
+}
+
+.mix .failed,
+.mix .interrupted {
+  color: var(--bad);
 }
 
 .group > summary::-webkit-details-marker {

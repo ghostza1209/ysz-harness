@@ -343,11 +343,13 @@ const ago = (ms: number, t: Dict) => {
 };
 /** A stage's name for the states on the stage bar, so pills and bar agree. */
 const label = (state: string) => STAGE_NAMES[state as keyof typeof STAGE_NAMES] ?? state.replace('-', ' ');
-/** How many of `runs` are in each state, in the order the states first show up. */
+/** Done first, trouble last, so a group's counts read the same way every time. */
+const STATE_ORDER: RunState[] = ['merged', 'in-review', 'pr-closed', 'broken-down', 'claimed', 'agent', 'agent-review', 'host', 'needs-attention', 'interrupted', 'killed', 'failed'];
+/** How many of `runs` are in each state, in STATE_ORDER. */
 const stateCounts = (runs: RunRow[]) => {
-  const n = new Map<string, number>();
+  const n = new Map<RunState, number>();
   for (const r of runs) n.set(r.state, (n.get(r.state) ?? 0) + 1);
-  return [...n];
+  return [...n].sort(([a], [b]) => STATE_ORDER.indexOf(a) - STATE_ORDER.indexOf(b));
 };
 const prNumber = (url: string) => url.match(/\/pull\/(\d+)/)?.[1];
 
@@ -944,12 +946,19 @@ export function App() {
                         {group === 'epic' ? (
                           // Laid out as a Run row, so the epic's columns line up with its Tickets'.
                           <summary className="tr">
-                            <span className="pills">
-                              {stateCounts(g.runs).map(([s, n]) => (
-                                <span key={s} className={`pill ${s}`}>
-                                  {n} {label(s)}
-                                </span>
-                              ))}
+                            <span className="mix" role="img" aria-label={stateCounts(g.runs).map(([s, n]) => `${n} ${label(s)}`).join(', ')}>
+                              <span className="bar">
+                                {stateCounts(g.runs).map(([s, n]) => (
+                                  <span key={s} className={s} style={{ flexGrow: n }} />
+                                ))}
+                              </span>
+                              <span className="counts">
+                                {stateCounts(g.runs).map(([s, n]) => (
+                                  <span key={s} className={s} title={label(s)}>
+                                    {n}
+                                  </span>
+                                ))}
+                              </span>
                             </span>
                             <div className="what">
                               <div className="row">
