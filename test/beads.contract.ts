@@ -59,10 +59,10 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual(found, [ids.blocked, ids.ready, ids.readyEpic].sort());
   });
 
-  it('holds a parent back until every child is closed', async () => {
+  it('holds a parent back even once every child is closed: its children did its work', async () => {
     await bd('close', ids.child, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
-    assert.deepEqual(found, [ids.blocked, ids.parent, ids.ready, ids.readyEpic].sort());
+    assert.deepEqual(found, [ids.blocked, ids.ready, ids.readyEpic].sort());
   });
 
   it('kills a bd call that runs past the timeout', async () => {
@@ -139,6 +139,37 @@ describe('Beads gateway against real bd', () => {
     assert.equal(await createBeadsGateway().merged(project, ids.merging, 'https://github.com/o/r/pull/3'), true);
     const [issue] = JSON.parse((await bd('show', ids.merging, '--json')).stdout);
     assert.deepEqual([issue.status, issue.close_reason, issue.labels], ['closed', 'PR merged: https://github.com/o/r/pull/3', ['ready-for-agent']]);
+  });
+
+  it('closes a ready-for-agent parent, epic or not, once its last child merges', async () => {
+    await create('specTask', 'spec as a task', '-l', 'ready-for-agent');
+    await inReview('firstChild', '--parent', ids.specTask);
+    await inReview('lastChild', '--parent', ids.specTask);
+    await create('specEpic', 'spec as an epic', '-t', 'epic', '-l', 'ready-for-agent');
+    await inReview('epicChild', '--parent', ids.specEpic);
+
+    await createBeadsGateway().merged(project, ids.firstChild, 'https://github.com/o/r/pull/4');
+    assert.equal((await state(ids.specTask)).status, 'open');
+    await createBeadsGateway().merged(project, ids.lastChild, 'https://github.com/o/r/pull/5');
+    await createBeadsGateway().merged(project, ids.epicChild, 'https://github.com/o/r/pull/6');
+
+    for (const [id, pr] of [[ids.specTask, 5], [ids.specEpic, 6]]) {
+      const [issue] = JSON.parse((await bd('show', String(id), '--json')).stdout);
+      assert.deepEqual([issue.status, issue.close_reason], ['closed', `Every child closed, the last by https://github.com/o/r/pull/${pr}`]);
+    }
+  });
+
+  it('leaves a parent open whose last child merged when it is not ready-for-agent or waits on its epic-branch PR', async () => {
+    await create('handParent', 'the human\'s own parent');
+    await inReview('handChild', '--parent', ids.handParent);
+    await create('branchEpic', 'epic on its own branch', '-t', 'epic', '-l', 'ready-for-agent,epic-branch');
+    await inReview('branchChild', '--parent', ids.branchEpic);
+
+    await createBeadsGateway().merged(project, ids.handChild, 'https://github.com/o/r/pull/7');
+    await createBeadsGateway().merged(project, ids.branchChild, 'https://github.com/o/r/pull/8');
+
+    assert.equal((await state(ids.handParent)).status, 'open');
+    assert.equal((await state(ids.branchEpic)).status, 'open');
   });
 
   it('hands back an in-review Ticket whose PR closed unmerged: commented, needs-info, not Ready', async () => {

@@ -49,7 +49,7 @@ export const ORCHESTRATOR = 'orchestrator';
 
 export interface BeadsGateway {
   /**
-   * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no unclosed children,
+   * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
    * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
    * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, and no children at all.
    */
@@ -83,7 +83,8 @@ export interface BeadsGateway {
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
   /**
-   * The in-review Ticket's PR merged: drop in-review, then close it with the PR link as the reason.
+   * The in-review Ticket's PR merged: drop in-review, then close it with the PR link as the reason. Its parent closes too
+   * when every child of it is now closed, the parent is labelled ready-for-agent and not epic-branch.
    * false, writing nothing, when the human changed the bead since (no longer in_progress and the Orchestrator's).
    */
   merged(project: Project, id: string, prUrl: string): Promise<boolean>;
@@ -168,8 +169,6 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
   const show = async (project: Project, args: string[]): Promise<Record<string, any>> =>
     JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'show', ...args, '--json']))[0];
   const hasChildren = async (project: Project, id: string) => JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'children', id, '--json'])).length > 0;
-  /** Epics seen with children ("repo/id"), which never become a Spec again, so a poll asks bd only about new ones. ponytail: in memory, so a restart asks again once. */
-  const parentEpics = new Set<string>();
   const yszQueue = () => {
     if (!yszRepo) throw new Error('the ysz checkout is not configured, so Friction has no queue to go to');
     return yszRepo;
@@ -177,22 +176,24 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
   /** A Friction's text, ending with where it came from. */
   const withSource = (text: string, { project, ticketId, runId, attempt, role }: Omit<FrictionReport, 'title' | 'body'>) =>
     `${text ? `${text}\n\n` : ''}Project: ${project.name} · Ticket: ${ticketId} · Run: ${runId} · Attempt: ${attempt} · Agent: ${role}`;
-  /** The bead is still in_progress and the Orchestrator's, as a Run left it: the human has not changed it since. */
+  /** The bead, if still in_progress and the Orchestrator's, as a Run left it: the human has not changed it since. */
   const held = async (project: Project, id: string) => {
     const issue = await show(project, [id]);
-    return issue.status === 'in_progress' && issue.assignee === ORCHESTRATOR;
+    return issue.status === 'in_progress' && issue.assignee === ORCHESTRATOR ? issue : null;
   };
 
   return {
     async listReady(project) {
-      const [out, unclosed] = await Promise.all([
+      const [out, unclosed, closed] = await Promise.all([
         bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '--exclude-type', 'epic', '-u', '-n', '0', '--json']),
-        // bd ready ignores parent-child links, so a parent would compete with its own children: it waits until they all close.
         bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']),
+        // bd ready ignores parent-child links. A parent is never Ready, even once its children close: they did its work.
+        // ponytail: lists every closed bead each poll (~0.6s, mostly bd startup, at 38-134 closed); filter on parent if the history grows large.
+        bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'closed', '-n', '0', '--json', '--brief']),
       ]);
       const beads: Bead[] = JSON.parse(unclosed);
       const byId = new Map(beads.map((b) => [b.id, b]));
-      const parents = new Set(beads.map((b) => b.parent));
+      const parents = new Set([...beads, ...(JSON.parse(closed) as Bead[])].map((b) => b.parent));
       // bd ready counts an In review blocker as open; a Ticket whose only unclosed blocker is one stacks on its PR.
       const stacked = beads.filter((b) => {
         if (b.status !== 'open' || b.issue_type === 'epic' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
@@ -201,17 +202,12 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       });
       const issues: { id: string; title: string; priority: number; created_at: string }[] = [...JSON.parse(out), ...stacked];
       const tickets: Ticket[] = issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
-      // An epic whose children all closed has none in the unclosed list, so only bd children tells it from a Spec.
-      const candidates = beads.filter(
+      const specs = beads.filter(
         (b) =>
           b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('ready-for-agent') && !b.labels.includes('orchestrator:skip') &&
-          !parents.has(b.id) && !parentEpics.has(`${project.repoPath}/${b.id}`) &&
-          (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
+          !parents.has(b.id) && (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
       );
-      for (const b of candidates) {
-        if (await hasChildren(project, b.id)) parentEpics.add(`${project.repoPath}/${b.id}`);
-        else tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
-      }
+      for (const b of specs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
       return { tickets, backlog: beads.length };
     },
 
@@ -316,11 +312,21 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     },
 
     async merged(project, id, prUrl) {
-      if (!(await held(project, id))) return false;
+      const issue = await held(project, id);
+      if (!issue) return false;
       // The label goes first: if the close then fails, the next call still finds the bead held and closes it.
       await write(project, ['update', id, '--remove-label', 'in-review']);
       // --force: the human merged, so open children or blockers must not leave the bead in progress forever.
       await write(project, ['close', id, '--reason', `PR merged: ${prUrl}`, '--force']);
+      // A parent the human gave to agents is done once its last child is. An epic-branch epic waits for its own PR (ADR 0006).
+      if (issue.parent) {
+        const parent = await show(project, [issue.parent]);
+        const labels: string[] = parent.labels ?? [];
+        if (parent.status !== 'closed' && labels.includes('ready-for-agent') && !labels.includes('epic-branch')) {
+          const children: { status: string }[] = JSON.parse(await bd(['--readonly', '-C', project.repoPath, 'children', issue.parent, '--json']));
+          if (children.every((c) => c.status === 'closed')) await write(project, ['close', issue.parent, '--reason', `Every child closed, the last by ${prUrl}`, '--force']);
+        }
+      }
       return true;
     },
 

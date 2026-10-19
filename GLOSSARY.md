@@ -20,7 +20,7 @@ _Avoid_: external ref, Jira id.
 **Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
 _Avoid_: issues, beads list.
 
-**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children left open, not claimed, and not opted out of ysz.
+**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children, open or closed, not claimed, and not opted out of ysz.
 
 **Spec**: An epic the human has marked as fit for an agent, with every blocker closed and no children yet. ysz picks it like a Ready Ticket, but its Run breaks it down into child Tickets, each Ready by construction, instead of opening a PR.
 _Avoid_: PRD, plan.
@@ -49,7 +49,7 @@ _Avoid_: statistics, analytics, report.
 
 **In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
-**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed.
+**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, and so is its parent once every child of it is closed, if the parent is marked fit for an agent and is not an epic on its own branch.
 
 **PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again.
 _Avoid_: closed, rejected.
