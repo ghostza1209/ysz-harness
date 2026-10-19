@@ -69,9 +69,9 @@ export const projects: readonly Project[] = [
     installCommand: `CI=true pnpm install --frozen-lockfile --store-dir ${STORE_IN_SANDBOX}`,
     checkHint:
       'For changes under apps/web, run from apps/web with paths relative to it: `pnpm exec eslint <changed files>`, ' +
-      '`pnpm exec jest --findRelatedTests --passWithNoTests <changed files>`, then `pnpm web:type-check`. ' +
-      'apps/mobile is the same, with `pnpm mobile:type-check`. A change under packages/ type-checks every app that imports it. ' +
-      'Run `pnpm lint:duplicate-types` when you add or change a type.',
+      '`pnpm exec jest --findRelatedTests --passWithNoTests <changed files>`. Then, from the repo root, `pnpm web:type-check`. ' +
+      'apps/mobile is the same, with `pnpm mobile:type-check` from the repo root. A change under packages/ type-checks every app that imports it. ' +
+      'Run `pnpm lint:duplicate-types` from the repo root when you add or change a type.',
   },
   {
     name: 'thaivis',
