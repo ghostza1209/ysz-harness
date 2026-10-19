@@ -879,7 +879,7 @@ export function App() {
                         <span className="pos">{i + 1}</span>
                         <span className="tag">{q.project}</span>
                         <span className={`tag prio p${q.priority}`}>P{q.priority}</span>
-                        {q.spec && <span className="tag">Spec</span>}
+                        {q.spec && <span className="tag" title={t.specTitle}>Spec</span>}
                         <Copy text={q.id} />
                       </div>
                       <div className="title">{q.title}</div>

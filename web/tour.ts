@@ -25,6 +25,7 @@ export function sampleState(now: number): State {
       archived: [],
     },
     ready: [
+      { project: 'shop', id: 'shop-e5', title: 'Gift cards', priority: 1, ageMs: 5 * 60 * MIN, waitReason: 'Project already has a Run', runNow: false, spec: true },
       { project: 'shop', id: 'shop-b2', title: 'Email a receipt after payment', priority: 1, ageMs: 3 * 60 * MIN, waitReason: 'Project already has a Run', runNow: false },
       { project: 'shop', id: 'shop-d4', title: 'Rename the cart button', priority: 3, ageMs: 2 * 24 * 60 * MIN, waitReason: 'Project already has a Run', runNow: false },
     ],

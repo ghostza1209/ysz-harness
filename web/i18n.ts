@@ -81,6 +81,8 @@ export const en = {
   noReady: 'No Ready Tickets',
   noReadyHint: "Label an open bead ready-for-agent in a Project's repo to queue it.",
   ageTitle: 'Time since the Ticket was created',
+  specTitle:
+    'A Spec: an epic labelled ready-for-agent with no child Tickets. ysz picks it like a Ticket, but a breakdown agent splits it into child Tickets instead of writing code. They are created under the epic labelled ready-for-agent, with no review step and no PR, and become Ready on the next poll. To split it yourself, leave the label off or add orchestrator:skip.',
   runNowNext: '⚡ Run now: next free slot',
   runNow: 'Run now',
   runNowConfirm: (id: string, project: string) => `Run ${id} now? It claims the Ticket, and a finished Run pushes a branch and opens a PR on ${project}.`,
@@ -201,7 +203,7 @@ export const en = {
     },
     ready: {
       title: 'Ready queue',
-      body: 'Ready Tickets in the order ysz will pick them, with priority, age and why each one waits. Run now jumps a Ticket to the next free slot.',
+      body: 'Ready Tickets in the order ysz will pick them, with priority, age and why each one waits. Run now jumps a Ticket to the next free slot. A Spec tag marks an epic with no child Tickets: ysz breaks it down into child Tickets instead of writing code, and the Run ends broken-down. Hover the tag for details.',
     },
     history: {
       title: 'History',
@@ -283,6 +285,8 @@ export const th: Dict = {
   noReady: 'ไม่มี Ready Ticket',
   noReadyHint: 'ใส่ label ready-for-agent ให้ bead ที่เปิดอยู่ใน repo ของ Project เพื่อเข้าคิว',
   ageTitle: 'เวลาตั้งแต่สร้าง Ticket',
+  specTitle:
+    'Spec คือ epic ที่ติด label ready-for-agent แต่ยังไม่มี child Ticket ysz หยิบมาเหมือน Ticket แต่ให้ breakdown agent แตกเป็น child Ticket แทนการเขียนโค้ด child จะถูกสร้างใต้ epic พร้อม label ready-for-agent ไม่มีขั้นรีวิวและไม่มี PR แล้วเป็น Ready ใน poll ถัดไป ถ้าจะแตกเอง อย่าใส่ label หรือใส่ orchestrator:skip',
   runNowNext: '⚡ Run now: ได้ slot ว่างถัดไป',
   runNow: 'Run now',
   runNowConfirm: (id, project) => `Run ${id} เลยไหม? จะ claim Ticket นี้ และเมื่อ Run เสร็จจะ push branch แล้วเปิด PR บน ${project}`,
@@ -403,7 +407,7 @@ export const th: Dict = {
     },
     ready: {
       title: 'คิว Ready',
-      body: 'Ready Ticket เรียงตามลำดับที่ ysz จะหยิบ พร้อม priority, อายุ และเหตุผลที่ยังรอ ปุ่ม Run now ส่ง Ticket ไปที่ slot ว่างถัดไป',
+      body: 'Ready Ticket เรียงตามลำดับที่ ysz จะหยิบ พร้อม priority, อายุ และเหตุผลที่ยังรอ ปุ่ม Run now ส่ง Ticket ไปที่ slot ว่างถัดไป tag Spec คือ epic ที่ยังไม่มี child Ticket ysz จะแตกเป็น child Ticket แทนการเขียนโค้ด แล้ว Run จบด้วย broken-down ชี้ที่ tag เพื่อดูรายละเอียด',
     },
     history: {
       title: 'ประวัติ',
