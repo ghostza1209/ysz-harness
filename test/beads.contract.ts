@@ -41,8 +41,8 @@ describe('Beads gateway against real bd', () => {
   after(() => rm(dir, { recursive: true, force: true }));
 
   it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip or epic type, then the childless epic as a Spec, and counts every unclosed bead', async () => {
-    const { tickets, backlog } = await createBeadsGateway().listReady(project);
-    assert.equal(backlog, 9);
+    const { tickets, rows } = await createBeadsGateway().listReady(project);
+    assert.equal(rows.length, 9);
     assert.deepEqual(
       tickets.map(({ id, title, priority, spec }) => ({ id, title, priority, spec })),
       [
@@ -63,6 +63,25 @@ describe('Beads gateway against real bd', () => {
     await bd('close', ids.child, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
     assert.deepEqual(found, [ids.blocked, ids.ready, ids.readyEpic].sort());
+  });
+
+  it('keeps every unclosed bead as a row with its type, labels, parent, edges and comment count, and no closed one', async () => {
+    await bd('comment', ids.ready, 'a note');
+    await create('child2', 'unclosed child', '--parent', ids.parent);
+    const { rows } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(rows.map((r) => r.id).sort(), Object.values(ids).filter((id) => id !== ids.blocker && id !== ids.child).sort());
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const ready = byId.get(ids.ready)!;
+    assert.match(ready.created_at, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual(ready, {
+      id: ids.ready, title: 'ready one', status: 'open', issue_type: 'task', priority: 1, assignee: null,
+      labels: ['ready-for-agent'], parent: null, dependencies: [], comment_count: 1, created_at: ready.created_at,
+    });
+    assert.equal(byId.get(ids.readyEpic)!.issue_type, 'epic');
+    assert.equal(byId.get(ids.assigned)!.assignee, 'someone');
+    assert.deepEqual(byId.get(ids.blocked)!.dependencies, [{ depends_on_id: ids.blocker, type: 'blocks' }]);
+    assert.equal(byId.get(ids.child2)!.parent, ids.parent);
+    assert.deepEqual(byId.get(ids.child2)!.dependencies, [{ depends_on_id: ids.parent, type: 'parent-child' }]);
   });
 
   it('kills a bd call that runs past the timeout', async () => {
@@ -538,9 +557,84 @@ describe('Follow-up Tickets in the Project\'s own queue, against real bd', () =>
   });
 
   it('never appears in listReady, though it counts in the Backlog', async () => {
-    const { tickets, backlog } = await createBeadsGateway().listReady(project);
+    const { tickets, rows } = await createBeadsGateway().listReady(project);
     assert.deepEqual(tickets.map((t) => t.id), [ticket]);
-    assert.equal(backlog, 2);
+    assert.equal(rows.length, 2);
+  });
+});
+
+describe('Backlog actions against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  const create = async (title: string, ...flags: string[]) => (await bd('create', title, '--silent', ...flags)).stdout.trim();
+  const show = async (id: string) => JSON.parse((await bd('show', id, '--json')).stdout)[0];
+  const labels = async (id: string) => [...(await show(id)).labels].sort();
+  const gateway = createBeadsGateway();
+  let actor: string | undefined;
+
+  before(async () => {
+    // The gateway runs bd with this process's environment, so the suite's actor is set here too.
+    actor = process.env.BEADS_ACTOR;
+    process.env.BEADS_ACTOR = 'tester';
+    dir = await mkdtemp(join(tmpdir(), 'beads-actions-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+  });
+
+  after(async () => {
+    if (actor === undefined) delete process.env.BEADS_ACTOR;
+    else process.env.BEADS_ACTOR = actor;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('reads the fields the Backlog actions are decided from', async () => {
+    const id = await create('held elsewhere', '-l', 'ready-for-agent,other', '-a', 'someone');
+    const facts = await gateway.ticketFacts(project, id);
+    assert.deepEqual({ ...facts, labels: [...facts.labels!].sort() }, { id, issue_type: 'task', status: 'open', assignee: 'someone', labels: ['other', 'ready-for-agent'] });
+    const bare = await create('bare');
+    assert.deepEqual(await gateway.ticketFacts(project, bare), { id: bare, issue_type: 'task', status: 'open', assignee: null, labels: [] });
+  });
+
+  it("reads a Ticket's description and its comments with author and text, oldest first, and none for a Ticket without", async () => {
+    const id = await create('described', '-d', 'first line\nsecond <b>line</b>');
+    assert.deepEqual(await gateway.ticketDetail(project, id), { description: 'first line\nsecond <b>line</b>', comments: [] });
+    await bd('comment', id, 'one');
+    await bd('comment', id, 'two\nlines');
+    const { description, comments } = await gateway.ticketDetail(project, id);
+    assert.equal(description, 'first line\nsecond <b>line</b>');
+    assert.deepEqual(comments.map(({ author, text }) => ({ author, text })), [{ author: 'tester', text: 'one' }, { author: 'tester', text: 'two\nlines' }]);
+    assert.match(comments[0].createdAt, /^\d{4}-\d\d-\d\dT/);
+  });
+
+  it('mark-ready adds ready-for-agent and drops needs-info, leaving orchestrator:skip and the assignee alone', async () => {
+    const id = await create('answered', '-l', 'needs-info,orchestrator:skip,other', '-a', 'someone');
+    await gateway.ticketAction(project, id, 'mark-ready');
+    assert.deepEqual(await labels(id), ['orchestrator:skip', 'other', 'ready-for-agent']);
+    assert.equal((await show(id)).assignee, 'someone');
+  });
+
+  it('unmark-ready drops only ready-for-agent', async () => {
+    const id = await create('retracted', '-l', 'ready-for-agent,needs-info,other');
+    await gateway.ticketAction(project, id, 'unmark-ready');
+    assert.deepEqual(await labels(id), ['needs-info', 'other']);
+  });
+
+  it('skip adds only orchestrator:skip, and allow drops only it', async () => {
+    const id = await create('opted out', '-l', 'ready-for-agent,other');
+    await gateway.ticketAction(project, id, 'skip');
+    assert.deepEqual(await labels(id), ['orchestrator:skip', 'other', 'ready-for-agent']);
+    await gateway.ticketAction(project, id, 'allow');
+    assert.deepEqual(await labels(id), ['other', 'ready-for-agent']);
+  });
+
+  it("records bd's default actor for the write, never the orchestrator", async () => {
+    const id = await create('who wrote it');
+    await gateway.ticketAction(project, id, 'skip');
+    const events = (await bd('history', id, '--events')).stdout;
+    assert.match(events, /label_added by tester/);
+    assert.doesNotMatch(events, /by orchestrator/);
   });
 });
 

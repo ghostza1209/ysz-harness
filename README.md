@@ -51,8 +51,8 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 
 | You want to | Do this |
 | --- | --- |
-| Queue a Ticket | `bd update <id> --add-label ready-for-agent` in the Project's repo |
-| Keep a Ticket away from ysz | `bd update <id> --add-label orchestrator:skip` |
+| Queue a Ticket | **Mark Ready** on its row in the Dashboard's Backlog tab (or `bd update <id> --add-label ready-for-agent` in the Project's repo) |
+| Keep a Ticket away from ysz | **Skip ysz** on its row in the Backlog tab (or `bd update <id> --add-label orchestrator:skip`) |
 | Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic with no children, once the Spec is final |
 | Collect an epic's PRs on one branch | `bd update <epic-id> --add-label epic-branch`, then open `epic/<epic-id>` → `baseBranch` yourself when its children are merged |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |

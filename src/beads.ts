@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Project } from './projects';
+import { ORCHESTRATOR, type TicketAction, type TicketFacts } from './ticketActions';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,29 @@ export interface Ticket {
   createdAt: string;
   /** A Spec: its Run breaks it down into child Tickets instead of implementing it (ADR 0007). */
   spec?: true;
+}
+
+/** One unclosed bead of a Project's Backlog, as the poll's `bd list --brief` reads it. */
+export interface BacklogRow {
+  id: string;
+  title: string;
+  status: string;
+  issue_type: string;
+  priority: number;
+  assignee: string | null;
+  labels: string[];
+  parent: string | null;
+  /** Blocks and parent-child edges alike. */
+  dependencies: { depends_on_id: string; type: string }[];
+  comment_count: number;
+  /** RFC 3339. */
+  created_at: string;
+}
+
+/** What `bd show` adds to a Backlog row: the description and the comments, oldest first. */
+export interface TicketDetail {
+  description: string;
+  comments: { author: string; text: string; createdAt: string }[];
 }
 
 /** One child Ticket a breakdown agent planned; `blockedBy` holds the keys of other planned Tickets. */
@@ -44,16 +68,13 @@ export interface TicketContext {
   };
 }
 
-/** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
-export const ORCHESTRATOR = 'orchestrator';
-
 export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
-   * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
+   * and every blocker closed except at most one In review. Also returns its Backlog rows, from the same bd call.
    * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, and no children at all.
    */
-  listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
+  listReady(project: Project): Promise<{ tickets: Ticket[]; rows: BacklogRow[] }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
   /** Hand a claimed Ticket back: open and unassigned. */
@@ -80,6 +101,12 @@ export interface BeadsGateway {
    */
   heartbeat(project: Project): Promise<void>;
   showContext(project: Project, id: string): Promise<TicketContext>;
+  /** One Ticket as bd shows it now, for the check before a Backlog action. */
+  ticketFacts(project: Project, id: string): Promise<TicketFacts>;
+  /** One Ticket's description and comments as bd shows them now, for the Backlog tab's detail panel. */
+  ticketDetail(project: Project, id: string): Promise<TicketDetail>;
+  /** A Backlog action as the human: one atomic bd update with bd's default actor (never the Orchestrator), touching only the labels the action names. */
+  ticketAction(project: Project, id: string, action: TicketAction): Promise<void>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
   /**
@@ -136,6 +163,7 @@ interface Bead {
   labels?: string[] | null;
   parent?: string;
   dependencies?: { depends_on_id: string; type: string }[];
+  comment_count?: number;
 }
 
 /** A Run left it In review: in_progress, the Orchestrator's, labelled in-review. */
@@ -208,7 +236,20 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
           !parents.has(b.id) && (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
       );
       for (const b of specs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
-      return { tickets, backlog: beads.length };
+      const rows = beads.map((b): BacklogRow => ({
+        id: b.id,
+        title: b.title,
+        status: b.status,
+        issue_type: b.issue_type,
+        priority: b.priority,
+        assignee: b.assignee || null,
+        labels: b.labels ?? [],
+        parent: b.parent ?? null,
+        dependencies: (b.dependencies ?? []).map((d) => ({ depends_on_id: d.depends_on_id, type: d.type })),
+        comment_count: b.comment_count ?? 0,
+        created_at: b.created_at,
+      }));
+      return { tickets, rows };
     },
 
     async claim(project, id) {
@@ -303,6 +344,26 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
       const reviewing = (ticket.dependencies ?? []).find((d: Bead & { dependency_type: string }) => d.dependency_type === 'blocks' && isInReview(d));
       return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null, openFriction: [] };
+    },
+
+    async ticketFacts(project, id) {
+      const { issue_type, status, assignee, labels } = await show(project, [id]);
+      return { id, issue_type, status, assignee: assignee || null, labels: labels ?? [] };
+    },
+
+    async ticketDetail(project, id) {
+      const { description, comments } = await show(project, [id, '--include-comments']);
+      return { description: description ?? '', comments: (comments ?? []).map((c: { author: string; text: string; created_at: string }) => ({ author: c.author, text: c.text, createdAt: c.created_at })) };
+    },
+
+    async ticketAction(project, id, action) {
+      const flags: Record<TicketAction, string[]> = {
+        'mark-ready': ['--add-label', 'ready-for-agent', '--remove-label', 'needs-info'], // marking Ready answers needs-info
+        'unmark-ready': ['--remove-label', 'ready-for-agent'],
+        skip: ['--add-label', 'orchestrator:skip'],
+        allow: ['--remove-label', 'orchestrator:skip'],
+      };
+      await bd(['-C', project.repoPath, 'update', id, ...flags[action]]); // no --actor: bd records its default actor, the human
     },
 
     async markInReview(project, id, prUrl) {

@@ -1,4 +1,4 @@
-import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Children, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, span, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
@@ -21,6 +21,7 @@ const PAGE = 20;
 
 /** Its own chunk, so the overview never loads the chart library. */
 const Stats = lazy(() => import('./StatsPage'));
+const Backlog = lazy(() => import('./BacklogPage'));
 
 const T = createContext<Dict>(en);
 const useT = () => useContext(T);
@@ -371,7 +372,7 @@ function Stages({ state }: { state: RunRow['state'] }) {
   );
 }
 
-function Copy({ text }: { text: string }) {
+export function Copy({ text }: { text: string }) {
   const t = useT();
   const [done, setDone] = useState(false);
   return (
@@ -553,6 +554,10 @@ export function App() {
       return next;
     });
   };
+  // The same `post` for the memoised Backlog page, which the clock's re-renders of App would otherwise redraw every second.
+  const postNow = useRef(post);
+  postNow.current = post;
+  const stablePost = useCallback((url: string, done: string) => postNow.current(url, done), []);
   /** Pause every picking Project, or resume all once every one is paused: one POST each, one toast. */
   const pauseAll = async (resume: boolean) => {
     const targets = state!.projects.filter((p) => p.paused === resume);
@@ -701,9 +706,13 @@ export function App() {
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
   // The tour's steps are on the overview.
   const onStats = hash === '#stats' && !demo;
+  const onBacklog = hash === '#backlog' && !demo;
   // The same array until the Projects change, so the Stats page skips the polls' re-renders.
   const projectList = view?.projects.map((p) => p.name).join('\n') ?? '';
   const projectNames = useMemo(() => (projectList ? projectList.split('\n') : []), [projectList]);
+  // A held Ticket's Run stage for the Backlog page, as its Run card names it; the same map until the live Runs change.
+  const live = view?.runs.live;
+  const stages = useMemo(() => new Map((live ?? []).map((r) => [`${r.project}/${r.ticketId}`, label(r.state)])), [live]);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
     { key: 'ready', n: view.ready.length, label: 'Ready' },
@@ -728,8 +737,11 @@ export function App() {
           </b>
         </div>
         <nav className="chips">
-          <a className={`chip ${onStats ? '' : 'on'}`} href="#" aria-current={onStats ? undefined : 'page'}>
+          <a className={`chip ${onStats || onBacklog ? '' : 'on'}`} href="#" aria-current={onStats || onBacklog ? undefined : 'page'}>
             {t.overview}
+          </a>
+          <a className={`chip ${onBacklog ? 'on' : ''}`} href="#backlog" aria-current={onBacklog ? 'page' : undefined}>
+            {t.backlog.title}
           </a>
           <a className={`chip ${onStats ? 'on' : ''}`} href="#stats" aria-current={onStats ? 'page' : undefined}>
             {t.stats}
@@ -800,7 +812,11 @@ export function App() {
       )}
 
       <div className="page">
-        {onStats ? (
+        {onBacklog ? (
+          <Suspense fallback={<div className="skeleton" />}>
+            <Backlog t={t} stages={stages} refreshMs={REFRESH_MS} post={stablePost} />
+          </Suspense>
+        ) : onStats ? (
           <Suspense fallback={<div className="skeleton" />}>
             <Stats t={t} projects={projectNames} project={project} setProject={setProject} range={range} setRange={setRange} />
           </Suspense>
