@@ -241,5 +241,6 @@ it('words Allow ysz as returning to the queue only when skipped is the sole reas
   const skipped = row('k', { labels: ['ready-for-agent', 'orchestrator:skip'] });
   assert.deepEqual(buttonsOf([skipped]), ['Unmark Ready', 'Allow ysz (returns to queue)']);
   assert.deepEqual(buttonsOf([row('b'), { ...skipped, dependencies: [blocks('b')] }], [], 'k'), ['Unmark Ready', 'Allow ysz']);
+  assert.deepEqual(buttonsOf([{ ...skipped, status: 'deferred' }]), ['Unmark Ready', 'Allow ysz']); // bd ready leaves a deferred Ticket out
   assert.deepEqual(buttonsOf([row('s', { labels: ['orchestrator:skip'] })]), ['Mark Ready*', 'Allow ysz']);
 });

@@ -121,7 +121,8 @@ export interface Button {
 export function buttons(tk: Ticket, t: Dict): Button[] {
   const b = t.backlog.buttons;
   const allowed = allowedActions(tk.row);
-  const returns = tk.state === 'marked' && tk.reasons.length === 1 && has(tk.row, 'orchestrator:skip');
+  // Only an open Ticket: bd ready leaves out blocked, deferred and in_progress ones, and lineOf drops their status once skipped is a reason.
+  const returns = tk.state === 'marked' && tk.row.status === 'open' && tk.reasons.length === 1 && has(tk.row, 'orchestrator:skip');
   const all: Record<BacklogAction, Button> = {
     'mark-ready': { action: 'mark-ready', label: b.markReady, primary: true },
     'unmark-ready': { action: 'unmark-ready', label: b.unmarkReady, primary: false },

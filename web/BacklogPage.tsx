@@ -221,6 +221,8 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
 
   /** POST a button's action: the row reads in flight, `post` toasts the outcome (or the server's refusal) and refreshes the Dashboard, then the tab refreshes too. */
   const act = async (tk: Ticket, action: BacklogAction) => {
+    // The Ready queue's Run now asks first: it claims the Ticket and opens a PR.
+    if (action === 'run-now' && !window.confirm(t.runNowConfirm(tk.row.id, tk.project))) return;
     const key = keyOf(tk.project, tk.row.id);
     const base = `/api/projects/${encodeURIComponent(tk.project)}`;
     const id = encodeURIComponent(tk.row.id);
