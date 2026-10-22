@@ -622,15 +622,16 @@ export function App() {
       : dayOf(ms) === yesterday.toDateString()
         ? t.yesterday
         : new Date(ms).toLocaleDateString(t === en ? [] : t.locale, { weekday: 'short', day: 'numeric', month: 'short' });
-  const row = (r: RunRow) => (
+  /** A History row; under its epic's header it leaves out the Project and epic branch the header already says. */
+  const row = (r: RunRow, inEpic = false) => (
     <div className="tr" key={r.id}>
       <span className={`pill ${r.state}`}>{label(r.state)}</span>
       <div className="what">
         <div className="row">
-          <span className="tag">{r.project}</span>
+          {!inEpic && <span className="tag">{r.project}</span>}
           <Copy text={r.ticketId} />
           {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
-          {r.prBase && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
+          {r.prBase && !(inEpic && r.prBase === `epic/${epicOf(r.ticketId)}`) && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
         </div>
         <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
           {r.title}
@@ -941,10 +942,10 @@ export function App() {
                 <div className={`table ${density}`}>
                   {groupRuns(group === 'none' ? shown.slice(0, visible) : shown, group).map((g, i) =>
                     g.key === null ? (
-                      g.runs.map(row)
+                      g.runs.map((r) => row(r))
                     ) : (
                       // Today's opens; every epic and older day starts folded.
-                      <details key={g.key} className="group" open={group === 'day' && i === 0}>
+                      <details key={g.key} className={`group ${group}`} open={group === 'day' && i === 0}>
                         {group === 'epic' ? (
                           // Laid out as a Run row, so the epic's columns line up with its Tickets'.
                           <summary className="tr">
@@ -972,7 +973,8 @@ export function App() {
                               <div className="title">{g.runs.find((r) => r.ticketId === epicOf(r.ticketId))?.title}</div>
                             </div>
                             <div className="when">
-                              <time>{ago(now - (g.runs[0].endedAt ?? g.runs[0].startedAt), t)}</time>
+                              {/* The runs are in Ticket order, so the newest is anywhere among them. */}
+                              <time>{ago(now - Math.max(...g.runs.map((r) => r.endedAt ?? r.startedAt)), t)}</time>
                             </div>
                           </summary>
                         ) : (
@@ -986,7 +988,7 @@ export function App() {
                             ))}
                           </summary>
                         )}
-                        {g.runs.map(row)}
+                        {g.runs.map((r) => row(r, group === 'epic'))}
                       </details>
                     ),
                   )}

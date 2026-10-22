@@ -670,15 +670,48 @@ button.link {
   font-size: 13px;
 }
 
-/* An epic's summary is a Run row: its chevron sits in the gutter, off the grid. */
+/* An epic's summary is a Run row: its chevron, drawn in borders, sits in the gutter off the grid, centered over the rail. */
 .group > summary.tr::before {
+  content: '';
   position: absolute;
-  left: 4px;
-  top: 12px;
+  left: 5px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -4px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(-45deg);
 }
 
-.table.compact .group > summary.tr::before {
-  top: 6px;
+.group[open] > summary.tr::before {
+  transform: rotate(45deg);
+}
+
+.group > summary.tr:hover::before {
+  color: var(--ink);
+}
+
+/* An open epic reads as one block: tinted, edged in the accent, and a rail runs from its chevron down its Runs. */
+.group.epic[open] {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.group.epic[open],
+.group.epic[open] + *,
+.group.epic[open] > summary + .tr {
+  border-top-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+}
+
+.group.epic[open] > summary::before {
+  color: var(--accent);
+}
+
+/* Margin, rail and padding add up to the 16px gutter, so the Runs' columns still line up with the summary's. */
+.group.epic[open] > summary ~ .tr {
+  margin-left: 7px;
+  padding-left: 7px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
 /* An epic's states: a bar split by count, and the counts under it in the same colors. */
