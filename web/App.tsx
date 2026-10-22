@@ -1,5 +1,5 @@
 import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { ProjectStatus, QueueItem } from '../src/core';
+import type { Orchestrator, ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, span, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
@@ -11,7 +11,7 @@ import type { RunRow, RunState } from '../src/store';
 export interface State {
   slots: { used: number; total: number };
   ready: QueueItem[];
-  runs: { live: RunRow[]; history: RunRow[]; archived: RunRow[]; cloned: RunRow[]; clonedBytes: number };
+  runs: ReturnType<Orchestrator['runs']>;
   projects: ProjectStatus[];
 }
 

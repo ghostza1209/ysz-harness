@@ -2,7 +2,7 @@ import type { BeadsGateway, Ticket, TicketContext } from './beads';
 import { epicBranchOf, ticketKey, type HostSteps, type Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
+import type { AgentUsage, BacklogPoint, Reports, RunRow, RunState, Store } from './store';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -48,7 +48,7 @@ export interface Orchestrator {
   poll(): Promise<void>;
   /** Claim the Ready Tickets that fit the free slots and start a Run for each; resolves once they are started, not finished. */
   tick(): Promise<void>;
-  /** Resolves when no Run is in flight. */
+  /** Resolves when no Run is in flight and no clone is being measured. */
   whenIdle(): Promise<void>;
   /**
    * Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived
@@ -102,6 +102,9 @@ export interface Orchestrator {
    */
   watchReviews(): Promise<string[]>;
 }
+
+/** A failed or killed Run keeps its clone for the human to inspect. */
+const inspected = (state: RunState) => state === 'failed' || state === 'killed';
 
 export interface Clock {
   now(): number;
@@ -178,10 +181,10 @@ export function createOrchestrator(deps: {
   function end(runId: number, patch: Parameters<Store['updateRun']>[1]) {
     store.updateRun(runId, { ...patch, endedAt: clock.now() });
     controls.delete(runId);
-    if (patch.state === 'failed' || patch.state === 'killed') measure([store.getRun(runId)!]);
+    if (patch.state && inspected(patch.state)) measure([store.getRun(runId)!]);
   }
 
-  /** In the background, one at a time, record the size of each Run's clone still there by then. A failed du leaves it unknown. */
+  /** In the background, one after another, record the size of each Run's clone still there by then. A failed du leaves it unknown. */
   function measure(runs: RunRow[]) {
     const work = (async () => {
       for (const { id, cloneDir } of runs) {
@@ -264,7 +267,7 @@ export function createOrchestrator(deps: {
       // The work is on a branch and the bead is done, so a leftover clone is only clutter.
       if (prepared) await host.removeClone(prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
       // So are the clones the Ticket's failed or killed Runs kept for inspection. One left behind waits for the next recover().
-      for (const run of store.cloned().filter((r) => r.project === job.project.name && r.ticketId === job.ticket.id && (r.state === 'failed' || r.state === 'killed'))) {
+      for (const run of store.cloned().filter((r) => r.project === job.project.name && r.ticketId === job.ticket.id && inspected(r.state))) {
         await removeCloneOf(run).catch((err) => log(`Removing the clone of Run ${run.id} failed: ${message(err)}`));
       }
     } catch (err) {
@@ -719,13 +722,15 @@ export function createOrchestrator(deps: {
       // A clone outlives its use when its removal failed or a restart cut it short. A failed or killed Run's serves the
       // human's inspection only until a later Run of its Ticket reaches In review (pr-closed and merged ones did) or lands.
       const runs = store.allRuns();
+      /** Each Ticket's newest Run that got through, by id. */
+      const gotThrough = new Map(runs.filter((r) => ['in-review', 'merged', 'pr-closed', 'landed'].includes(r.state)).map((r) => [key(r.project, r.ticketId), r.id]));
       for (const run of store.cloned()) {
-        const gotThrough = runs.some((r) => r.project === run.project && r.ticketId === run.ticketId && r.id > run.id && ['in-review', 'merged', 'pr-closed', 'landed'].includes(r.state));
-        if ((run.state === 'failed' || run.state === 'killed') && !gotThrough) continue;
+        if (inspected(run.state) && !((gotThrough.get(key(run.project, run.ticketId)) ?? 0) > run.id)) continue;
         await attempt(`removing the clone of Run ${run.id}`, () => removeCloneOf(run));
       }
-      // A dir no Run points to, like an Attempt 1 clone whose removal failed, serves no one. Only Runs write there, and none has started yet.
-      const referenced = new Set(store.allRuns().map((r) => r.cloneDir));
+      // A dir no Run points to, like an Attempt 1 clone whose removal failed, serves no one. Only Runs write there, and none
+      // has started yet. A clone just removed is still in `runs`, but gone from the disk.
+      const referenced = new Set(runs.map((r) => r.cloneDir));
       await attempt('listing the clones', async () => {
         for (const dir of await host.listClones()) if (!referenced.has(dir)) await attempt(`removing ${dir}`, () => host.removeClone({ dir }));
       });

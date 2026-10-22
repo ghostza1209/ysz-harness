@@ -2103,7 +2103,7 @@ describe('Clean up', () => {
 
 describe('Clones nobody needs', () => {
   /** An ended Run of `ticketId` from before, with its clone at /clones/<clone> when one is named. */
-  const before = (ticketId: string, state: RunState, clone?: string, project = 'thaivis') => {
+  const endedRun = (ticketId: string, state: RunState, clone?: string, project = 'thaivis') => {
     const id = store.insertRun({ project, ticketId, title: 't', state, startedAt: now });
     store.updateRun(id, { endedAt: now, cloneDir: clone ? `/clones/${clone}` : null });
     return id;
@@ -2114,10 +2114,10 @@ describe('Clones nobody needs', () => {
   for (const ending of ['in-review', 'landed'] as const) {
     it(`removes the clones of the Ticket's earlier failed and killed Runs once a Run ends ${ending}`, async () => {
       landing = ending === 'landed';
-      before('tv1', 'failed', 'tv1-failed');
-      before('tv1', 'killed', 'tv1-killed');
-      before('tv2', 'failed', 'tv2-failed');
-      before('tv1', 'failed', 'fazwaz-tv1-failed', 'fazwaz');
+      endedRun('tv1', 'failed', 'tv1-failed');
+      endedRun('tv1', 'killed', 'tv1-killed');
+      endedRun('tv2', 'failed', 'tv2-failed');
+      endedRun('tv1', 'failed', 'fazwaz-tv1-failed', 'fazwaz');
       queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
       const o = await polled();
       await o.tick();
@@ -2125,11 +2125,12 @@ describe('Clones nobody needs', () => {
       assert.equal(o.runs().history[0].state, ending);
       assert.deepEqual(removed().sort(), ['tv1-1', 'tv1-failed', 'tv1-killed']);
       assert.deepEqual(clonesLeft(), ['/clones/tv2-failed', '/clones/fazwaz-tv1-failed']);
+      assert.deepEqual(measured, []); // only a Run that ends failed or killed keeps its clone
     });
   }
 
   it('still ends the Run in review, and logs it, when an earlier clone cannot be removed', async () => {
-    const old = before('tv1', 'failed', 'tv1-failed');
+    const old = endedRun('tv1', 'failed', 'tv1-failed');
     failingRemovals.add('/clones/tv1-failed');
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -2142,7 +2143,7 @@ describe('Clones nobody needs', () => {
   });
 
   it("keeps the earlier clones when the Ticket's Run fails again", async () => {
-    before('tv1', 'failed', 'tv1-failed');
+    endedRun('tv1', 'failed', 'tv1-failed');
     agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -2188,10 +2189,10 @@ describe('Clones nobody needs', () => {
   });
 
   it('lists every Run with a clone past the History limit, with their total size', async () => {
-    store.updateRun(before('tv1', 'failed', 'tv1-failed'), { cloneBytes: 2_000 });
-    store.updateRun(before('tv2', 'killed', 'tv2-killed'), { cloneBytes: 500 });
-    before('tv3', 'failed', 'tv3-unmeasured');
-    before('tv4', 'merged');
+    store.updateRun(endedRun('tv1', 'failed', 'tv1-failed'), { cloneBytes: 2_000 });
+    store.updateRun(endedRun('tv2', 'killed', 'tv2-killed'), { cloneBytes: 500 });
+    endedRun('tv3', 'failed', 'tv3-unmeasured');
+    endedRun('tv4', 'merged');
     const o = await polled();
     const { history, cloned, clonedBytes } = o.runs(1);
     assert.deepEqual(history.map((r) => r.ticketId), ['tv4']);
@@ -2201,22 +2202,22 @@ describe('Clones nobody needs', () => {
 
   it('at a restart, removes every clone no one needs and keeps the ones failed Runs still have for inspection', async () => {
     // The clones that had piled up by 2026-10-22, by the Run that held them.
-    before('app-2bl.1', 'failed', 'run33');
-    before('app-2bl.1', 'merged');
-    before('app-2bl.11', 'merged', 'run41');
-    before('app-2bl.18', 'failed', 'run48');
-    before('app-2bl.18', 'merged');
-    before('app-2bl.21', 'failed', 'run53');
-    before('app-2bl.21', 'in-review');
-    before('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    endedRun('app-2bl.1', 'failed', 'run33');
+    endedRun('app-2bl.1', 'merged');
+    endedRun('app-2bl.11', 'merged', 'run41');
+    endedRun('app-2bl.18', 'failed', 'run48');
+    endedRun('app-2bl.18', 'merged');
+    endedRun('app-2bl.21', 'failed', 'run53');
+    endedRun('app-2bl.21', 'in-review');
+    endedRun('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
     // The other ways a clone outlives its use.
-    before('tv-k', 'killed', 'killed-then-landed');
-    before('tv-k', 'landed');
-    before('tv-c', 'failed', 'failed-then-pr-closed');
-    before('tv-c', 'pr-closed');
-    before('tv-i', 'interrupted', 'interrupted');
-    before('tv-r', 'pr-closed');
-    before('tv-r', 'failed', 'failed-after-a-pr');
+    endedRun('tv-k', 'killed', 'killed-then-landed');
+    endedRun('tv-k', 'landed');
+    endedRun('tv-c', 'failed', 'failed-then-pr-closed');
+    endedRun('tv-c', 'pr-closed');
+    endedRun('tv-i', 'interrupted', 'interrupted');
+    endedRun('tv-r', 'pr-closed');
+    endedRun('tv-r', 'failed', 'failed-after-a-pr');
     const live = store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'needs-attention', startedAt: now });
     store.updateRun(live, { cloneDir: '/clones/live' });
     store.setHostJob(live, JSON.stringify({ prepared: { branch: 'agent/fz1', dir: '/clones/live', base: 'b'.repeat(40) } }));
@@ -2230,7 +2231,7 @@ describe('Clones nobody needs', () => {
   });
 
   it('at a restart, reports a clone it could not remove and keeps its path', async () => {
-    const id = before('tv1', 'merged', 'tv1-merged');
+    const id = endedRun('tv1', 'merged', 'tv1-merged');
     failingRemovals.add('/clones/tv1-merged');
     clonesOnDisk = ['/clones/tv1-merged', '/clones/stuck-orphan'];
     failingRemovals.add('/clones/stuck-orphan');
@@ -2242,8 +2243,8 @@ describe('Clones nobody needs', () => {
   it('at a restart, measures the clones that have no size yet in the background, without holding up the first tick', async () => {
     let open!: () => void;
     sizeGate = new Promise((resolve) => (open = resolve));
-    const unmeasured = before('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
-    store.updateRun(before('tv1', 'killed', 'tv1-killed'), { cloneBytes: 1 });
+    const unmeasured = endedRun('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    store.updateRun(endedRun('tv1', 'killed', 'tv1-killed'), { cloneBytes: 1 });
     const o = await polled();
     assert.equal(await Promise.race([o.recover().then(() => 'recovered'), new Promise((resolve) => setTimeout(resolve, 100, 'held up'))]), 'recovered');
     open();
