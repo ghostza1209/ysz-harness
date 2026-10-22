@@ -1,8 +1,8 @@
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { BacklogRow, TicketDetail } from '../src/beads';
 import { Copy } from './App';
 import type { Dict } from './i18n';
-import { ageText, build, groupTickets, keyOf, matches, parseSearch, relations, since, STATES, who, type BacklogData, type Header, type Related } from './backlog';
+import { ageText, build, buttons, groupTickets, keyOf, matches, parseSearch, relations, since, STATES, who, type BacklogAction, type BacklogData, type Button, type Header, type Related, type Ticket } from './backlog';
 
 /** An open panel: loading, its detail, or why the detail failed. */
 type Entry = { loading: true } | { detail: TicketDetail } | { error: string };
@@ -81,7 +81,7 @@ function Relation({ t, heading, items, go }: { t: Dict; heading: string; items: 
 }
 
 /** A Ticket's opened panel. Description and comments are agent-written: they are text nodes, with line breaks kept by CSS, never HTML or Markdown. */
-function Detail({ t, project, row, state, line, reasons, rows, entry, now, go }: { t: Dict; project: string; row: BacklogRow; state: string; line: string; reasons: string[]; rows: BacklogRow[]; entry: Entry; now: number; go: (project: string, id: string) => void }) {
+function Detail({ t, project, row, state, line, reasons, buttons, busy, act, rows, entry, now, go }: { t: Dict; project: string; row: BacklogRow; state: string; line: string; reasons: string[]; buttons: Button[]; busy: boolean; act: (action: BacklogAction) => void; rows: BacklogRow[]; entry: Entry; now: number; go: (project: string, id: string) => void }) {
   const rel = relations(rows, row);
   const goHere = (id: string) => go(project, id);
   const loaded = 'detail' in entry ? entry.detail : null;
@@ -103,7 +103,7 @@ function Detail({ t, project, row, state, line, reasons, rows, entry, now, go }:
           {row.assignee && <span className="tag">@{who(row.assignee)}</span>}
         </div>
         <h3 className="bl-dtitle">{row.title}</h3>
-        <div className={`bl-state ${state}`}>
+        <div className={`bl-state ${state} ${busy ? 'bl-busy' : ''}`}>
           {reasons.length ? (
             <>
               <b>{t.backlog.markedHead}</b>
@@ -159,6 +159,15 @@ function Detail({ t, project, row, state, line, reasons, rows, entry, now, go }:
           )}
       </div>
       {state === 'held' && <aside className="bl-actions">{t.backlog.heldActions}</aside>}
+      {buttons.length > 0 && (
+        <aside className="bl-actions bl-buttons">
+          {buttons.map((b) => (
+            <button key={b.action} className={b.primary ? 'primary' : ''} disabled={busy} onClick={() => act(b.action)}>
+              {b.label}
+            </button>
+          ))}
+        </aside>
+      )}
     </div>
   );
 }
@@ -183,31 +192,43 @@ function GroupHead({ t, project, header, closedId, count, toggle, open }: { t: D
 }
 
 /** The Backlog page: every Project's unclosed Tickets by Backlog state, grouped under their parents. `stages` maps a held Ticket's `project/id` to its Run's stage. */
-function Backlog({ t, stages, refreshMs }: { t: Dict; stages: ReadonlyMap<string, string>; refreshMs: number }) {
+function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<string, string>; refreshMs: number; post: (url: string, done: string) => Promise<void> }) {
   const [data, setData] = useState<BacklogData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('all');
   const [query, setQuery] = useState('');
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [opened, setOpened] = useState<Record<string, Entry>>({});
+  // The Tickets with an action in flight, by `project/id`.
+  const [flying, setFlying] = useState<Record<string, BacklogAction>>({});
 
-  // Only while the page is open.
-  useEffect(() => {
-    let open = true;
-    const load = () =>
+  const load = useCallback(
+    () =>
       fetch('/api/backlog')
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
         .then(
-          (d: BacklogData) => open && (setData(d), setError(null)),
-          (e: Error) => open && setError(e.message),
-        );
+          (d: BacklogData) => (setData(d), setError(null)),
+          (e: Error) => setError(e.message),
+        ),
+    [],
+  );
+  // Only while the page is open.
+  useEffect(() => {
     void load();
     const id = setInterval(load, refreshMs);
-    return () => {
-      open = false;
-      clearInterval(id);
-    };
-  }, [refreshMs]);
+    return () => clearInterval(id);
+  }, [load, refreshMs]);
+
+  /** POST a button's action: the row reads in flight, `post` toasts the outcome (or the server's refusal) and refreshes the Dashboard, then the tab refreshes too. */
+  const act = async (tk: Ticket, action: BacklogAction) => {
+    const key = keyOf(tk.project, tk.row.id);
+    const base = `/api/projects/${encodeURIComponent(tk.project)}`;
+    const id = encodeURIComponent(tk.row.id);
+    setFlying((f) => ({ ...f, [key]: action }));
+    await post(action === 'run-now' ? `${base}/run-now/${id}` : `${base}/tickets/${id}/${action}`, action === 'run-now' ? t.runNowDone(tk.row.id) : t.backlog.done[action](tk.row.id));
+    await load();
+    setFlying(({ [key]: _gone, ...rest }) => rest);
+  };
 
   const model = useMemo(() => data && build(data, stages, t), [data, stages, t]);
   const shown = useMemo(() => {
@@ -254,9 +275,11 @@ function Backlog({ t, stages, refreshMs }: { t: Dict; stages: ReadonlyMap<string
     expand(project, id);
   };
   const now = Date.now();
-  const detail = (project: string, h: { row: BacklogRow; state: string; line: string; reasons: string[] }) => {
-    const entry = opened[keyOf(project, h.row.id)];
-    return entry && <Detail t={t} project={project} row={h.row} state={h.state} line={h.line} reasons={h.reasons} rows={data?.projects.find((p) => p.name === project)?.rows ?? []} entry={entry} now={now} go={go} />;
+  const detail = (project: string, h: { row: BacklogRow; state: string; line: string; reasons: string[] }, tk?: Ticket) => {
+    const key = keyOf(project, h.row.id);
+    const entry = opened[key];
+    const doing = flying[key];
+    return entry && <Detail t={t} project={project} row={h.row} state={h.state} line={doing ? t.backlog.inFlight[doing] : h.line} reasons={doing ? [] : h.reasons} buttons={tk ? buttons(tk, t) : []} busy={!!doing} act={(a) => tk && void act(tk, a)} rows={data?.projects.find((p) => p.name === project)?.rows ?? []} entry={entry} now={now} go={go} />;
   };
 
   const toggle = (name: string) =>
@@ -299,19 +322,23 @@ function Backlog({ t, stages, refreshMs }: { t: Dict; stages: ReadonlyMap<string
             <div key={g.key} className="bl-group">
               <GroupHead t={t} project={g.project} header={g.header} closedId={g.closedId} count={g.tickets.length} toggle={g.header?.row.issue_type === 'epic' ? () => flip(g.project, g.header!.row.id) : null} open={!!(g.header && opened[keyOf(g.project, g.header.row.id)])} />
               {g.header?.row.issue_type === 'epic' && opened[keyOf(g.project, g.header.row.id)] && <div className="bl-item">{detail(g.project, g.header)}</div>}
-              {g.tickets.map((tk) => (
-                <div key={tk.row.id} className="bl-item">
-                  <div className="bl-row bl-click" aria-expanded={!!opened[keyOf(tk.project, tk.row.id)]} {...press(() => flip(tk.project, tk.row.id))}>
-                    <span className={`tag prio p${tk.row.priority}`}>P{tk.row.priority}</span>
-                    <code className="bl-id">{tk.row.id}</code>
-                    <span className="bl-title" title={tk.row.title}>
-                      {tk.row.title}
-                    </span>
-                    <span className={`bl-line ${tk.state}`}>{tk.line}</span>
+              {g.tickets.map((tk) => {
+                const doing = flying[keyOf(tk.project, tk.row.id)];
+                return (
+                  <div key={tk.row.id} className="bl-item">
+                    <div className="bl-row bl-click" aria-expanded={!!opened[keyOf(tk.project, tk.row.id)]} {...press(() => flip(tk.project, tk.row.id))}>
+                      <span className={`tag prio p${tk.row.priority}`}>P{tk.row.priority}</span>
+                      <code className="bl-id">{tk.row.id}</code>
+                      <span className="bl-title" title={tk.row.title}>
+                        {tk.row.title}
+                      </span>
+                      <span className={`bl-line ${tk.state} ${doing ? 'bl-busy' : ''}`}>{doing ? t.backlog.inFlight[doing] : tk.line}</span>
+                    </div>
+                    {doing && <div className="bl-bar" />}
+                    {detail(tk.project, tk, tk)}
                   </div>
-                  {detail(tk.project, tk)}
-                </div>
-              ))}
+                );
+              })}
             </div>
           ))}
         </>

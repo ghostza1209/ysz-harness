@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { BacklogRow } from '../src/beads';
 import type { QueueItem } from '../src/core';
-import { ageText, build, groupTickets, matches, parseSearch, relations, since, who, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
+import { ageText, build, buttons, groupTickets, matches, parseSearch, relations, since, who, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
 import { en, th } from '../web/i18n';
 
 const row = (id: string, over: Partial<BacklogRow> = {}): BacklogRow => ({
@@ -212,4 +212,34 @@ it('shows ysz for its bd actor in a name and ages a comment from its RFC 3339 ti
   const at = Date.parse('2026-10-22T10:00:00Z');
   assert.equal(since('2026-10-22T10:00:00Z', at + 4 * 60_000 + 5000, en), '4m ago');
   assert.equal(since('2026-10-22T10:00:00Z', at + 2 * 86_400_000, en), '2d ago');
+});
+
+/** The labels of the last row's buttons (or of `id`'s), primary ones starred. */
+const buttonsOf = (rows: BacklogRow[], ready: QueueItem[] = [], id = rows[rows.length - 1].id) => {
+  const tk = build(data(rows, ready), noStages, en).tickets.find((x) => x.row.id === id)!;
+  return buttons(tk, en).map((b) => b.label + (b.primary ? '*' : ''));
+};
+
+it('offers the buttons each Backlog state allows', () => {
+  assert.deepEqual(buttonsOf([row('plain')]), ['Mark Ready*', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('asks', { labels: ['needs-info'] })]), ['Mark Ready*', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('mine', { status: 'in_progress', assignee: 'yoss' })]), ['Mark Ready*', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('marked', { labels: ['ready-for-agent'] })]), ['Unmark Ready', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('ready', { labels: ['ready-for-agent'] })], [queued('ready', { waitReason: 'next up' })]), ['Unmark Ready', 'Run now*', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('held', { status: 'in_progress', assignee: 'orchestrator' })]), []);
+  assert.deepEqual(buttonsOf([row('review', { status: 'in_progress', assignee: 'orchestrator', labels: ['in-review'] })]), []);
+});
+
+it('offers no Run now on a Ready Ticket already run-now or waiting on "not onboarded"', () => {
+  const rows = [row('now', { labels: ['ready-for-agent'] }), row('new', { labels: ['ready-for-agent'] })];
+  const ready = [queued('now', { runNow: true, waitReason: 'next up' }), queued('new', { waitReason: 'not onboarded' })];
+  assert.deepEqual(buttonsOf(rows, ready, 'now'), ['Unmark Ready', 'Skip ysz']);
+  assert.deepEqual(buttonsOf(rows, ready, 'new'), ['Unmark Ready', 'Skip ysz']);
+});
+
+it('words Allow ysz as returning to the queue only when skipped is the sole reason a Marked Ready Ticket waits', () => {
+  const skipped = row('k', { labels: ['ready-for-agent', 'orchestrator:skip'] });
+  assert.deepEqual(buttonsOf([skipped]), ['Unmark Ready', 'Allow ysz (returns to queue)']);
+  assert.deepEqual(buttonsOf([row('b'), { ...skipped, dependencies: [blocks('b')] }], [], 'k'), ['Unmark Ready', 'Allow ysz']);
+  assert.deepEqual(buttonsOf([row('s', { labels: ['orchestrator:skip'] })]), ['Mark Ready*', 'Allow ysz']);
 });

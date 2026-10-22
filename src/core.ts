@@ -762,7 +762,11 @@ export function createOrchestrator(deps: {
       const p = byName.get(project);
       if (!p) throw new Error(`Unknown Project ${project}`);
       const why = refusal(await beads.ticketFacts(p, ticketId), action);
-      if (why) throw new Error(why);
+      if (why) {
+        // The Backlog was out of date: show the human what bd has now.
+        await refresh(p);
+        throw new Error(why);
+      }
       await beads.ticketAction(p, ticketId, action);
       await refresh(p);
     },

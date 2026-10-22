@@ -1,6 +1,6 @@
 import type { BacklogRow } from '../src/beads';
 import type { Orchestrator, QueueItem } from '../src/core';
-import { ORCHESTRATOR } from '../src/ticketActions';
+import { allowedActions, ORCHESTRATOR, type TicketAction } from '../src/ticketActions';
 import type { Dict } from './i18n';
 
 /** What GET /api/backlog serves: each Project's rows in registry order, and the Ready queue of all Projects. */
@@ -30,6 +30,8 @@ export interface Ticket {
   line: string;
   /** Marked Ready only: each reason `line` joins, so the detail can list them one per line. */
   reasons: string[];
+  /** In the Ready queue, not yet run-now and onboarded: Run now would do something. */
+  canRunNow: boolean;
 }
 
 /** A group's header: a parent that is in the Backlog, with its own state line ("Epic · 9 open" for an epic). */
@@ -88,7 +90,11 @@ export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t:
       return { state: 'not-ready', line: t.backlog.notReady(r.assignee && r.assignee !== YSZ ? `${plain(r.status)}, ${r.assignee}` : null), reasons: [] };
     };
 
-    for (const r of rows) if (r.issue_type !== 'epic') tickets.push({ project: p.name, row: r, ...lineOf(r) });
+    for (const r of rows) {
+      if (r.issue_type === 'epic') continue;
+      const q = queue.get(keyOf(p.name, r.id))?.q;
+      tickets.push({ project: p.name, row: r, ...lineOf(r), canRunNow: !!q && !q.runNow && q.waitReason !== 'not onboarded' });
+    }
     for (const id of children.keys()) {
       const r = byRowId.get(id);
       if (!r) continue;
@@ -96,6 +102,34 @@ export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t:
     }
   }
   return { tickets, headers, projects: data.projects.map((p) => p.name) };
+}
+
+/** What a button does: a Ticket action the server takes, or Run now. */
+export type BacklogAction = TicketAction | 'run-now';
+
+export interface Button {
+  action: BacklogAction;
+  label: string;
+  primary: boolean;
+}
+
+/**
+ * The buttons a Ticket's panel shows, in order: Mark Ready or Unmark Ready, Run now, Skip ysz or Allow ysz. The Ticket
+ * actions come from the function the server checks them with. A Ticket ysz holds gets none. Allow ysz says it returns
+ * the Ticket to the queue when skipped is the only reason a Marked Ready Ticket waits.
+ */
+export function buttons(tk: Ticket, t: Dict): Button[] {
+  const b = t.backlog.buttons;
+  const allowed = allowedActions(tk.row);
+  const returns = tk.state === 'marked' && tk.reasons.length === 1 && has(tk.row, 'orchestrator:skip');
+  const all: Record<BacklogAction, Button> = {
+    'mark-ready': { action: 'mark-ready', label: b.markReady, primary: true },
+    'unmark-ready': { action: 'unmark-ready', label: b.unmarkReady, primary: false },
+    'run-now': { action: 'run-now', label: t.runNow, primary: true },
+    skip: { action: 'skip', label: b.skip, primary: false },
+    allow: { action: 'allow', label: returns ? b.allowReturns : b.allow, primary: false },
+  };
+  return (['mark-ready', 'unmark-ready', 'run-now', 'skip', 'allow'] as const).filter((a) => (a === 'run-now' ? tk.canRunNow : allowed.includes(a))).map((a) => all[a]);
 }
 
 export interface Search {

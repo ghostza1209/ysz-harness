@@ -2244,6 +2244,7 @@ describe('Backlog actions', () => {
     backlogs = { PopDeal: [withRow('pd1', { status: 'closed' })] }; // closed in a terminal since the poll
     await assert.rejects(o.ticketAction('PopDeal', 'pd1', 'mark-ready'), /pd1 is closed/);
     assert.deepEqual(writes, []);
+    assert.equal(o.backlog().find((p) => p.name === 'PopDeal')?.rows?.[0].status, 'closed'); // the refusal re-read the Project
   });
 
   it('rejects an unknown Project', async () => {
