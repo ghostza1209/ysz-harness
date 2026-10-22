@@ -13,7 +13,7 @@ import { openStore } from './store';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT ?? 4000);
 /** bd serializes all access to a Project's DB, so every poll briefly blocks the user's own bd calls. */
-const POLL_INTERVAL_MS = 30_000;
+const POLL_INTERVAL_MS = 10_000;
 
 const beads = createBeadsGateway({ yszRepo: root });
 const orchestrator = createOrchestrator({
@@ -40,7 +40,7 @@ for (const problem of await orchestrator.recover()) console.error(`[recover] ${p
 // Sequential, so a slow poll can never overlap the next one. A tick only starts Runs; they finish in the background.
 void (async () => {
   for (;;) {
-    // Before the poll, which can run long: a bd lease lasts 5 minutes and the loop comes round every 30 seconds.
+    // Before the poll, which can run long: a bd lease lasts 5 minutes and the loop comes round every 10 seconds.
     await Promise.all(projects.map((p) => beads.heartbeat(p).catch((err) => console.error(`[heartbeat] ${p.name}: ${err.message}`))));
     for (const problem of await orchestrator.watchReviews()) console.error(`[review-watch] ${problem}`);
     await orchestrator.poll();
