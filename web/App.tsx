@@ -344,7 +344,7 @@ const ago = (ms: number, t: Dict) => {
 /** A stage's name for the states on the stage bar, so pills and bar agree. */
 const label = (state: string) => STAGE_NAMES[state as keyof typeof STAGE_NAMES] ?? state.replace('-', ' ');
 /** Done first, trouble last, so a group's counts read the same way every time. */
-const STATE_ORDER: RunState[] = ['merged', 'in-review', 'pr-closed', 'broken-down', 'claimed', 'agent', 'agent-review', 'host', 'needs-attention', 'interrupted', 'killed', 'failed'];
+const STATE_ORDER: RunState[] = ['merged', 'in-review', 'pr-closed', 'broken-down', 'landed', 'claimed', 'agent', 'agent-review', 'host', 'needs-attention', 'interrupted', 'killed', 'failed'];
 /** How many of `runs` are in each state, in STATE_ORDER. */
 const stateCounts = (runs: RunRow[]) => {
   const n = new Map<RunState, number>();
@@ -436,6 +436,7 @@ const FILTERS = {
   merged: (s: string) => s === 'merged',
   'pr-closed': (s: string) => s === 'pr-closed',
   'broken-down': (s: string) => s === 'broken-down',
+  landed: (s: string) => s === 'landed',
   failed: (s: string) => s === 'failed' || s === 'interrupted',
   killed: (s: string) => s === 'killed',
   // Lists the archived Runs instead of the history.
@@ -684,7 +685,7 @@ export function App() {
               {t.delete}
             </button>
           )}
-          {(r.state === 'merged' || r.state === 'pr-closed' || r.state === 'broken-down') &&
+          {(r.state === 'merged' || r.state === 'pr-closed' || r.state === 'broken-down' || r.state === 'landed') &&
             (r.archivedAt ? (
               <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
                 {t.unarchive}
@@ -880,6 +881,7 @@ export function App() {
                         <span className="tag">{q.project}</span>
                         <span className={`tag prio p${q.priority}`}>P{q.priority}</span>
                         {q.spec && <span className="tag" title={t.specTitle}>Spec</span>}
+                        {q.epicPr && <span className="tag" title={t.epicPrTitle}>Epic PR</span>}
                         <Copy text={q.id} />
                       </div>
                       <div className="title">{q.title}</div>

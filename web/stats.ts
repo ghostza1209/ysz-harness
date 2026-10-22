@@ -3,7 +3,7 @@ import type { BacklogPoint, RunState } from '../src/store';
 
 export type Range = '7' | '30' | 'all';
 /** Where a Run is now, as the Stats page groups it; bottom of a stack first. */
-export const OUTCOMES = ['merged', 'in-review', 'pr-closed', 'broken-down', 'failed', 'killed', 'running'] as const;
+export const OUTCOMES = ['merged', 'in-review', 'pr-closed', 'broken-down', 'landed', 'failed', 'killed', 'running'] as const;
 export type Outcome = (typeof OUTCOMES)[number];
 
 /** Interrupted counts as failed, as in the History filter, and every live state as running. */
@@ -40,9 +40,9 @@ export function mergeRate(runs: StatsRun[]) {
   return { merged: outcomes.filter((o) => o === 'merged').length, of: outcomes.filter((o) => o === 'merged' || o === 'pr-closed' || o === 'failed').length };
 }
 
-/** First-Attempt passes out of the Runs that got a PR. */
+/** First-Attempt passes out of the Runs that got a PR, bar an epic's own PR Run, which has no Attempt. */
 export function firstAttemptPass(runs: StatsRun[]) {
-  const withPr = runs.filter((r) => r.state === 'in-review' || r.state === 'merged' || r.state === 'pr-closed');
+  const withPr = runs.filter((r) => r.attempt > 0 && (r.state === 'in-review' || r.state === 'merged' || r.state === 'pr-closed'));
   return { passed: withPr.filter((r) => r.attempt === 1).length, of: withPr.length };
 }
 

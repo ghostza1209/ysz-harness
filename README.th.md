@@ -15,7 +15,7 @@
 3. **Implement agent** ทำ Ticket ใน sandbox จากนั้น **Review agent** รีวิวและแก้งาน ถ้า Attempt แรกล้มจะลองใหม่อีกครั้งเดียว
 4. ฝั่ง host push branch แล้วเปิด PR เข้า `baseBranch` ของ Project ตัว bead จะได้คอมเมนต์ลิงก์ PR และ label `in-review`
    Ticket ที่ blocker ตัวเดียวที่ยังไม่ปิดอยู่ใน `In review` ไม่ต้องรอ merge: Run จะ clone จาก branch `agent/<id>` ของ blocker แล้วเปิด stacked PR ต่อบน branch นั้น (`gh stack link` ต้องติดตั้ง extension `gh-stack`) ดู [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md)
-   Ticket ที่ epic แม่ติด label `epic-branch` จะ clone และเปิด PR เข้า `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) แทน ทำให้ `baseBranch` ได้ PR เดียวต่อ epic ดู [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
+   Ticket ที่ epic แม่ติด label `epic-branch` จะ clone จาก `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) ใน repo ของ Project แทน และไม่มี PR ของตัวเอง แต่จะ land ลง branch นั้น คือ branch ถูก fast-forward แล้ว bead ปิด เมื่อ child ปิดครบ ysz จะ push branch แล้วเปิด PR เดียวของ epic เข้า `baseBranch` และปิด epic ให้เมื่อ PR นั้น merge ดู [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md) ส่วน epic ที่มี branch บน origin อยู่แล้วยังใช้ child PR ตาม [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
 epic ที่ติด label `ready-for-agent` และยังไม่มี child เลยเรียกว่า **Spec** Run ของ Spec ไม่มี Review agent และไม่เปิด PR: breakdown agent จะแตก Spec เป็น child Ticket แล้ว ysz สร้างไว้ใต้ epic โดยติด `ready-for-agent` ให้เลย Ticket เหล่านี้จะเข้าคิวใน poll ถัดไป ดู [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md)
@@ -54,7 +54,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
 | กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
 | ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic ที่ยังไม่มี child เมื่อ Spec เขียนเสร็จแล้ว |
-| รวม PR ของ epic ไว้ใน branch เดียว | `bd update <epic-id> --add-label epic-branch` แล้วเปิด PR `epic/<epic-id>` → `baseBranch` เองเมื่อ merge child ครบ |
+| ได้ PR เดียวสำหรับทั้ง epic | `bd update <epic-id> --add-label epic-branch` ก่อน child เริ่มรัน แล้ว ysz จะเปิด PR `epic/<epic-id>` → `baseBranch` ให้เมื่อ child ปิดครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |

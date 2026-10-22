@@ -1,5 +1,7 @@
 # A labelled epic's children open their PRs onto its epic branch
 
+> Superseded in part by [ADR 0008](0008-epic-children-land-on-a-local-epic-branch.md): the children of an epic not yet on origin land on a local epic branch with no PRs of their own, and ysz opens the epic's PR. An epic already on origin finishes as below.
+
 ysz opens one PR per Ticket, so an epic like thaivis app-2bl (26 agent Tickets) lands 26 PRs on `develop`. The human may want `develop` to get one PR per epic instead. So when a Ticket's parent epic is labelled `epic-branch`, its Run clones from `origin/<prefix><epic-id>` and opens its PR against that branch instead of `baseBranch`. The prefix is the Project's `epicBranchPrefix`, `epic/` by default. The first child's Run pushes the epic branch from `origin/<baseBranch>` when origin lacks it. The human merges each child PR into the epic branch, and that merge is still the child's Merged: its bead closes and its dependents become Ready, starting from an epic branch that already holds its code. The human opens the epic branch's own PR to `baseBranch` and merges it. ysz never opens or touches that PR.
 
 ## Consequences

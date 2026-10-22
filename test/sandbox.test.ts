@@ -366,8 +366,10 @@ describe('imageExists', () => {
     assert.equal(await imageExists('ysz-harness/gone', docker), false);
   });
 
-  it('is false, not a throw, when docker cannot be run', async () => {
-    assert.equal(await imageExists('ysz-harness/app', join(root, 'no-such-docker')), false);
+  it('throws, not false, when docker cannot be asked', async () => {
+    await assert.rejects(imageExists('ysz-harness/app', join(root, 'no-such-docker')), /ENOENT/);
+    writeFileSync(docker, '#!/bin/sh\necho "request returned 500 Internal Server Error for API route and version" >&2; exit 1\n');
+    await assert.rejects(imageExists('ysz-harness/app', docker), /500 Internal Server Error/);
   });
 });
 

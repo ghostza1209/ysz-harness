@@ -16,6 +16,8 @@ export interface Ticket {
   createdAt: string;
   /** A Spec: its Run breaks it down into child Tickets instead of implementing it (ADR 0007). */
   spec?: true;
+  /** An epic on its own branch whose children are all closed: its Run opens the epic's PR (ADR 0008). */
+  epicPr?: true;
 }
 
 /** One child Ticket a breakdown agent planned; `blockedBy` holds the keys of other planned Tickets. */
@@ -52,6 +54,8 @@ export interface BeadsGateway {
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
    * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
    * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, and no children at all.
+   * So do epics marked `epicPr`: open, unassigned and labelled epic-branch, not orchestrator:skip or needs-info, with every
+   * child closed. A child of an open epic-branch epic never counts an In review blocker as Ready: it lands on the epic branch.
    */
   listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
@@ -88,6 +92,11 @@ export interface BeadsGateway {
    * false, writing nothing, when the human changed the bead since (no longer in_progress and the Orchestrator's).
    */
   merged(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
+   * The claimed Ticket's commits landed on its epic branch (ADR 0008): close it, naming the branch and tip. false, writing
+   * nothing, when the human changed the bead since.
+   */
+  landed(project: Project, id: string, branch: string, tip: string): Promise<boolean>;
   /**
    * The in-review Ticket's PR closed unmerged: comment why, then label needs-info, drop ready-for-agent and in-review,
    * and release the claim. false, writing nothing, when the human changed the bead since.
@@ -194,9 +203,12 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       const beads: Bead[] = JSON.parse(unclosed);
       const byId = new Map(beads.map((b) => [b.id, b]));
       const parents = new Set([...beads, ...(JSON.parse(closed) as Bead[])].map((b) => b.parent));
+      const unclosedParents = new Set(beads.map((b) => b.parent));
       // bd ready counts an In review blocker as open; a Ticket whose only unclosed blocker is one stacks on its PR.
+      // Not a child of an epic on its own branch: that lands on the epic branch, which must already hold its blockers.
       const stacked = beads.filter((b) => {
         if (b.status !== 'open' || b.issue_type === 'epic' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
+        if (b.parent && byId.get(b.parent)?.labels?.includes('epic-branch')) return false;
         const blockers = (b.dependencies ?? []).filter((d) => d.type === 'blocks').flatMap((d) => byId.get(d.depends_on_id) ?? []);
         return blockers.length === 1 && isInReview(blockers[0]);
       });
@@ -208,6 +220,12 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
           !parents.has(b.id) && (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
       );
       for (const b of specs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
+      const epicPrs = beads.filter(
+        (b) =>
+          b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('epic-branch') &&
+          !b.labels.includes('orchestrator:skip') && !b.labels.includes('needs-info') && parents.has(b.id) && !unclosedParents.has(b.id),
+      );
+      for (const b of epicPrs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, epicPr: true });
       return { tickets, backlog: beads.length };
     },
 
@@ -232,7 +250,8 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       if (!(await hasChildren(project, spec.id))) {
         const keys = new Map(plan.map((t, i) => [t.key, `t${i}`])); // bd's own keys, so an agent's key never reaches bd
         const graph = {
-          nodes: plan.map((t) => ({ key: keys.get(t.key), title: t.title, description: t.body, parent_id: spec.id, labels: ['ready-for-agent'], priority: spec.priority })),
+          // Explicit <spec>.N ids, as bd create --parent mints: --graph would mint random ones. bd refuses a taken id atomically.
+          nodes: plan.map((t, i) => ({ key: keys.get(t.key), id: `${spec.id}.${i + 1}`, title: t.title, description: t.body, parent_id: spec.id, labels: ['ready-for-agent'], priority: spec.priority })),
           edges: plan.flatMap((t) => t.blockedBy.map((b) => ({ from_key: keys.get(t.key), to_key: keys.get(b), type: 'blocks' }))),
         };
         const dir = await mkdtemp(join(tmpdir(), 'ysz-plan-'));
@@ -327,6 +346,13 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
           if (children.every((c) => c.status === 'closed')) await write(project, ['close', issue.parent, '--reason', `Every child closed, the last by ${prUrl}`, '--force']);
         }
       }
+      return true;
+    },
+
+    async landed(project, id, branch, tip) {
+      if (!(await held(project, id))) return false;
+      // --force, as in merged(): the commits are on the epic branch, so a blocker added since must not keep the bead open.
+      await write(project, ['close', id, '--reason', `Landed on ${branch} at ${tip}`, '--force']);
       return true;
     },
 

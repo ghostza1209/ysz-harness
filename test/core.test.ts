@@ -87,9 +87,15 @@ let collected: (dir: string) => { tip: string; commits: number } | Error;
 let clones: number;
 /** Projects whose sandbox image is absent, and the Projects whose preflight fails. */
 let missingImages: Set<string>;
+let dockerDown: boolean;
 let failingPreflights: Set<string>;
 /** Every preflight the orchestrator ran, by Project. */
 let preflights: string[];
+/** Whether prepare makes clones that land on epic/e-1 (ADR 0008), and the error the next land fails with. */
+let landing: boolean;
+let landError: Error | undefined;
+/** The fields showContext adds to each Ticket's bead, by id. */
+let beadFields: Record<string, Record<string, unknown>>;
 
 const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
@@ -131,7 +137,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers, inReviewBlocker, openFriction: [] };
+    return { ticket: { id, ...beadFields[id] }, parent: null, closedBlockers, inReviewBlocker, openFriction: [] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -141,6 +147,12 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (outcomeError) throw outcomeError;
     if (touchedByHand.has(`${project.name}/${id}`)) return false;
     writes.push(`merged ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async landed(project, id, branch, tip) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`landed ${project.name}/${id} on ${branch} at ${tip}`);
     return true;
   },
   async prClosed(project, id, prUrl) {
@@ -177,6 +189,7 @@ const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
 const fakeSandbox: SandboxRunner = {
   async hasImage(project) {
+    if (dockerDown) throw new Error('request returned 500 Internal Server Error');
     return !missingImages.has(project.name);
   },
   implement(req) {
@@ -210,7 +223,7 @@ const fakeHost: HostSteps = {
     preparedContexts.push(context);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
+    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId, ...(landing && { epic: 'epic/e-1', land: true as const }) };
   },
   async writeTicket(_prepared, context) {
     if (writeTicketError) throw writeTicketError;
@@ -227,6 +240,15 @@ const fakeHost: HostSteps = {
     if (opts) ({ signal: _signal, log: _log, ...publishOpts } = opts);
     opts?.log?.(`pushing ${branch}`);
     return { url: await publish(opts?.signal), base: publishBase };
+  },
+  async land(_project, { branch, epic }, opts) {
+    hostSteps.push(`land ${branch} on ${epic}${opts?.tip ? ` at ${opts.tip}` : ''}`);
+    if (landError) throw landError;
+    return opts?.tip ?? 'd'.repeat(40);
+  },
+  async publishEpic(_project, epic, key, opts) {
+    hostSteps.push(`publishEpic ${epic.id} as ${key}${opts?.reviewSkipped ? `, review skipped: ${opts.reviewSkipped}` : ''}`);
+    return { url: await publish(opts?.signal), base: 'main' };
   },
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
@@ -289,8 +311,12 @@ beforeEach(() => {
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
   clones = 0;
   missingImages = new Set();
+  dockerDown = false;
   failingPreflights = new Set();
   preflights = [];
+  landing = false;
+  landError = undefined;
+  beadFields = {};
 });
 
 async function polled(registry: readonly Project[] = projects) {
@@ -588,6 +614,16 @@ describe('infrastructure gates', () => {
     assert.deepEqual(writes.filter((w) => w.includes('fazwaz')), []);
     assert.deepEqual(reasons(o), ['fz1: image missing']);
     assert.deepEqual(preflights.sort(), ['PopDeal', 'thaivis']);
+  });
+
+  it('shows "docker down", not "image missing", when docker cannot be asked, and claims nothing', async () => {
+    dockerDown = true;
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes, []);
+    assert.deepEqual(reasons(o), ['fz1: docker down', 'pd1: docker down', 'tv1: docker down']);
+    assert.deepEqual(preflights, []);
   });
 
   it('claims the Ticket on the next tick once the preflight passes, with no Attempt burned in between', async () => {
@@ -1476,6 +1512,113 @@ describe('Friction an agent reports', () => {
   });
 });
 
+describe('an epic on its own branch (ADR 0008)', () => {
+  const D = 'd'.repeat(40);
+  const epicPr = (id: string): Ticket => ({ ...ticket(id, 2, '2026-01-01T00:00:00Z'), epicPr: true });
+
+  it('lands a child on the epic branch instead of publishing: bead closed as landed, Run ends landed with no PR, clone removed', async () => {
+    landing = true;
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(writes, ['claim thaivis/tv1', `landed thaivis/tv1 on epic/e-1 at ${D}`]);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1', 'land agent/tv1 on epic/e-1', 'removeClone /clones/tv1-1']);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.prUrl, run.prBase, run.note, run.cloneDir], ['landed', 1, null, 'epic/e-1', null, null]);
+    assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it('lands the implement commits when the review agent stops, and notes the skipped review on the Run', async () => {
+    landing = true;
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.equal(hostSteps[2], `land agent/tv1 on epic/e-1 at ${'a'.repeat(40)}`);
+    assert.equal(o.runs().history[0].note, 'review skipped: the review agent stopped without signalling COMPLETE');
+  });
+
+  it('parks a landing that fails in needs-attention with the bead open, and Retry lands it, then closes the bead', async () => {
+    landing = true;
+    landError = new Error('git fetch failed: ! [rejected] agent/tv1 -> epic/e-1 (non-fast-forward)');
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [parked] = o.runs().live;
+    assert.deepEqual([parked.state, parked.note], ['needs-attention', 'git fetch failed: ! [rejected] agent/tv1 -> epic/e-1 (non-fast-forward)']);
+    assert.deepEqual(writes, ['claim thaivis/tv1']);
+
+    landError = undefined;
+    await o.retryHostStep(parked.id);
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', `landed thaivis/tv1 on epic/e-1 at ${D}`]);
+    assert.equal(o.runs().history[0].state, 'landed');
+  });
+
+  it('runs an epic whose children are all closed with no Attempt: opens its PR titled by its Jira key, then marks the epic in review', async () => {
+    queues = { thaivis: [epicPr('e-1')] };
+    beadFields = { 'e-1': { labels: ['epic-branch', 'OP-9'] } };
+    const o = await polled();
+    assert.deepEqual(o.readyQueue().map((q) => [q.id, q.epicPr]), [['e-1', true]]);
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(writes, ['claim thaivis/e-1', `markInReview thaivis/e-1 ${PR_URL}`]);
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9']);
+    assert.deepEqual(agentCalls, []);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.prUrl, run.prBase], ['in-review', 0, PR_URL, null]);
+  });
+
+  it("heads the epic's PR with each child of this epic that landed with its review skipped", async () => {
+    const landedRun = (ticketId: string, prBase: string, note: string | null) => {
+      const id = store.insertRun({ project: 'thaivis', ticketId, title: ticketId, state: 'landed', startedAt: now });
+      store.updateRun(id, { prBase, note });
+    };
+    landedRun('e-1.1', 'epic/e-1', 'review skipped: the review agent failed: boom');
+    landedRun('e-1.2', 'epic/e-1', null);
+    landedRun('e-2.1', 'epic/e-2', 'review skipped: elsewhere');
+    landedRun('e-1.3', 'epic/e-1', 'review skipped: the review agent stopped without signalling COMPLETE');
+    queues = { thaivis: [epicPr('e-1')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as e-1, review skipped: e-1.1: the review agent failed: boom; e-1.3: the review agent stopped without signalling COMPLETE']);
+  });
+
+  it("resumes an epic's PR after a restart without a clone, and parks it when it fails again", async () => {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'e-1', title: 'the epic', state: 'host', startedAt: now });
+    store.setHostJob(id, JSON.stringify({ epicKey: 'OP-9', followUps: [] }));
+    publish = async () => {
+      throw new Error('git push failed: rejected');
+    };
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9']);
+    assert.deepEqual([o.runs().live[0].state, o.runs().live[0].note], ['needs-attention', 'git push failed: rejected']);
+
+    publish = async () => PR_URL;
+    await o.retryHostStep(id);
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9', 'publishEpic e-1 as OP-9']); // no clone to remove
+    assert.deepEqual(writes, [`markInReview thaivis/e-1 ${PR_URL}`]);
+  });
+
+  it('archives a landed Run like a merged one', async () => {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'tv1', title: 'a Run', state: 'landed', startedAt: now });
+    const o = await polled();
+    o.setArchived(id, true);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [id]);
+  });
+});
+
 describe('a host step that fails', () => {
   /** A thaivis Run whose first publish fails; the Run then waits in needs-attention. */
   async function parkedRun(failures: Error[] = [new Error('git push failed: rejected')]) {
@@ -1963,10 +2106,10 @@ describe('Archive', () => {
     assert.deepEqual(o.runs().archived.map((r) => r.id), [brokenDown, closed]);
   });
 
-  it('refuses Runs that are not merged, PR closed or broken down', async () => {
+  it('refuses Runs that are not merged, PR closed, broken down or landed', async () => {
     const o = await polled();
     for (const state of ['agent', 'in-review', 'failed', 'killed'] as const) {
-      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged, PR closed or broken down/);
+      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged, PR closed, broken down or landed/);
     }
     assert.deepEqual(o.runs().archived, []);
   });

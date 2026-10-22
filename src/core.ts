@@ -1,5 +1,5 @@
 import type { BeadsGateway, Ticket, TicketContext } from './beads';
-import type { HostSteps, Prepared } from './host';
+import { epicBranchOf, ticketKey, type HostSteps, type Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
 import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
@@ -7,7 +7,7 @@ import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
 
-export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot' | 'preflight failed' | 'image missing';
+export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot' | 'preflight failed' | 'image missing' | 'docker down';
 
 export interface QueueItem {
   project: string;
@@ -20,6 +20,8 @@ export interface QueueItem {
   runNow: boolean;
   /** A Spec, which its Run breaks down into child Tickets. */
   spec?: true;
+  /** An epic whose children are all closed, whose Run opens its PR. */
+  epicPr?: true;
 }
 
 /** A Run as the Stats page gets it: without the fields it never reads, a failure note above all. */
@@ -80,7 +82,7 @@ export interface Orchestrator {
    * could not be removed, or if the Run was killed but its Ticket never released: recover() needs the row to keep it skipped.
    */
   deleteRun(runId: number): Promise<void>;
-  /** Archive a merged, PR-closed or broken-down Run out of the history, or bring it back. */
+  /** Archive a merged, PR-closed, broken-down or landed Run out of the history, or bring it back. */
   setArchived(runId: number, archived: boolean): void;
   /**
    * Ask GitHub about each in-review Run's PR, one at a time: a merged one ends the Run merged and closes its bead,
@@ -107,7 +109,10 @@ type FollowUp = AgentReports['followUps'][number] & { attempt: number; role: 'im
 interface HostJob {
   project: Project;
   ticket: { id: string; title: string };
-  prepared: Prepared;
+  /** The clone the Attempt's work comes from. Absent for an epic's PR (ADR 0008), whose work is on its epic branch. */
+  prepared?: Prepared;
+  /** An epic's PR: what its title names the epic by. */
+  epicKey?: string;
   tip?: string;
   reviewSkipped?: string;
   /** The Follow-ups of the Attempt the PR opens from that have no Ticket yet. */
@@ -154,7 +159,7 @@ export function createOrchestrator(deps: {
 
   const byName = new Map(projects.map((p) => [p.name, p]));
   /** Projects whose last infrastructure check failed, and why. Rewritten by every tick that checks them. */
-  const gates = new Map<string, 'preflight failed' | 'image missing'>();
+  const gates = new Map<string, 'preflight failed' | 'image missing' | 'docker down'>();
 
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -176,21 +181,32 @@ export function createOrchestrator(deps: {
 
   /**
    * The host steps after a successful Attempt: publish, create a Ticket for each Follow-up, mark the bead, end in-review.
-   * A failure never burns an Attempt: the Run parks in needs-attention (freeing its slot) with the clone and the bead
-   * claim kept, for Retry or Kill. A step that already succeeded is not repeated: once the PR exists, a retry creates
-   * only the Follow-ups still missing, then marks the bead. Never rejects.
+   * A Run that lands on its epic branch (ADR 0008) lands there instead of publishing, then closes the bead and ends
+   * landed; an epic's own PR Run only publishes the epic branch and marks the epic. A failure never burns an Attempt: the
+   * Run parks in needs-attention (freeing its slot) with the clone and the bead claim kept, for Retry or Kill. A step that
+   * already succeeded is not repeated: once the PR exists, a retry creates only the Follow-ups still missing, then marks
+   * the bead; landing again changes nothing. Never rejects.
    */
   async function finish(runId: number, control: Control, job: HostJob): Promise<void> {
     const { signal } = control.ctl;
     const log = (line: string) => logRun(runId, line);
+    const { prepared } = job;
+    const saveJob = () => store.setHostJob(runId, JSON.stringify({ prepared, epicKey: job.epicKey, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
     store.updateRun(runId, { state: 'host', note: null });
     log(`--- Push & PR started: ${new Date(clock.now()).toISOString()} ---`);
     // What recover() needs to pick the job up again; the PR url is already on the row.
-    store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
+    saveJob();
     try {
-      if (!job.prUrl) {
+      let landed: string | undefined;
+      if (prepared?.land) {
         signal.throwIfAborted();
-        const pr = await host.publish(job.project, job.ticket, job.prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps.map((f) => f.title), signal, log });
+        landed = await host.land(job.project, prepared, { tip: job.tip, signal, log });
+        log(`Landed on ${prepared.epic}: ${landed}`);
+      } else if (!job.prUrl) {
+        signal.throwIfAborted();
+        const pr = prepared
+          ? await host.publish(job.project, job.ticket, prepared, { tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps.map((f) => f.title), signal, log })
+          : await host.publishEpic(job.project, job.ticket, job.epicKey!, { reviewSkipped: job.reviewSkipped, signal, log });
         job.prUrl = pr.url;
         store.updateRun(runId, { prUrl: pr.url, prBase: pr.base === job.project.baseBranch ? null : pr.base });
         log(`PR opened: ${job.prUrl}`);
@@ -203,14 +219,21 @@ export function createOrchestrator(deps: {
         const reports = store.getRun(runId)!.reports ?? { followUps: [], friction: [] };
         store.setReports(runId, { ...reports, followUps: [...reports.followUps, { id, title }] });
         job.followUps = job.followUps.slice(1);
-        store.setHostJob(runId, JSON.stringify({ prepared: job.prepared, tip: job.tip, reviewSkipped: job.reviewSkipped, followUps: job.followUps }));
+        saveJob();
       }
       signal.throwIfAborted();
-      await beads.markInReview(job.project, job.ticket.id, job.prUrl);
-      signal.throwIfAborted();
-      end(runId, { state: 'in-review' });
-      // The PR is open and the bead is done, so a leftover clone is only clutter.
-      await host.removeClone(job.prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
+      if (landed) {
+        if (!(await beads.landed(job.project, job.ticket.id, prepared!.epic!, landed))) log('Ticket left alone: changed by hand since the Run claimed it');
+        signal.throwIfAborted();
+        // The note carries a skipped review to the epic's PR, the first the human sees of this work.
+        end(runId, { state: 'landed', prBase: prepared!.epic!, note: job.reviewSkipped ? `review skipped: ${job.reviewSkipped}` : null });
+      } else {
+        await beads.markInReview(job.project, job.ticket.id, job.prUrl!);
+        signal.throwIfAborted();
+        end(runId, { state: 'in-review' });
+      }
+      // The work is on a branch and the bead is done, so a leftover clone is only clutter.
+      if (prepared) await host.removeClone(prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       control.parked = job;
@@ -260,7 +283,7 @@ export function createOrchestrator(deps: {
   }
 
   /** Run one claimed Ticket to its end: in-review with a PR, parked in needs-attention, or failed and handed back. Never rejects. */
-  async function execute(runId: number, project: Project, ticket: Pick<Ticket, 'id' | 'title' | 'priority' | 'spec'>, control: Control): Promise<void> {
+  async function execute(runId: number, project: Project, ticket: Pick<Ticket, 'id' | 'title' | 'priority' | 'spec' | 'epicPr'>, control: Control): Promise<void> {
     const { signal } = control.ctl;
     /** End the Run failed, handing the Ticket back with `note`. */
     async function handBack(note: string) {
@@ -276,6 +299,14 @@ export function createOrchestrator(deps: {
       if (ticket.spec) {
         const note = await breakDown(runId, project, ticket, context, signal);
         if (note !== null) await handBack(note);
+        return;
+      }
+      if (ticket.epicPr) {
+        // ADR 0008: no Attempt, only the host steps. The PR body owns up to each child that landed unreviewed.
+        const branch = epicBranchOf(project, ticket.id);
+        const skipped = store.allRuns().filter((r) => r.project === project.name && r.state === 'landed' && r.prBase === branch && r.note);
+        const reviewSkipped = skipped.map((r) => `${r.ticketId}: ${r.note!.replace(/^review skipped: /, '')}`).join('; ') || undefined;
+        await finish(runId, control, { project, ticket, epicKey: ticketKey(ticket.id, context), reviewSkipped, followUps: [], prUrl: null });
         return;
       }
       // A closed blocker whose PR merged into another Run's agent/<id> branch, while that Run's own PR was still In review,
@@ -501,6 +532,7 @@ export function createOrchestrator(deps: {
         ageMs: now - Date.parse(ticket.createdAt),
         waitReason,
         ...(ticket.spec && { spec: true as const }),
+        ...(ticket.epicPr && { epicPr: true as const }),
       };
     });
   }
@@ -516,8 +548,9 @@ export function createOrchestrator(deps: {
         projects
           .filter((p) => p.image && !busyNow.includes(p.name) && claimable.has(p.name))
           .map(async (p) => {
-            const down = !(await sandbox.hasImage(p))
-              ? 'image missing'
+            const hasImage = await sandbox.hasImage(p).catch(() => null);
+            const down = hasImage === null ? ('docker down' as const)
+              : !hasImage ? 'image missing'
               : await host.preflight(p).then(() => null, () => 'preflight failed' as const);
             if (down) gates.set(p.name, down);
             else gates.delete(p.name);
@@ -684,7 +717,7 @@ export function createOrchestrator(deps: {
 
     setArchived(runId, archived) {
       const run = store.getRun(runId);
-      if (run?.state !== 'merged' && run?.state !== 'pr-closed' && run?.state !== 'broken-down') throw new Error(`Run ${runId} is not merged, PR closed or broken down`);
+      if (run?.state !== 'merged' && run?.state !== 'pr-closed' && run?.state !== 'broken-down' && run?.state !== 'landed') throw new Error(`Run ${runId} is not merged, PR closed, broken down or landed`);
       store.updateRun(runId, { archivedAt: archived ? clock.now() : null });
     },
 

@@ -34,13 +34,13 @@ it('counts the Runs started each day by where they are now, leaving out days out
     [oct(17), oct(18)],
   );
   assert.deepEqual(rows, [
-    { day: oct(17), merged: 1, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, failed: 1, killed: 0, running: 0 },
-    { day: oct(18), merged: 0, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, failed: 0, killed: 0, running: 1 },
+    { day: oct(17), merged: 1, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, landed: 0, failed: 1, killed: 0, running: 0 },
+    { day: oct(18), merged: 0, 'in-review': 0, 'pr-closed': 0, 'broken-down': 0, landed: 0, failed: 0, killed: 0, running: 1 },
   ]);
 });
 
-it('takes the Merge rate over Runs left to finish: killed, In review and broken-down ones are left out', () => {
-  const states = ['merged', 'merged', 'pr-closed', 'failed', 'interrupted', 'killed', 'in-review', 'broken-down'] as const;
+it('takes the Merge rate over Runs left to finish: killed, In review, broken-down and landed ones are left out', () => {
+  const states = ['merged', 'merged', 'pr-closed', 'failed', 'interrupted', 'killed', 'in-review', 'broken-down', 'landed'] as const;
   assert.deepEqual(mergeRate(states.map((state) => run({ state }))), { merged: 2, of: 5 });
 });
 
@@ -50,6 +50,7 @@ it('counts a First-Attempt pass among the Runs that got a PR', () => {
     run({ state: 'merged', attempt: 2 }),
     run({ state: 'pr-closed', attempt: 1 }),
     run({ state: 'failed', attempt: 1 }),
+    run({ state: 'merged', attempt: 0 }), // an epic's own PR Run: no Attempt to pass
   ];
   assert.deepEqual(firstAttemptPass(runs), { passed: 2, of: 3 });
 });

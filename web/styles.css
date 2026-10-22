@@ -10,6 +10,7 @@
   --warn: #c27a0e;
   --bad: #d4423e;
   --violet: #7a4fd6;
+  --magenta: #d6409f;
   --log-bg: #0f131b;
   --log-ink: #cfe3c8;
   --log-mute: #8b93a7;
@@ -32,6 +33,7 @@
     --warn: #f0a33a;
     --bad: #ff6b66;
     --violet: #a586ff;
+    --magenta: #a970ff;
     --log-bg: #0a0d12;
     --shadow: none;
     color-scheme: dark;
@@ -50,6 +52,7 @@
   --warn: #f0a33a;
   --bad: #ff6b66;
   --violet: #a586ff;
+  --magenta: #a970ff;
   --log-bg: #0a0d12;
   --shadow: none;
   color-scheme: dark;
@@ -428,6 +431,11 @@ a:focus-visible {
   background: color-mix(in srgb, var(--ink) 10%, transparent);
 }
 
+.pill.landed {
+  color: var(--magenta);
+  background: color-mix(in srgb, var(--magenta) 14%, transparent);
+}
+
 .pill.failed,
 .pill.interrupted {
   color: var(--bad);
@@ -731,6 +739,10 @@ button.link {
 
 .mix .broken-down {
   color: var(--ink);
+}
+
+.mix .landed {
+  color: var(--magenta);
 }
 
 .mix .needs-attention {

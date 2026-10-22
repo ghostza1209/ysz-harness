@@ -11,6 +11,9 @@ _Avoid_: dry run, test run.
 **Check service**: A Project's running dev service whose image runs the agent's checks, for a stack the sandbox can't run.
 _Avoid_: checkContainer (in prose), php container.
 
+**Check hint**: A Project's note to its agents on which checks to run in the sandbox and how, for the files they changed. Advice the agent follows, not a check ysz runs itself.
+_Avoid_: check command, test command.
+
 **Ticket**: One unit of work in a Project's own Beads queue. Work tracked elsewhere (e.g. Jira) is not a Ticket until it is brought into that queue.
 _Avoid_: issue, task, job.
 
@@ -28,7 +31,7 @@ _Avoid_: PRD, plan.
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.
 
-**Run**: ysz's effort to finish one Ticket, made of one or two Attempts, ending once its pull request is Merged or PR closed, or in handing the Ticket back to the human. A Run never merges: the human does, and the Run only learns of it.
+**Run**: ysz's effort to finish one Ticket, made of one or two Attempts, ending once its pull request is Merged or PR closed, once it Landed, or in handing the Ticket back to the human. A Run never merges a pull request: the human does, and the Run only learns of it.
 _Avoid_: job, session.
 
 **Attempt**: One pass at a Run's Ticket in fresh isolated sandboxes: an agent implements the Ticket, then a second agent reviews and corrects that work. A Run retries with a second Attempt at most once.
@@ -50,6 +53,11 @@ _Avoid_: statistics, analytics, report.
 **In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
 **Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, and so is its parent once every child of it is closed, if the parent is marked fit for an agent and is not an epic on its own branch.
+
+**Landed**: A Run's end once ysz has put its Ticket's work on the branch of its parent epic, an epic on its own branch, with no pull request of its own. The Ticket is then closed, and the human first sees that work in the Epic PR.
+_Avoid_: merged (for this)
+
+**Epic PR**: The one pull request an epic on its own branch gets onto the base branch. Once every child of the epic is closed, ysz picks the epic like a Ready Ticket and opens it in a Run with no Attempt. The epic closes when it is Merged.
 
 **PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again.
 _Avoid_: closed, rejected.

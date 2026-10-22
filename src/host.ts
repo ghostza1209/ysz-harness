@@ -22,6 +22,8 @@ export interface Prepared {
   stack?: { branch: string; prUrl: string };
   /** The labelled parent epic's branch (ADR 0006), which the clone starts on and the PR targets when there is no stack. Absent: baseBranch. */
   epic?: string;
+  /** ADR 0008: the epic branch is the Project repo's own, not on origin, so the Run lands its commits on it instead of opening a PR. */
+  land?: true;
   /** What the PR title and the agents' commit subjects name the Ticket by: see `ticketKey`. */
   key: string;
 }
@@ -32,7 +34,8 @@ export interface HostSteps {
   /**
    * A fresh clone on `agent/<ticket-id>` with the Ticket context in place, at the just-fetched origin/<baseBranch>,
    * at the In review blocker's `agent/<id>` when the context names one with its PR, or else at the epic branch when the
-   * parent epic is labelled `epic-branch`, which is first pushed from origin/<baseBranch> if origin lacks it.
+   * parent epic is labelled `epic-branch`. An epic branch on origin (ADR 0006) is fetched; one origin lacks is the
+   * Project repo's own (ADR 0008), cut from origin/<baseBranch> if missing, and the Run lands on it: then a stack throws.
    */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /**
@@ -56,6 +59,24 @@ export interface HostSteps {
     ticket: { id: string; title: string },
     prepared: Prepared,
     opts?: { tip?: string; reviewSkipped?: string; followUps?: string[]; signal?: AbortSignal; log?: (line: string) => void },
+  ): Promise<{ url: string; base: string }>;
+  /**
+   * ADR 0008: bring the agent's branch back into the Project repo, then fast-forward the local epic branch onto it, with
+   * the commit checks a push gets. Refuses an epic branch that moved elsewhere since the clone, or one checked out in a
+   * worktree. Repeating it once landed changes nothing. `tip` lands that commit instead of the clone's. Returns the new tip.
+   */
+  land(project: Project, prepared: Prepared, opts?: { tip?: string; signal?: AbortSignal; log?: (line: string) => void }): Promise<string>;
+  /**
+   * ADR 0008: push the epic's branch, the local one or else the one already on origin, and open its PR onto baseBranch,
+   * titled with `key`. An open PR from it is taken instead of a second one, and so is a merged one when there is no local
+   * branch (an epic begun before ADR 0008). Throws when the branch has no commits over baseBranch, or origin's has
+   * commits the local one lacks. `reviewSkipped` heads the PR body.
+   */
+  publishEpic(
+    project: Project,
+    epic: { id: string; title: string },
+    key: string,
+    opts?: { reviewSkipped?: string; signal?: AbortSignal; log?: (line: string) => void },
   ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
@@ -180,10 +201,18 @@ const PR_BODY_PROMPT = (ticket: { id: string; title: string }, base: string, log
   `Write the body with the mattpocock-skills:pr skill. ` +
   `Output only the title line, a blank line, then the Markdown body.\n\n<git-log>\n${log}\n</git-log>\n\n<git-diff>\n${diff}\n</git-diff>`;
 
-/** What a Ticket is named by: its own Jira key from external_ref, else its parent epic's, else its own id. */
+const JIRA_KEY = /^[A-Z][A-Z0-9]+-\d+$/;
+
+/**
+ * What a Ticket is named by: its own Jira key, else its parent epic's, else its own id. A bead holds its key as an
+ * external_ref, `jira-OP-7` or a bare `OP-7`, or as a label (fazwaz epics carry `OP-2567`).
+ */
 export function ticketKey(id: string, { ticket, parent }: TicketContext): string {
-  for (const ref of [ticket.external_ref, parent?.external_ref]) {
-    if (typeof ref === 'string' && ref.startsWith('jira-')) return ref.slice('jira-'.length);
+  for (const bead of [ticket, parent]) {
+    const ref = typeof bead?.external_ref === 'string' ? bead.external_ref.replace(/^jira-/, '') : '';
+    if (JIRA_KEY.test(ref)) return ref;
+    const label = Array.isArray(bead?.labels) && bead.labels.find((l) => typeof l === 'string' && JIRA_KEY.test(l));
+    if (label) return label;
   }
   return id;
 }
@@ -195,17 +224,73 @@ export function ticketKey(id: string, { ticket, parent }: TicketContext): string
 export function prTitleAndBody(output: string, key: string, ticketTitle: string): { title: string; body: string } {
   const [first, ...rest] = output.split('\n');
   const m = CONVENTIONAL_TITLE.exec(first.trim());
-  if (!m) return { title: `chore: ${key} ${ticketTitle}`, body: output };
+  // A title that starts with its own key, as fazwaz epics do, does not get it twice.
+  const subject = ticketTitle.startsWith(`${key}:`) || ticketTitle.startsWith(`${key} `) ? ticketTitle.slice(key.length + 1).trim() : ticketTitle;
+  if (!m) return { title: `chore: ${key} ${subject}`, body: output };
   return { title: `${m[1]}${m[2] ?? ''}: ${key} ${m[3]}`, body: rest.join('\n').trim() };
 }
 
 /** The branch a Run's clone was made on, which its PR targets. */
 const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? prepared.epic ?? project.baseBranch;
 
-/** ADR 0006: the branch the children of a parent epic labelled `epic-branch` share. */
+/** ADR 0006: the branch the children of an epic labelled `epic-branch` share. */
+export const epicBranchOf = (project: Project, epicId: string) => `${project.epicBranchPrefix ?? 'epic/'}${epicId}`;
+
 function epicBranch(project: Project, { parent }: TicketContext): string | undefined {
   const labels = parent?.labels;
-  if (Array.isArray(labels) && labels.includes('epic-branch')) return `${project.epicBranchPrefix ?? 'epic/'}${parent!.id}`;
+  if (Array.isArray(labels) && labels.includes('epic-branch')) return epicBranchOf(project, String(parent!.id));
+}
+
+/** Refuse commits that must never leave the clone: none at all, the Ticket file, or a copyToWorktree secret. */
+async function checkCommits(project: Project, range: string, text: ReturnType<typeof within>['text']): Promise<void> {
+  const repo = project.repoPath;
+  if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
+  // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
+  // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
+  // Their content committed under another name is not caught.
+  const touched = (await text('git', ['log', '-m', '-z', '--format=', '--name-only', range], repo)).split('\0').map((path) => path.trim().toLowerCase());
+  if (touched.some((path) => path.startsWith('.orchestrator/'))) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
+  const secret = project.copyToWorktree?.find((file) => touched.includes(file.toLowerCase()));
+  if (secret) throw new Error(`refusing to push: ${secret} is committed on the branch`);
+}
+
+/** Have claude write the PR's title and body from the commits in `range`, then open it from the pushed `branch` onto `base`. Returns its URL. */
+async function openPr(
+  project: Project,
+  ticket: { id: string; title: string },
+  { key, branch, base, range, reviewSkipped, followUps = [] }: { key: string; branch: string; base: string; range: string; reviewSkipped?: string; followUps?: string[] },
+  { model, env, signal, step }: { model: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; step: (line: string) => void },
+): Promise<string> {
+  const { text } = within(signal);
+  const repo = project.repoPath;
+  const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));
+  const diff = clip(await text('git', ['diff', range], repo));
+  // In an empty dir with only user settings and the Skill tool: the change is agent-written text, so it gets nothing to act on.
+  const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
+  try {
+    step('Writing the PR body (claude -p)');
+    const output = await text(
+      'claude',
+      [
+        '-p', PR_BODY_PROMPT(ticket, base, log, diff),
+        '--model', model, '--effort', 'high',
+        '--setting-sources', 'user', '--strict-mcp-config',
+        '--tools', 'Skill', '--allowedTools', 'Skill',
+      ],
+      tmp,
+      { timeout: 5 * 60_000, input: '' }, // closed stdin, or claude waits 3s for piped input
+    );
+    const { title, body } = prTitleAndBody(output, key, ticket.title);
+    if (!body) throw new Error('claude -p returned an empty PR body');
+    const followUpsSection = followUps.length ? `\n\n## Follow-ups\n\n${followUps.map((t) => `- ${t}`).join('\n')}` : '';
+    writeFileSync(join(tmp, 'body.md'), `${reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n` : ''}${body}${followUpsSection}`);
+    // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
+    step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
+    const out = await text('gh', ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md')], repo, { env });
+    return out.split('\n').pop()!;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -224,16 +309,20 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const blocker = context.inReviewBlocker;
       const stack = blocker?.prUrl ? { branch: `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
       const epic = epicBranch(project, context);
+      // An epic already on origin began before ADR 0008, so its children keep opening PRs onto it (ADR 0006).
+      const land = !!epic && !(await text('git', ['ls-remote', '--heads', 'origin', `refs/heads/${epic}`], repo));
+      if (land && stack) throw new Error(`${ticketId} lands on ${epic}, so it cannot stack on ${stack.prUrl}: it waits for that PR to merge`);
       const base = stack?.branch ?? epic ?? project.baseBranch;
       const branch = `agent/${ticketId}`;
+      const baseRef = land ? `refs/heads/${epic}` : `refs/remotes/origin/${base}`;
 
-      if (base === epic && !(await text('git', ['ls-remote', '--heads', 'origin', `refs/heads/${epic}`], repo))) {
-        // The epic's first child: cut its branch from the base. One Run per Project, so no other Run races this push.
+      if (!land) await run('git', ['fetch', 'origin', base], repo);
+      else if (!(await text('git', ['rev-parse', '--verify', '--quiet', baseRef], repo).catch(() => ''))) {
+        // The epic's first child cuts its branch from the base, in the Project repo only: it reaches origin with the epic's PR.
         await run('git', ['fetch', 'origin', project.baseBranch], repo);
-        await run('git', ['push', 'origin', `refs/remotes/origin/${project.baseBranch}:refs/heads/${epic}`], repo);
+        await run('git', ['branch', '--no-track', epic!, `refs/remotes/origin/${project.baseBranch}`], repo);
       }
-      await run('git', ['fetch', 'origin', base], repo);
-      const sha = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);
+      const sha = await text('git', ['rev-parse', '--verify', `${baseRef}^{commit}`], repo);
       const url = await text('git', ['remote', 'get-url', 'origin'], repo);
 
       mkdirSync(clonesDir, { recursive: true });
@@ -245,6 +334,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         // Git writes a first fetch's refs to packed-refs, so assertSelfContained never meets a loose branch named like `TV-122(new)`.
         await run('git', ['init', '--quiet', clone], dir);
         await run('git', ['fetch', '--quiet', '--no-tags', repo, 'refs/remotes/origin/*:refs/remotes/origin/*'], clone, { timeout: 10 * 60_000 });
+        if (land) await run('git', ['fetch', '--quiet', '--no-tags', repo, baseRef], clone); // its objects, which the update-ref below names
         await run('git', ['remote', 'add', 'origin', url], clone);
         await run('git', ['update-ref', `refs/remotes/origin/${base}`, sha], clone);
         await run('git', ['switch', '--quiet', '--no-track', '-c', branch, sha], clone);
@@ -263,7 +353,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }) };
+      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }), ...(land && { land: true as const }) };
     },
 
     async writeTicket({ dir }, context) {
@@ -310,61 +400,64 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         from = onBase;
       }
       const range = `${from}..${branch}`;
-      if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error('the agent made no commits');
-      // Every commit, merges against each parent included: a ticket.json added and then deleted would still be pushed in history.
-      // The copyToWorktree files hold secrets. Lowercased: the clone's disk is case-insensitive, so .ENV is .env.
-      // Their content committed under another name is not caught.
-      const touched = (await text('git', ['log', '-m', '-z', '--format=', '--name-only', range], repo)).split('\0').map((path) => path.trim().toLowerCase());
-      if (touched.some((path) => path.startsWith('.orchestrator/'))) throw new Error('refusing to push: .orchestrator/ is committed on the branch');
-      const secret = project.copyToWorktree?.find((file) => touched.includes(file.toLowerCase()));
-      if (secret) throw new Error(`refusing to push: ${secret} is committed on the branch`);
+      await checkCommits(project, range, text);
       step(`Pushing ${branch} to origin`);
       // A Retry replays again onto a newer base, so it overwrites its own earlier push: no PR was opened from it yet.
       await run('git', ['push', '-u', ...(merged ? ['--force-with-lease'] : []), 'origin', branch], repo);
 
-      const log = clip(await text('git', ['log', '--format=%h %s%n%n%b', range], repo));
-      const diff = clip(await text('git', ['diff', range], repo));
-      // In an empty dir with only user settings and the Skill tool: the change is agent-written text, so it gets nothing to act on.
-      const tmp = mkdtempSync(join(tmpdir(), 'pr-body-'));
-      try {
-        step('Writing the PR body (claude -p)');
-        const output = await text(
-          'claude',
-          [
-            '-p', PR_BODY_PROMPT(ticket, base, log, diff),
-            '--model', model, '--effort', 'high',
-            '--setting-sources', 'user', '--strict-mcp-config',
-            '--tools', 'Skill', '--allowedTools', 'Skill',
-          ],
-          tmp,
-          { timeout: 5 * 60_000, input: '' }, // closed stdin, or claude waits 3s for piped input
-        );
-        // A host job saved before Prepared had a key resumes without one.
-        const { title, body } = prTitleAndBody(output, prepared.key ?? ticket.id, ticket.title);
-        if (!body) throw new Error('claude -p returned an empty PR body');
-        const followUpsSection = followUps.length ? `\n\n## Follow-ups\n\n${followUps.map((t) => `- ${t}`).join('\n')}` : '';
-        writeFileSync(join(tmp, 'body.md'), `${reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n` : ''}${body}${followUpsSection}`);
-        // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
-        step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
-        const out = await text(
-          'gh',
-          ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md')],
-          repo,
-          { env },
-        );
-        const prUrl = out.split('\n').pop()!;
-        if (stack && !merged) {
-          // The PR already targets the blocker's branch; the GitHub stack adds the stack map and retargets it once the blocker merges.
-          // --base is the blocker's own base: any other, and gh stack link retargets the blocker's PR onto it. A blocker already
-          // in a stack fails the link (it would drop that stack's upper PRs), so a second dependent stays a plain PR.
-          step(`Stacking it on ${stack.prUrl}`);
-          await text('gh', ['stack', 'link', '--base', blocker.baseRefName, stack.prUrl, prUrl], repo, { env })
-            .catch((err) => step(`Could not stack it on ${stack.prUrl}, so it stays a plain PR onto ${base}: ${message(err)}`));
-        }
-        return { url: prUrl, base };
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
+      // A host job saved before Prepared had a key resumes without one.
+      const prUrl = await openPr(project, ticket, { key: prepared.key ?? ticket.id, branch, base, range, reviewSkipped, followUps }, { model, env, signal, step });
+      if (stack && !merged) {
+        // The PR already targets the blocker's branch; the GitHub stack adds the stack map and retargets it once the blocker merges.
+        // --base is the blocker's own base: any other, and gh stack link retargets the blocker's PR onto it. A blocker already
+        // in a stack fails the link (it would drop that stack's upper PRs), so a second dependent stays a plain PR.
+        step(`Stacking it on ${stack.prUrl}`);
+        await text('gh', ['stack', 'link', '--base', blocker.baseRefName, stack.prUrl, prUrl], repo, { env })
+          .catch((err) => step(`Could not stack it on ${stack.prUrl}, so it stays a plain PR onto ${base}: ${message(err)}`));
       }
+      return { url: prUrl, base };
+    },
+
+    async land(project, prepared, { tip, signal, log: step = () => {} } = {}) {
+      const { run, text } = within(signal);
+      const { branch, epic } = prepared;
+      const landed = await fetchBack(project, prepared, tip, signal);
+      await checkCommits(project, `${prepared.base}..${branch}`, text);
+      step(`Landing ${branch} on ${epic}`);
+      // A fetch into the repo itself only fast-forwards, and refuses a branch checked out in one of its worktrees.
+      await run('git', ['fetch', '--no-tags', '.', `refs/heads/${branch}:refs/heads/${epic}`], project.repoPath);
+      return landed;
+    },
+
+    async publishEpic(project, epic, key, { reviewSkipped, signal, log: step = () => {} } = {}) {
+      const { run, text } = within(signal);
+      const repo = project.repoPath;
+      const branch = epicBranchOf(project, epic.id);
+      const base = project.baseBranch;
+      const env = await ghEnv(project);
+      const local = await text('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], repo).catch(() => '');
+      const prs: { url: string; state: string }[] = JSON.parse(await text('gh', ['pr', 'list', '--head', branch, '--base', base, '--state', 'all', '--json', 'url,state'], repo, { env }));
+      // An epic begun before ADR 0008 has its branch on origin alone, and the human may have opened its PR, or merged it
+      // and had the branch deleted: that PR is the epic's, and its merge then closes the epic.
+      const merged = !local && prs.find((pr) => pr.state === 'MERGED');
+      if (merged) {
+        step(`Its PR merged already: ${merged.url}`);
+        return { url: merged.url, base };
+      }
+      await run('git', ['fetch', 'origin', base, ...(local ? [] : [branch])], repo);
+      const tip = local || (await text('git', ['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`], repo));
+      const range = `refs/remotes/origin/${base}..${tip}`;
+      if ((await text('git', ['rev-list', '--count', range], repo)) === '0') throw new Error(`${branch} has no commits over ${base}`);
+      if (local) {
+        step(`Pushing ${branch} to origin`);
+        await run('git', ['push', 'origin', `${tip}:refs/heads/${branch}`], repo); // no force: origin's commits that local lacks reject it
+      }
+      const open = prs.find((pr) => pr.state === 'OPEN');
+      if (open) {
+        step(`Its PR is open already: ${open.url}`);
+        return { url: open.url, base };
+      }
+      return { url: await openPr(project, epic, { key, branch, base, range, reviewSkipped }, { model, env, signal, step }), base };
     },
 
     async prState(project, prUrl) {

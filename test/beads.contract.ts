@@ -584,7 +584,7 @@ describe('Specs against real bd', () => {
       { key: 'schema', title: '--add the column', body: '## What to build\nThe column.', blockedBy: [] },
       { key: 'ui', title: 'show it', body: '', blockedBy: ['schema'] },
     ]);
-    assert.equal(created?.length, 2);
+    assert.deepEqual(created, [`${ids.spec}.1`, `${ids.spec}.2`]);
     const [schema, ui] = await Promise.all(created!.map(show));
     assert.deepEqual(
       [schema, ui].map((i) => [i.title, i.description ?? '', i.status, i.priority, i.parent, [...i.labels], i.created_by]),
@@ -626,5 +626,85 @@ describe('Specs against real bd', () => {
     );
     assert.deepEqual(await children(ids.cyclic), []);
     assert.equal((await show(ids.cyclic)).status, 'in_progress');
+  });
+});
+
+describe('An epic on its own branch (ADR 0008), against real bd', () => {
+  let dir: string;
+  let project: { name: string; repoPath: string; baseBranch: string };
+  const ids: Record<string, string> = {};
+  const env = { ...process.env, BEADS_ACTOR: 'tester' };
+  const bd = (...args: string[]) => run('bd', args, { cwd: dir, env });
+  async function create(key: string, title: string, ...flags: string[]) {
+    ids[key] = (await bd('create', title, '--silent', ...flags)).stdout.trim();
+  }
+  /** An epic with one child per status, each child closed or left open. */
+  async function epic(key: string, labels: string, children: ('closed' | 'open')[], ...flags: string[]) {
+    await create(key, key, '-t', 'epic', '-l', labels, ...flags);
+    for (const [i, status] of children.entries()) {
+      await create(`${key}${i}`, `${key} child ${i}`, '--parent', ids[key]);
+      if (status === 'closed') await bd('close', ids[`${key}${i}`], '-r', 'done');
+    }
+  }
+  const show = async (id: string) => JSON.parse((await bd('show', id, '--json')).stdout)[0];
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'beads-epic-'));
+    project = { name: 'lab', repoPath: dir, baseBranch: 'main' };
+    await bd('init', '-p', 'lab', '--non-interactive', '--skip-agents', '--skip-hooks');
+    await epic('done', 'epic-branch', ['closed', 'closed'], '-p', '1');
+    await epic('pending', 'epic-branch', ['closed', 'open']);
+    await epic('handedBack', 'epic-branch,needs-info', ['closed']);
+    await epic('skipped', 'epic-branch,orchestrator:skip', ['closed']);
+    await epic('taken', 'epic-branch', ['closed'], '-a', 'someone');
+    await epic('plain', 'ready-for-agent', ['closed']);
+
+    // An In review child of an epic on its own branch never lets its sibling stack; under any other parent it does.
+    for (const [key, labels] of [['branchy', 'epic-branch'], ['stacky', 'ready-for-human']]) {
+      await create(key, key, '-t', 'epic', '-l', labels);
+      await create(`${key}Review`, 'in review', '--parent', ids[key], '-l', 'ready-for-agent');
+      await bd('--actor', 'orchestrator', 'update', ids[`${key}Review`], '--claim');
+      await bd('update', ids[`${key}Review`], '--add-label', 'in-review');
+      await create(`${key}Next`, 'blocked by it', '--parent', ids[key], '-l', 'ready-for-agent');
+      await bd('dep', 'add', ids[`${key}Next`], ids[`${key}Review`]);
+    }
+  });
+
+  after(() => rm(dir, { recursive: true, force: true }));
+
+  it('lists an open unassigned epic-branch epic with every child closed for its PR, not one with an open child, handed back, skipped or taken, nor any other epic', async () => {
+    const { tickets } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(
+      tickets.map(({ id, priority, spec, epicPr }) => ({ id, priority, spec, epicPr })),
+      [
+        { id: ids.stackyNext, priority: 2, spec: undefined, epicPr: undefined },
+        { id: ids.done, priority: 1, spec: undefined, epicPr: true },
+      ],
+    );
+  });
+
+  it('claims the epic for its PR, marks it in review, and closes it once that PR merges', async () => {
+    const gateway = createBeadsGateway();
+    assert.equal(await gateway.claim(project, ids.done), true);
+    await gateway.markInReview(project, ids.done, 'https://github.com/o/r/pull/30');
+    assert.ok(!(await gateway.listReady(project)).tickets.some((t) => t.id === ids.done));
+    assert.equal(await gateway.merged(project, ids.done, 'https://github.com/o/r/pull/30'), true);
+    const closed = await show(ids.done);
+    assert.deepEqual([closed.status, closed.close_reason], ['closed', 'PR merged: https://github.com/o/r/pull/30']);
+  });
+
+  it('closes a claimed child as landed, naming the branch and tip, and writes nothing to one changed by hand since', async () => {
+    const gateway = createBeadsGateway();
+    await create('lander', 'lands', '-l', 'ready-for-agent');
+    await gateway.claim(project, ids.lander);
+    assert.equal(await gateway.landed(project, ids.lander, 'epic/lab-x', 'abc123'), true);
+    const issue = await show(ids.lander);
+    assert.deepEqual([issue.status, issue.close_reason], ['closed', 'Landed on epic/lab-x at abc123']);
+
+    await create('takenBack', 'taken back by hand', '-l', 'ready-for-agent');
+    await gateway.claim(project, ids.takenBack);
+    await bd('update', ids.takenBack, '--assignee', 'someone', '--force');
+    assert.equal(await gateway.landed(project, ids.takenBack, 'epic/lab-x', 'abc123'), false);
+    assert.equal((await show(ids.takenBack)).status, 'in_progress');
   });
 });
