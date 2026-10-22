@@ -32,7 +32,6 @@ export interface Ticket {
 
 /** A group's header: a parent that is in the Backlog, with its own state line ("Epic · 9 open" for an epic). */
 export interface Header {
-  project: string;
   row: BacklogRow;
   state: BacklogState | 'epic';
   line: string;
@@ -90,7 +89,7 @@ export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t:
     for (const id of children.keys()) {
       const r = byRowId.get(id);
       if (!r) continue;
-      headers.set(keyOf(p.name, id), r.issue_type === 'epic' ? { project: p.name, row: r, state: 'epic', line: t.backlog.epicOpen(children.get(id)!) } : { project: p.name, row: r, ...lineOf(r) });
+      headers.set(keyOf(p.name, id), r.issue_type === 'epic' ? { row: r, state: 'epic', line: t.backlog.epicOpen(children.get(id)!) } : { row: r, ...lineOf(r) });
     }
   }
   return { tickets, headers, projects: data.projects.map((p) => p.name) };
