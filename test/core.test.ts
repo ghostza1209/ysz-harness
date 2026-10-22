@@ -26,6 +26,10 @@ const PR_URL = 'https://github.com/thaivis/app/pull/7';
 /** When gh says a merged or closed PR closed. */
 const CLOSED_AT = Date.parse('2026-10-09T03:00:00Z');
 
+/** Holds a Project's next listReady open until resolved, and the error the next Backlog action's write fails with. */
+let listGates: Record<string, Promise<void>>;
+let ticketActionError: Error | undefined;
+
 /** Every bead write and host step, as "<op> <project>/<id>" lines in the order they happened. */
 let writes: string[];
 let hostSteps: string[];
@@ -98,8 +102,33 @@ let preflights: string[];
 const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
     const queue = queues[project.name];
-    if (queue instanceof Error) throw queue;
-    return { tickets: queue ?? [], rows: backlogs[project.name] ?? [] };
+    const read = queue instanceof Error ? queue : { tickets: queue ?? [], rows: backlogs[project.name] ?? [] };
+    const gate = listGates[project.name]; // the read is taken before the gate opens, as a slow bd call reads before it answers
+    delete listGates[project.name];
+    await gate;
+    if (read instanceof Error) throw read;
+    return read;
+  },
+  async ticketFacts(project, id) {
+    const found = backlogs[project.name]?.find((r) => r.id === id);
+    if (!found) throw new Error(`no such bead ${id}`);
+    return found;
+  },
+  async ticketAction(project, id, action) {
+    writes.push(`${action} ${project.name}/${id}`);
+    if (ticketActionError) throw ticketActionError;
+    const queue = (queues[project.name] ?? []) as Ticket[];
+    const relabel = (labels: (l: string[]) => string[]) => (backlogs[project.name] = backlogs[project.name].map((r) => (r.id === id ? { ...r, labels: labels(r.labels) } : r)));
+    if (action === 'mark-ready') {
+      const [found] = relabel((l) => [...l.filter((x) => x !== 'needs-info'), 'ready-for-agent']).filter((r) => r.id === id);
+      queues[project.name] = [...queue, ticket(id, found.priority, found.created_at)];
+    }
+    if (action === 'unmark-ready') {
+      relabel((l) => l.filter((x) => x !== 'ready-for-agent'));
+      queues[project.name] = queue.filter((t) => t.id !== id);
+    }
+    if (action === 'skip') relabel((l) => [...l, 'orchestrator:skip']);
+    if (action === 'allow') relabel((l) => l.filter((x) => x !== 'orchestrator:skip'));
   },
   async claim(project, id) {
     if (claimErrors[project.name]) throw claimErrors[project.name];
@@ -250,6 +279,8 @@ beforeEach(() => {
   store = openStore(':memory:');
   queues = {};
   backlogs = {};
+  listGates = {};
+  ticketActionError = undefined;
   now = Date.parse('2026-10-08T12:00:00Z');
   writes = [];
   hostSteps = [];
@@ -2139,6 +2170,114 @@ describe('Run now', () => {
     queues.thaivis = [ticket('tv-low', 4, '2026-01-01T00:00:00Z')];
     await o.poll();
     assert.equal(o.readyQueue().find((t) => t.id === 'tv-low')!.runNow, false);
+  });
+});
+
+describe('Backlog actions', () => {
+  const withRow = (id: string, patch: Partial<BacklogRow> = {}): BacklogRow => ({ ...row(id), ...patch });
+
+  it('Marks Ready an open Ticket with one write, and shows it in the Backlog and the Ready queue when the call resolves, with a Stats point', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { labels: ['needs-info'] })] };
+    const o = await polled();
+    assert.deepEqual(order(o), []);
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.deepEqual(writes, ['mark-ready PopDeal/pd1']);
+    assert.deepEqual(order(o), ['pd1']);
+    assert.deepEqual(o.backlog().find((b) => b.name === 'PopDeal')!.rows!.map((r) => r.labels), [['ready-for-agent']]);
+    assert.deepEqual(store.backlogHistory().filter((p) => p.project === 'PopDeal').map((p) => p.ready), [0, 1]);
+  });
+
+  it('Skips and Allows ysz, showing each at once', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    const labels = () => o.backlog().find((b) => b.name === 'PopDeal')!.rows![0].labels;
+    await o.ticketAction('PopDeal', 'pd1', 'skip');
+    assert.deepEqual(labels(), ['orchestrator:skip']);
+    await o.ticketAction('PopDeal', 'pd1', 'allow');
+    assert.deepEqual(labels(), []);
+    assert.deepEqual(writes, ['skip PopDeal/pd1', 'allow PopDeal/pd1']);
+  });
+
+  it('drops a pending Run now when the Ticket is Unmarked Ready', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { labels: ['ready-for-agent'] })] };
+    queues = { PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    o.runNow('PopDeal', 'pd1');
+    await o.ticketAction('PopDeal', 'pd1', 'unmark-ready');
+    assert.deepEqual(order(o), []);
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.equal(o.readyQueue()[0].runNow, false);
+  });
+
+  const refused: [string, Partial<BacklogRow>, 'mark-ready' | 'unmark-ready' | 'skip' | 'allow', RegExp][] = [
+    ['an epic', { issue_type: 'epic' }, 'mark-ready', /pd1 is an epic/],
+    ['a closed Ticket', { status: 'closed' }, 'skip', /pd1 is closed/],
+    ['a Ticket ysz holds', { status: 'in_progress', assignee: 'orchestrator' }, 'unmark-ready', /pd1 is held by ysz/],
+    ['an In review Ticket', { status: 'in_progress', assignee: 'orchestrator', labels: ['in-review', 'ready-for-agent'] }, 'skip', /pd1 is held by ysz/],
+    ['a Ticket already Ready', { labels: ['ready-for-agent'] }, 'mark-ready', /pd1 is already Ready/],
+    ['a Ticket not Ready', {}, 'unmark-ready', /pd1 is not Ready/],
+    ['a Ticket already skipped', { labels: ['orchestrator:skip'] }, 'skip', /pd1 is already skipped/],
+    ['a Ticket not skipped', {}, 'allow', /pd1 is not skipped/],
+  ];
+  for (const [what, patch, action, reason] of refused) {
+    it(`refuses ${action} on ${what} and writes nothing`, async () => {
+      backlogs = { PopDeal: [withRow('pd1', patch)] };
+      const o = await polled();
+      await assert.rejects(o.ticketAction('PopDeal', 'pd1', action), reason);
+      assert.deepEqual(writes, []);
+    });
+  }
+
+  it('allows Mark Ready on a blocked or human-assigned Ticket: it waits, still labelled', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { assignee: 'somebody' })] };
+    const o = await polled();
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.deepEqual(writes, ['mark-ready PopDeal/pd1']);
+  });
+
+  it('checks the Ticket as bd has it now, not as the last poll saw it', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    backlogs = { PopDeal: [withRow('pd1', { status: 'closed' })] }; // closed in a terminal since the poll
+    await assert.rejects(o.ticketAction('PopDeal', 'pd1', 'mark-ready'), /pd1 is closed/);
+    assert.deepEqual(writes, []);
+  });
+
+  it('rejects an unknown Project', async () => {
+    await assert.rejects((await polled()).ticketAction('nope', 'x-1', 'skip'), /Unknown Project nope/);
+  });
+
+  it('leaves the click in place when a poll that started before it resolves after it', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    let open!: () => void;
+    listGates.PopDeal = new Promise<void>((resolve) => (open = resolve));
+    const poll = o.poll(); // reads pd1 unlabelled, then waits
+    await flush();
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    open();
+    await poll;
+    assert.deepEqual(order(o), ['pd1']);
+    assert.deepEqual(o.backlog().find((b) => b.name === 'PopDeal')!.rows![0].labels, ['ready-for-agent']);
+  });
+
+  it('sets the Project error but still resolves when the refresh fails after the write landed', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    queues.PopDeal = new Error('bd timed out');
+    await o.ticketAction('PopDeal', 'pd1', 'skip');
+    assert.deepEqual(writes, ['skip PopDeal/pd1']);
+    assert.equal(o.projectStatuses().find((s) => s.name === 'PopDeal')!.error, 'bd timed out');
+  });
+
+  it('rejects, refreshing nothing, when the write fails', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    const first = o.backlog().find((b) => b.name === 'PopDeal')!.updatedAt;
+    now += 5000;
+    ticketActionError = new Error('bd is locked');
+    await assert.rejects(o.ticketAction('PopDeal', 'pd1', 'skip'), /bd is locked/);
+    assert.equal(o.backlog().find((b) => b.name === 'PopDeal')!.updatedAt, first);
   });
 });
 

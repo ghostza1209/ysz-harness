@@ -31,6 +31,10 @@ const orchestrator = {
   deleteRun: async (id: number) => void actions.push(`delete ${id}`),
   setArchived: (id: number, archived: boolean) => void actions.push(`${archived ? 'archive' : 'unarchive'} ${id}`),
   setPaused: (project: string, paused: boolean) => void actions.push(`${paused ? 'pause' : 'resume'} ${project}`),
+  ticketAction: async (project: string, id: string, action: string) => {
+    if (action === 'allow') throw new Error(`${id} is not skipped`);
+    actions.push(`${action} ${project}/${id}`);
+  },
   runNow: (project: string, id: string) => {
     if (id === 'gone') throw new Error('gone is not in the Ready queue');
     actions.push(`run-now ${project}/${id}`);
@@ -265,4 +269,32 @@ it("answers a Run control the orchestrator refuses with 409 and the reason", asy
   const res = await post('/api/runs/13/kill');
   assert.equal(res.status, 409);
   assert.deepEqual(JSON.parse(res.body), { error: 'docker rm failed' });
+});
+
+it('runs a Backlog action posted from the dashboard itself, decoding the names, and answers a refusal with 409 and the reason', async () => {
+  actions.length = 0;
+  for (const action of ['mark-ready', 'unmark-ready', 'skip']) assert.equal((await post(`/api/projects/lab/tickets/lab-1/${action}`)).status, 200);
+  assert.deepEqual(actions, ['mark-ready lab/lab-1', 'unmark-ready lab/lab-1', 'skip lab/lab-1']);
+  const refused = await post('/api/projects/lab/tickets/lab-1/allow');
+  assert.equal(refused.status, 409);
+  assert.deepEqual(JSON.parse(refused.body), { error: 'lab-1 is not skipped' });
+});
+
+it('answers 404 to a Backlog action on an id the Project does not hold, or a Project it does not know, and does nothing', async () => {
+  actions.length = 0;
+  const missing = await post('/api/projects/lab/tickets/lab-9/skip');
+  assert.equal(missing.status, 404);
+  assert.deepEqual(JSON.parse(missing.body), { error: "lab-9 is not in lab's Backlog" });
+  assert.equal((await post('/api/projects/other/tickets/lab-1/skip')).status, 404);
+  assert.deepEqual(actions, []);
+});
+
+it('refuses a Backlog action from another origin, with no origin, or by GET, and does nothing', async () => {
+  actions.length = 0;
+  const path = '/api/projects/lab/tickets/lab-1/mark-ready';
+  assert.equal((await post(path, 'http://evil.example')).status, 403);
+  assert.equal((await send(path, {}, 'POST')).status, 403);
+  assert.equal((await get(path)).status, 405);
+  assert.equal((await send(path, { origin: `http://localhost:${port}`, cookie: '' }, 'POST')).status, 401);
+  assert.deepEqual(actions, []);
 });

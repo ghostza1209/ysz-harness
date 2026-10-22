@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { Project } from './projects';
+import { ORCHESTRATOR, type TicketAction, type TicketFacts } from './ticketActions';
+
+export { ORCHESTRATOR };
 
 const execFileAsync = promisify(execFile);
 
@@ -61,9 +64,6 @@ export interface TicketContext {
   };
 }
 
-/** The bd actor behind every Orchestrator write, so its claims and comments are told apart from the user's. */
-export const ORCHESTRATOR = 'orchestrator';
-
 export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
@@ -97,6 +97,10 @@ export interface BeadsGateway {
    */
   heartbeat(project: Project): Promise<void>;
   showContext(project: Project, id: string): Promise<TicketContext>;
+  /** One Ticket as bd shows it now, for the check before a Backlog action. */
+  ticketFacts(project: Project, id: string): Promise<TicketFacts>;
+  /** A Backlog action as the human: one atomic bd update with bd's default actor (never the Orchestrator), touching only the labels the action names. */
+  ticketAction(project: Project, id: string, action: TicketAction): Promise<void>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
   /**
@@ -334,6 +338,21 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         .map((d: { id: string; title: string; close_reason?: string }) => ({ id: d.id, title: d.title, closeReason: d.close_reason ?? '' }));
       const reviewing = (ticket.dependencies ?? []).find((d: Bead & { dependency_type: string }) => d.dependency_type === 'blocks' && isInReview(d));
       return { ticket, parent, closedBlockers, inReviewBlocker: reviewing ? { id: reviewing.id, title: reviewing.title } : null, openFriction: [] };
+    },
+
+    async ticketFacts(project, id) {
+      const { issue_type, status, assignee, labels } = await show(project, [id]);
+      return { id, issue_type, status, assignee: assignee || null, labels: labels ?? [] };
+    },
+
+    async ticketAction(project, id, action) {
+      const flags: Record<TicketAction, string[]> = {
+        'mark-ready': ['--add-label', 'ready-for-agent', '--remove-label', 'needs-info'], // marking Ready answers needs-info
+        'unmark-ready': ['--remove-label', 'ready-for-agent'],
+        skip: ['--add-label', 'orchestrator:skip'],
+        allow: ['--remove-label', 'orchestrator:skip'],
+      };
+      await bd(['-C', project.repoPath, 'update', id, ...flags[action]]); // no --actor: bd records its default actor, the human
     },
 
     async markInReview(project, id, prUrl) {

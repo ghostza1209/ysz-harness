@@ -1,5 +1,6 @@
 import type { BacklogRow } from '../src/beads';
 import type { Orchestrator, QueueItem } from '../src/core';
+import { ORCHESTRATOR } from '../src/ticketActions';
 import type { Dict } from './i18n';
 
 /** What GET /api/backlog serves: each Project's rows in registry order, and the Ready queue of all Projects. */
@@ -13,8 +14,7 @@ export type BacklogProject = BacklogData['projects'][number];
 export const STATES = ['needs-info', 'marked', 'ready', 'held', 'not-ready'] as const;
 export type BacklogState = (typeof STATES)[number];
 
-/** The bd actor behind ysz's claims (src/beads.ts ORCHESTRATOR, which the browser bundle cannot import). */
-const YSZ = 'orchestrator';
+const YSZ = ORCHESTRATOR;
 
 export const keyOf = (project: string, id: string) => `${project}/${id}`;
 const byId = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
