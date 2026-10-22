@@ -391,9 +391,10 @@ function Copy({ text }: { text: string }) {
   );
 }
 
-/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first. */
-function More({ id, children }: { id: number; children: ReactNode }) {
+/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first, hiding its button's dots: while `busy` names the action in flight, a status in its place says so. */
+function More({ id, busy, children }: { id: number; busy?: string | null; children: ReactNode }) {
   const t = useT();
+  if (busy) return <span className="act waiting" role="status">{busy}</span>;
   if (!Children.toArray(children).length) return null;
   return (
     <>
@@ -675,7 +676,7 @@ export function App() {
             {t.requeue}
           </button>
         )}
-        <More id={r.id}>
+        <More id={r.id} busy={busy.has(`/api/runs/${r.id}/cleanup`) ? t.cleaningUp : busy.has(`/api/runs/${r.id}/delete`) ? t.deleting : null}>
           {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
             <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
               {t.cleanUp}
