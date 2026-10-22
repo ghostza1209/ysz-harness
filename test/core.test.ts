@@ -469,8 +469,9 @@ describe('polling', () => {
   });
 
   it("keeps each Project's Backlog rows and when the poll applied them, and a failing poll keeps the last ones beside its error", async () => {
+    backlogs = { PopDeal: [row('pd1')] };
     const o = await polled();
-    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows, b.updatedAt, b.error]), [['fazwaz', [], now, null], ['PopDeal', [], now, null], ['thaivis', [], now, null]]);
+    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows?.map((r) => r.id), b.updatedAt, b.error]), [['fazwaz', [], now, null], ['PopDeal', ['pd1'], now, null], ['thaivis', [], now, null]]);
     const first = now;
     now += 5000;
     backlogs = { fazwaz: [row('fz1')] };
@@ -478,7 +479,7 @@ describe('polling', () => {
     await o.poll();
     assert.deepEqual(o.backlog().map((b) => [b.name, b.rows?.map((r) => r.id), b.updatedAt, b.error]), [
       ['fazwaz', ['fz1'], now, null],
-      ['PopDeal', [], first, 'boom'],
+      ['PopDeal', ['pd1'], first, 'boom'],
       ['thaivis', [], now, null],
     ]);
   });
