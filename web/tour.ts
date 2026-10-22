@@ -6,7 +6,8 @@ const MIN = 60_000;
 
 /** What the Dashboard shows during the tour: one of every card and control the tour points at. Negative ids never reach the API. */
 export function sampleState(now: number): State {
-  const run = { prUrl: null, prBase: null, note: null, endedAt: null, cloneDir: null, archivedAt: null, model: 'claude-sonnet-5-5', usage: {}, prClosedAt: null, reports: null };
+  const run = { prUrl: null, prBase: null, note: null, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: 'claude-sonnet-5-5', usage: {}, prClosedAt: null, reports: null };
+  const failed = { ...run, id: -4, project: 'blog', ticketId: 'blog-7b', title: 'Paginate the archive page', state: 'failed' as const, attempt: 2, startedAt: now - 26 * 60 * MIN, endedAt: now - 25 * 60 * MIN, cloneDir: '~/.ysz/clones/blog-7b', cloneBytes: 1_400_000_000, note: 'Tests still failing after 2 Attempts' };
   return {
     slots: { used: 1, total: 2 },
     projects: [
@@ -20,9 +21,11 @@ export function sampleState(now: number): State {
       ],
       history: [
         { ...run, id: -3, project: 'shop', ticketId: 'shop-9f', title: 'Show prices in the user’s currency', state: 'in-review', attempt: 1, startedAt: now - 180 * MIN, endedAt: now - 150 * MIN, prUrl: 'https://github.com/example/shop/pull/42', usage: { 'attempt1-implement': { context: 112_000, tokens: 5_400_000 }, 'attempt1-review': { context: 63_000, tokens: 1_900_000 } } },
-        { ...run, id: -4, project: 'blog', ticketId: 'blog-7b', title: 'Paginate the archive page', state: 'failed', attempt: 2, startedAt: now - 26 * 60 * MIN, endedAt: now - 25 * 60 * MIN, cloneDir: '~/.ysz/clones/blog-7b', note: 'Tests still failing after 2 Attempts' },
+        failed,
       ],
       archived: [],
+      cloned: [failed],
+      clonedBytes: failed.cloneBytes,
     },
     ready: [
       { project: 'shop', id: 'shop-e5', title: 'Gift cards', priority: 1, ageMs: 5 * 60 * MIN, waitReason: 'Project already has a Run', runNow: false, spec: true },

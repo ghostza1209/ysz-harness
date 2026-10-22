@@ -37,6 +37,9 @@ _Avoid_: job, session.
 **Attempt**: One pass at a Run's Ticket in fresh isolated sandboxes: an agent implements the Ticket, then a second agent reviews and corrects that work. A Run retries with a second Attempt at most once.
 _Avoid_: retry run, try.
 
+**Clone**: A Run's disposable copy of its Project's repo on the host, fresh for each Attempt, that its sandboxes work in. It stays on disk only while it serves someone: the live Run, or the human inspecting a failed or killed Run until a later Run of the same Ticket reaches In review or Landed.
+_Avoid_: worktree, checkout, job.
+
 **Run log**: Everything a Run recorded, in order: each Attempt's sandbox setup and agent output, then the host steps that follow.
 
 **Implement agent**: The agent that works the Ticket at the start of an Attempt.

@@ -50,8 +50,11 @@ export interface Orchestrator {
   tick(): Promise<void>;
   /** Resolves when no Run is in flight. */
   whenIdle(): Promise<void>;
-  /** Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived ones (newest first). */
-  runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
+  /**
+   * Live Runs (those holding a slot, and needs-attention ones), the newest `limit` ended ones and the newest `limit` archived
+   * ones (newest first), and every ended Run that still has its clone, whatever the limit, with their size measured so far.
+   */
+  runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[]; cloned: RunRow[]; clonedBytes: number };
   /** What the Stats page graphs: every Run, archived ones too, and every change of each Project's Backlog and Ready counts. */
   stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
@@ -75,14 +78,15 @@ export interface Orchestrator {
    * Run once at startup, before the first tick, to settle what a crash left behind: remove leftover sandbox containers;
    * end agent-phase Runs as interrupted, removing their clone and releasing their Ticket with a comment (not an Attempt);
    * resume host-phase Runs from their host step and re-arm needs-attention ones for Retry; release Tickets the
-   * Orchestrator holds with no live Run and no in-review label. Never rejects: returns what it could not do.
+   * Orchestrator holds with no live Run and no in-review label; remove the clones nobody needs, then measure in the
+   * background the ones kept that have no size yet. Never rejects: returns what it could not do.
    */
   recover(): Promise<string[]>;
   /** Resume a needs-attention Run from the host step that failed. Needs a free slot. Resolves once started, not finished. */
   retryHostStep(runId: number): Promise<void>;
   /** Retry a failed Run: put its Ticket back in the Ready queue for a new Run. Only the Ticket's newest Run; the row stays failed. */
   requeue(runId: number): Promise<void>;
-  /** Remove the clone of a failed or killed Run. The history row stays. */
+  /** Remove the clone of an ended Run. The history row stays. */
   cleanUp(runId: number): Promise<void>;
   /**
    * Delete a failed, interrupted or killed Run: its clone, its log, then its row. Rejects, keeping the row, if the clone
@@ -170,10 +174,28 @@ export function createOrchestrator(deps: {
 
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-  /** End a Run: record the outcome and drop its controls. */
+  /** End a Run: record the outcome and drop its controls. A failed or killed Run keeps its clone, so its size is measured. */
   function end(runId: number, patch: Parameters<Store['updateRun']>[1]) {
     store.updateRun(runId, { ...patch, endedAt: clock.now() });
     controls.delete(runId);
+    if (patch.state === 'failed' || patch.state === 'killed') measure([store.getRun(runId)!]);
+  }
+
+  /** In the background, one at a time, record the size of each Run's clone still there by then. A failed du leaves it unknown. */
+  function measure(runs: RunRow[]) {
+    const work = (async () => {
+      for (const { id, cloneDir } of runs) {
+        const bytes = cloneDir && (await host.cloneSize({ dir: cloneDir }).catch(() => null));
+        if (bytes && store.getRun(id)?.cloneDir === cloneDir) store.updateRun(id, { cloneBytes: bytes });
+      }
+    })().finally(() => inFlight.delete(work));
+    inFlight.add(work);
+  }
+
+  /** Remove a Run's clone and clear its path. Rejects, keeping the path, if the removal fails. */
+  async function removeCloneOf({ id, cloneDir }: RunRow) {
+    await host.removeClone({ dir: cloneDir! });
+    store.updateRun(id, { cloneDir: null });
   }
 
   /** Run `work` as a background task of the Run; it never rejects. */
@@ -241,6 +263,10 @@ export function createOrchestrator(deps: {
       }
       // The work is on a branch and the bead is done, so a leftover clone is only clutter.
       if (prepared) await host.removeClone(prepared).then(() => store.updateRun(runId, { cloneDir: null }), () => {});
+      // So are the clones the Ticket's failed or killed Runs kept for inspection. One left behind waits for the next recover().
+      for (const run of store.cloned().filter((r) => r.project === job.project.name && r.ticketId === job.ticket.id && (r.state === 'failed' || r.state === 'killed'))) {
+        await removeCloneOf(run).catch((err) => log(`Removing the clone of Run ${run.id} failed: ${message(err)}`));
+      }
     } catch (err) {
       if (signal.aborted) return; // kill() settles the Run
       control.parked = job;
@@ -601,7 +627,8 @@ export function createOrchestrator(deps: {
     },
 
     runs(limit = 50) {
-      return { live: store.liveRuns(), history: store.history(limit), archived: store.archived(limit) };
+      const cloned = store.cloned();
+      return { live: store.liveRuns(), history: store.history(limit), archived: store.archived(limit), cloned, clonedBytes: cloned.reduce((n, r) => n + (r.cloneBytes ?? 0), 0) };
     },
 
     async kill(runId) {
@@ -688,6 +715,21 @@ export function createOrchestrator(deps: {
           }),
         ),
       );
+
+      // A clone outlives its use when its removal failed or a restart cut it short. A failed or killed Run's serves the
+      // human's inspection only until a later Run of its Ticket reaches In review (pr-closed and merged ones did) or lands.
+      const runs = store.allRuns();
+      for (const run of store.cloned()) {
+        const gotThrough = runs.some((r) => r.project === run.project && r.ticketId === run.ticketId && r.id > run.id && ['in-review', 'merged', 'pr-closed', 'landed'].includes(r.state));
+        if ((run.state === 'failed' || run.state === 'killed') && !gotThrough) continue;
+        await attempt(`removing the clone of Run ${run.id}`, () => removeCloneOf(run));
+      }
+      // A dir no Run points to, like an Attempt 1 clone whose removal failed, serves no one. Only Runs write there, and none has started yet.
+      const referenced = new Set(store.allRuns().map((r) => r.cloneDir));
+      await attempt('listing the clones', async () => {
+        for (const dir of await host.listClones()) if (!referenced.has(dir)) await attempt(`removing ${dir}`, () => host.removeClone({ dir }));
+      });
+      measure(store.cloned().filter((r) => r.cloneBytes === null));
       return problems;
     },
 
@@ -711,9 +753,9 @@ export function createOrchestrator(deps: {
 
     async cleanUp(runId) {
       const run = store.getRun(runId);
-      if ((run?.state !== 'failed' && run?.state !== 'killed') || !run.cloneDir) throw new Error(`Run ${runId} has no clone to clean up`);
-      await host.removeClone({ dir: run.cloneDir });
-      store.updateRun(runId, { cloneDir: null });
+      if (!run?.cloneDir) throw new Error(`Run ${runId} has no clone to clean up`);
+      if (store.liveRuns().some((r) => r.id === runId)) throw new Error(`Run ${runId} is still live, and its clone in use`);
+      await removeCloneOf(run);
     },
 
     async deleteRun(runId) {

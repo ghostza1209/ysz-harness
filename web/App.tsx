@@ -11,7 +11,7 @@ import type { RunRow, RunState } from '../src/store';
 export interface State {
   slots: { used: number; total: number };
   ready: QueueItem[];
-  runs: { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
+  runs: { live: RunRow[]; history: RunRow[]; archived: RunRow[]; cloned: RunRow[]; clonedBytes: number };
   projects: ProjectStatus[];
 }
 
@@ -179,6 +179,9 @@ function LogTail({ runId, now }: { runId: number; now: number }) {
 }
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const gigabytes = new Intl.NumberFormat('en', { style: 'unit', unit: 'gigabyte', maximumSignificantDigits: 3 });
+/** A clone's disk use, from bytes: clones run from hundreds of MB to several GB. */
+const gb = (bytes: number) => gigabytes.format(bytes / 1e9);
 
 /** Each agent's context window and tokens, in the order they ran, then the Run's total tokens. Older Runs have none. */
 function Usage({ usage, brief }: { usage: RunRow['usage']; brief?: boolean }) {
@@ -442,6 +445,8 @@ const FILTERS = {
   killed: (s: string) => s === 'killed',
   // Lists the archived Runs instead of the history.
   archived: () => true,
+  // Lists every Run that still has a clone instead, however far back.
+  cloned: () => true,
 };
 
 /** The error a 401 from /api/state stands for: this browser has no Dashboard cookie. */
@@ -587,15 +592,17 @@ export function App() {
   const slots = view?.slots ?? { used: 0, total: 2 };
   const history = view?.runs.history ?? [];
   const archived = view?.runs.archived ?? [];
+  const cloned = view?.runs.cloned ?? [];
+  const listed = filter === 'archived' ? archived : filter === 'cloned' ? cloned : history;
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (filter === 'archived' ? archived : history).filter(
+    return listed.filter(
       (r) =>
         FILTERS[filter](r.state) &&
         (!project || r.project === project) &&
         (!q || r.ticketId.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
     );
-  }, [history, archived, filter, project, query]);
+  }, [listed, filter, project, query]);
   /** Failed Runs a Retry may re-queue: only each Ticket's newest Run, and none of a Ticket that has a live Run. */
   const retryable = useMemo(() => {
     const seen = new Set(view?.runs.live.map((r) => `${r.project}/${r.ticketId}`));
@@ -607,8 +614,8 @@ export function App() {
     }
     return ids;
   }, [view, history]);
-  // Fewer than asked for means the server has no more.
-  const more = (group === 'none' && shown.length > visible) || (filter === 'archived' ? archived : history).length >= limit.current;
+  // Fewer than asked for means the server has no more; it always sends every Run with a clone.
+  const more = (group === 'none' && shown.length > visible) || (filter !== 'cloned' && listed.length >= limit.current);
   const showMore = () => {
     setVisible((v) => v + PAGE);
     limit.current += PAGE;
@@ -639,6 +646,12 @@ export function App() {
         </div>
         <Usage usage={r.usage} brief={density === 'compact'} />
         <Reports reports={r.reports} />
+        {r.cloneDir && (
+          <div className="row where">
+            <Copy text={r.cloneDir} />
+            {r.cloneBytes !== null && <span className="mute">{gb(r.cloneBytes)}</span>}
+          </div>
+        )}
         {r.note && <div className="note">{r.note}</div>}
       </div>
       <div className="when">
@@ -677,7 +690,7 @@ export function App() {
           </button>
         )}
         <More id={r.id} busy={busy.has(`/api/runs/${r.id}/cleanup`) ? t.cleaningUp : busy.has(`/api/runs/${r.id}/delete`) ? t.deleting : null}>
-          {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+          {r.cloneDir && (
             <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
               {t.cleanUp}
             </button>
@@ -913,7 +926,14 @@ export function App() {
                 <div className="chips" role="group" aria-label={t.filterByState}>
                   {(Object.keys(FILTERS) as (keyof typeof FILTERS)[]).map((f) => (
                     <button key={f} className={`chip ${filter === f ? 'on' : ''}`} aria-pressed={filter === f} onClick={() => setFilter(f)}>
-                      {f === 'all' ? t.all : f === 'archived' ? t.archived : label(f)}
+                      {f === 'all' ? t.all : f === 'archived' ? t.archived : f === 'cloned' ? t.hasClone : label(f)}
+                      {f === 'cloned' && cloned.length > 0 && (
+                        <span className="mute" title={t.clonesSize}>
+                          {' '}
+                          {gb(view.runs.clonedBytes)}
+                          {cloned.some((r) => r.cloneBytes === null) && '+'}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>

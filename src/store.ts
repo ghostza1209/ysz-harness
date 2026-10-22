@@ -34,6 +34,8 @@ export interface RunRow {
   endedAt: number | null;
   /** The Run's disposable clone while it exists on disk; null once removed or before the first one. */
   cloneDir: string | null;
+  /** The clone's size on disk, measured once the Run ended failed or killed; null until then. */
+  cloneBytes: number | null;
   /** When the human archived the Run, hiding it from history; null while not archived. */
   archivedAt: number | null;
   /** The model the Run's agents ran on; null for Runs from before it was recorded. */
@@ -52,10 +54,10 @@ export interface Reports {
   friction: { id: string; title: string; seenAgain: boolean }[];
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt' | 'prClosedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
 };
 
 /** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
@@ -80,6 +82,8 @@ export interface Store {
   history(limit: number): RunRow[];
   /** Archived Runs, newest first. */
   archived(limit: number): RunRow[];
+  /** Every Run that ended but still has its clone, archived ones too, newest first. */
+  cloned(): RunRow[];
   /** Every Run, live and archived ones too, oldest first. */
   allRuns(): RunRow[];
   getRun(id: number): RunRow | undefined;
@@ -146,6 +150,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 9) {
     db.exec('ALTER TABLE runs ADD COLUMN reports TEXT; PRAGMA user_version = 9');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 10) {
+    db.exec('ALTER TABLE runs ADD COLUMN clone_bytes INTEGER; PRAGMA user_version = 10');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
@@ -155,6 +162,7 @@ export function openStore(path: string): Store {
   const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
   const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) AND archived_at IS NULL ORDER BY id DESC LIMIT ?`);
   const shelved = db.prepare('SELECT * FROM runs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?');
+  const withClone = db.prepare(`SELECT * FROM runs WHERE clone_dir IS NOT NULL AND NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC`);
   const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
   const every = db.prepare('SELECT * FROM runs ORDER BY id');
@@ -178,6 +186,7 @@ export function openStore(path: string): Store {
     startedAt: r.started_at as number,
     endedAt: r.ended_at as number | null,
     cloneDir: r.clone_dir as string | null,
+    cloneBytes: r.clone_bytes as number | null,
     archivedAt: r.archived_at as number | null,
     model: r.model as string | null,
     usage: JSON.parse((r.usage as string | null) ?? '{}'),
@@ -198,6 +207,7 @@ export function openStore(path: string): Store {
     inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
     archived: (limit) => shelved.all(limit).map(toRow),
+    cloned: () => withClone.all(...LIVE_STATES).map(toRow),
     allRuns: () => every.all().map(toRow),
     getRun: (id) => {
       const row = byId.get(id);

@@ -5,7 +5,7 @@ import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, mergeRate, outco
 
 const run = (over: Partial<RunRow>): RunRow => ({
   id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, prBase: null, note: null,
-  startedAt: 0, endedAt: null, cloneDir: null, archivedAt: null, model: null, usage: {}, prClosedAt: null, reports: null, ...over,
+  startedAt: 0, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: null, usage: {}, prClosedAt: null, reports: null, ...over,
 });
 /** Local time on a day of October 2026. */
 const oct = (day: number, hour = 0, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { appendFileSync, closeSync, constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
@@ -80,6 +80,10 @@ export interface HostSteps {
   ): Promise<{ url: string; base: string }>;
   /** Delete a Run's clone with rm -rf, running no git in it. Refuses a path outside the clones directory. */
   removeClone(clone: Pick<Prepared, 'dir'>): Promise<void>;
+  /** Every entry of the clones directory, as a path; none before the first clone. */
+  listClones(): Promise<string[]>;
+  /** A clone's disk use in bytes, by du, which does not follow links out of it. */
+  cloneSize(clone: Pick<Prepared, 'dir'>): Promise<number>;
   /** The PR's state on GitHub and when it merged or closed (null while open), asked as the Project's gh account. */
   prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; closedAt: number | null }>;
 }
@@ -472,6 +476,15 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const inside = relative(clonesDir, dir);
       if (!inside || inside.startsWith('..') || isAbsolute(inside)) throw new Error(`refusing to remove ${dir}: not inside ${clonesDir}`);
       await rm(dir, { recursive: true, force: true }); // async: a clone holds a node_modules
+    },
+
+    async listClones() {
+      return existsSync(clonesDir) ? (await readdir(clonesDir)).map((name) => join(clonesDir, name)) : [];
+    },
+
+    async cloneSize({ dir }) {
+      // A node_modules takes du a while, and a timeout leaves the size unknown.
+      return Number((await text('du', ['-sk', dir], clonesDir, { timeout: 10 * 60_000 })).split('\t')[0]) * 1024;
     },
   };
 }

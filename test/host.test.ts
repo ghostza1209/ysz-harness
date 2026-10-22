@@ -171,6 +171,25 @@ describe('host steps against real git', () => {
     assert.ok(existsSync(join(root, 'clones')));
   });
 
+  it('lists what the clones directory holds, and nothing before it exists', async () => {
+    const sweep = createHostSteps('test-model', join(root, 'sweep'));
+    assert.deepEqual(await sweep.listClones(), []);
+    mkdirSync(join(root, 'sweep/lab-t-1-abc'), { recursive: true });
+    mkdirSync(join(root, 'sweep/lab-t-2-def'));
+    assert.deepEqual((await sweep.listClones()).sort(), [join(root, 'sweep/lab-t-1-abc'), join(root, 'sweep/lab-t-2-def')]);
+  });
+
+  it("measures a clone's disk use without following a link out of it", async () => {
+    const dir = join(root, 'clones/lab-size');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'kept'), Buffer.alloc(512 * 1024, 1));
+    writeFileSync(join(root, 'big-outside'), Buffer.alloc(4 * 1024 * 1024, 1));
+    symlinkSync(join(root, 'big-outside'), join(dir, 'link'));
+    const bytes = await host.cloneSize({ dir });
+    assert.ok(bytes >= 512 * 1024 && bytes < 1024 * 1024, `${bytes} bytes`);
+    await host.removeClone({ dir });
+  });
+
   it('publishes: fetches the agent branch back, pushes it, and writes the PR body outside the clone and the repo', async () => {
     const prepared = await host.prepare(project, 't-2', context);
     const clone = join(prepared.dir, 'repo');

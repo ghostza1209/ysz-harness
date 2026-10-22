@@ -138,6 +138,8 @@ export const en = {
   moreActions: 'More actions',
   unarchived: (id: string) => `${id} is back in the history`,
   archived: 'Archived',
+  hasClone: 'Has clone',
+  clonesSize: 'Disk use of these clones; + while some are still being measured',
   dismiss: 'Dismiss',
   prOpened: (id: string) => `${id} opened its PR`,
 
@@ -347,6 +349,8 @@ export const th: Dict = {
   moreActions: 'คำสั่งอื่น',
   unarchived: (id) => `${id} กลับมาอยู่ใน History แล้ว`,
   archived: 'Archived',
+  hasClone: 'มี clone',
+  clonesSize: 'พื้นที่ดิสก์ที่ clone เหล่านี้ใช้ มี + ต่อท้ายถ้ายังวัดไม่ครบ',
   dismiss: 'ปิด',
   prOpened: (id) => `${id} เปิด PR แล้ว`,
 

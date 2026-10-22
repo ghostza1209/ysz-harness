@@ -101,6 +101,13 @@ let landing: boolean;
 let landError: Error | undefined;
 /** The fields showContext adds to each Ticket's bead, by id. */
 let beadFields: Record<string, Record<string, unknown>>;
+/** What the clones directory holds, the clones whose removal fails, and each clone measured, in order; a measure waits for `sizeGate`. */
+let clonesOnDisk: string[];
+let failingRemovals: Set<string>;
+let measured: string[];
+let sizeGate: Promise<void> | undefined;
+/** What du reports for every clone. */
+const CLONE_BYTES = 3_000_000_000;
 
 const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
@@ -259,6 +266,16 @@ const fakeHost: HostSteps = {
   },
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
+    if (failingRemovals.has(dir)) throw new Error('EBUSY');
+    clonesOnDisk = clonesOnDisk.filter((d) => d !== dir);
+  },
+  async listClones() {
+    return clonesOnDisk;
+  },
+  async cloneSize({ dir }) {
+    measured.push(dir);
+    await sizeGate;
+    return CLONE_BYTES;
   },
   async prState(_project, prUrl) {
     const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
@@ -328,6 +345,10 @@ beforeEach(() => {
   landing = false;
   landError = undefined;
   beadFields = {};
+  clonesOnDisk = [];
+  failingRemovals = new Set();
+  measured = [];
+  sizeGate = undefined;
 });
 
 async function polled(registry: readonly Project[] = projects) {
@@ -584,7 +605,7 @@ describe('starting Runs', () => {
     claimErrors.fazwaz = new Error('bd claim failed: no such repo');
     const o = await polled();
     await o.tick();
-    assert.deepEqual(o.runs(), { live: [], history: [], archived: [] });
+    assert.deepEqual(o.runs(), { live: [], history: [], archived: [], cloned: [], clonedBytes: 0 });
     assert.equal(o.projectStatuses()[0].error, 'claiming fz1: bd claim failed: no such repo');
   });
 
@@ -2045,10 +2066,22 @@ describe('Clean up', () => {
     assert.equal(o.runs().history[0].cloneDir, null);
   });
 
-  it('refuses Runs that are live or in review', async () => {
+  it('cleans up a merged Run that still has its clone', async () => {
     const o = await polled();
-    await assert.rejects(o.cleanUp(startRun('thaivis', 'needs-attention')), /no clone to clean up/);
+    const id = startRun('thaivis', 'merged');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    await o.cleanUp(id);
+    assert.deepEqual(hostSteps, ['removeClone /clones/x']);
+    assert.equal(store.getRun(id)?.cloneDir, null);
+  });
+
+  it('refuses a live Run, whose clone Retry still publishes from, and a Run with no clone', async () => {
+    const o = await polled();
+    const live = startRun('thaivis', 'needs-attention');
+    store.updateRun(live, { cloneDir: '/clones/x' });
+    await assert.rejects(o.cleanUp(live), /still live/);
     await assert.rejects(o.cleanUp(startRun('fazwaz', 'in-review')), /no clone to clean up/);
+    await assert.rejects(o.cleanUp(999), /no clone to clean up/);
     assert.deepEqual(hostSteps, []);
   });
 
@@ -2065,6 +2098,158 @@ describe('Clean up', () => {
       fakeHost.removeClone = removeClone;
     }
     assert.equal(o.runs().history[0].cloneDir, '/clones/tv1-2');
+  });
+});
+
+describe('Clones nobody needs', () => {
+  /** An ended Run of `ticketId` from before, with its clone at /clones/<clone> when one is named. */
+  const before = (ticketId: string, state: RunState, clone?: string, project = 'thaivis') => {
+    const id = store.insertRun({ project, ticketId, title: 't', state, startedAt: now });
+    store.updateRun(id, { endedAt: now, cloneDir: clone ? `/clones/${clone}` : null });
+    return id;
+  };
+  const clonesLeft = () => store.allRuns().flatMap((r) => r.cloneDir ?? []);
+  const removed = () => hostSteps.filter((s) => s.startsWith('removeClone ')).map((s) => s.slice('removeClone /clones/'.length));
+
+  for (const ending of ['in-review', 'landed'] as const) {
+    it(`removes the clones of the Ticket's earlier failed and killed Runs once a Run ends ${ending}`, async () => {
+      landing = ending === 'landed';
+      before('tv1', 'failed', 'tv1-failed');
+      before('tv1', 'killed', 'tv1-killed');
+      before('tv2', 'failed', 'tv2-failed');
+      before('tv1', 'failed', 'fazwaz-tv1-failed', 'fazwaz');
+      queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+      const o = await polled();
+      await o.tick();
+      await o.whenIdle();
+      assert.equal(o.runs().history[0].state, ending);
+      assert.deepEqual(removed().sort(), ['tv1-1', 'tv1-failed', 'tv1-killed']);
+      assert.deepEqual(clonesLeft(), ['/clones/tv2-failed', '/clones/fazwaz-tv1-failed']);
+    });
+  }
+
+  it('still ends the Run in review, and logs it, when an earlier clone cannot be removed', async () => {
+    const old = before('tv1', 'failed', 'tv1-failed');
+    failingRemovals.add('/clones/tv1-failed');
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.cloneDir], ['in-review', null]);
+    assert.equal(store.getRun(old)?.cloneDir, '/clones/tv1-failed');
+    assert.ok(runLog.includes(`${run.id}: Removing the clone of Run ${old} failed: EBUSY`), runLog.join('\n'));
+  });
+
+  it("keeps the earlier clones when the Ticket's Run fails again", async () => {
+    before('tv1', 'failed', 'tv1-failed');
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(clonesLeft(), ['/clones/tv1-failed', '/clones/tv1-2']);
+  });
+
+  it("measures a failed Run's clone once it ends", async () => {
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/tv1-2']);
+    assert.equal(o.runs().history[0].cloneBytes, CLONE_BYTES);
+  });
+
+  it("measures a killed Run's clone", async () => {
+    gatedAgent();
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await flush();
+    await o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/tv1-1']);
+    assert.equal(o.runs().history[0].cloneBytes, CLONE_BYTES);
+  });
+
+  it('records no size for a clone cleaned up while du measured it', async () => {
+    let open!: () => void;
+    sizeGate = new Promise((resolve) => (open = resolve));
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    for (let i = 0; i < 100 && !measured.length; i++) await flush();
+    await o.cleanUp(o.runs().history[0].id);
+    open();
+    await o.whenIdle();
+    assert.deepEqual([o.runs().history[0].cloneDir, o.runs().history[0].cloneBytes], [null, null]);
+  });
+
+  it('lists every Run with a clone past the History limit, with their total size', async () => {
+    store.updateRun(before('tv1', 'failed', 'tv1-failed'), { cloneBytes: 2_000 });
+    store.updateRun(before('tv2', 'killed', 'tv2-killed'), { cloneBytes: 500 });
+    before('tv3', 'failed', 'tv3-unmeasured');
+    before('tv4', 'merged');
+    const o = await polled();
+    const { history, cloned, clonedBytes } = o.runs(1);
+    assert.deepEqual(history.map((r) => r.ticketId), ['tv4']);
+    assert.deepEqual(cloned.map((r) => r.ticketId), ['tv3', 'tv2', 'tv1']);
+    assert.equal(clonedBytes, 2_500);
+  });
+
+  it('at a restart, removes every clone no one needs and keeps the ones failed Runs still have for inspection', async () => {
+    // The clones that had piled up by 2026-10-22, by the Run that held them.
+    before('app-2bl.1', 'failed', 'run33');
+    before('app-2bl.1', 'merged');
+    before('app-2bl.11', 'merged', 'run41');
+    before('app-2bl.18', 'failed', 'run48');
+    before('app-2bl.18', 'merged');
+    before('app-2bl.21', 'failed', 'run53');
+    before('app-2bl.21', 'in-review');
+    before('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    // The other ways a clone outlives its use.
+    before('tv-k', 'killed', 'killed-then-landed');
+    before('tv-k', 'landed');
+    before('tv-c', 'failed', 'failed-then-pr-closed');
+    before('tv-c', 'pr-closed');
+    before('tv-i', 'interrupted', 'interrupted');
+    before('tv-r', 'pr-closed');
+    before('tv-r', 'failed', 'failed-after-a-pr');
+    const live = store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'needs-attention', startedAt: now });
+    store.updateRun(live, { cloneDir: '/clones/live' });
+    store.setHostJob(live, JSON.stringify({ prepared: { branch: 'agent/fz1', dir: '/clones/live', base: 'b'.repeat(40) } }));
+    clonesOnDisk = [...clonesLeft(), '/clones/orphan'];
+    const o = await polled();
+
+    assert.deepEqual(await o.recover(), []);
+
+    assert.deepEqual(clonesLeft(), ['/clones/run67', '/clones/failed-after-a-pr', '/clones/live']);
+    assert.deepEqual(removed().sort(), ['failed-then-pr-closed', 'interrupted', 'killed-then-landed', 'orphan', 'run33', 'run41', 'run48', 'run53']);
+  });
+
+  it('at a restart, reports a clone it could not remove and keeps its path', async () => {
+    const id = before('tv1', 'merged', 'tv1-merged');
+    failingRemovals.add('/clones/tv1-merged');
+    clonesOnDisk = ['/clones/tv1-merged', '/clones/stuck-orphan'];
+    failingRemovals.add('/clones/stuck-orphan');
+    const o = await polled();
+    assert.deepEqual(await o.recover(), [`removing the clone of Run ${id}: EBUSY`, 'removing /clones/stuck-orphan: EBUSY']);
+    assert.equal(store.getRun(id)?.cloneDir, '/clones/tv1-merged');
+  });
+
+  it('at a restart, measures the clones that have no size yet in the background, without holding up the first tick', async () => {
+    let open!: () => void;
+    sizeGate = new Promise((resolve) => (open = resolve));
+    const unmeasured = before('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    store.updateRun(before('tv1', 'killed', 'tv1-killed'), { cloneBytes: 1 });
+    const o = await polled();
+    assert.equal(await Promise.race([o.recover().then(() => 'recovered'), new Promise((resolve) => setTimeout(resolve, 100, 'held up'))]), 'recovered');
+    open();
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/run67']);
+    assert.equal(store.getRun(unmeasured)?.cloneBytes, CLONE_BYTES);
   });
 });
 

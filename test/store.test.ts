@@ -138,3 +138,42 @@ it('migrates a version-8 database: its Runs have no reports, and reports saved o
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it('lists every ended Run that still has a clone, archived ones too, newest first, with its size once measured', () => {
+  const store = openStore(':memory:');
+  const run = (ticketId: string, state: Parameters<typeof store.insertRun>[0]['state'], cloneDir: string | null) => {
+    const id = store.insertRun({ project: 'a', ticketId, title: 't', state, startedAt: 1 });
+    store.updateRun(id, { cloneDir });
+    return id;
+  };
+  const failed = run('failed', 'failed', '/clones/f');
+  run('removed', 'failed', null);
+  run('live', 'needs-attention', '/clones/l');
+  store.updateRun(run('shelved', 'merged', '/clones/s'), { archivedAt: 5 });
+  store.updateRun(failed, { cloneBytes: 3_000_000_000 });
+  assert.deepEqual(store.cloned().map((r) => [r.ticketId, r.cloneBytes]), [['shelved', null], ['failed', 3_000_000_000]]);
+});
+
+it('migrates a version-9 database: its Runs have no clone size, and one saved survives a reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const old = new DatabaseSync(path);
+    old.exec(`CREATE TABLE runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, ticket_id TEXT NOT NULL, title TEXT NOT NULL,
+      state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, pr_url TEXT, note TEXT, started_at INTEGER NOT NULL, ended_at INTEGER,
+      clone_dir TEXT, host_job TEXT, archived_at INTEGER, model TEXT, usage TEXT, pr_base TEXT, pr_closed_at INTEGER, reports TEXT
+    );
+    INSERT INTO runs (project, ticket_id, title, state, started_at, clone_dir) VALUES ('thaivis', 'tv-1', 'old Run', 'failed', 5, '/clones/x');
+    PRAGMA user_version = 9`);
+    old.close();
+
+    const store = openStore(path);
+    const [row] = store.history(10);
+    assert.equal(row.cloneBytes, null);
+    store.updateRun(row.id, { cloneBytes: 1024 });
+    assert.equal(openStore(path).getRun(row.id)?.cloneBytes, 1024);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
