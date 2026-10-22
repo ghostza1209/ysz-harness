@@ -1,8 +1,9 @@
-import type { BeadsGateway, Ticket, TicketContext } from './beads';
+import type { BacklogRow, BeadsGateway, Ticket, TicketContext, TicketDetail } from './beads';
 import { epicBranchOf, ticketKey, type HostSteps, type Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
 import type { AgentUsage, BacklogPoint, Reports, RunRow, RunState, Store } from './store';
+import { refusal, type TicketAction } from './ticketActions';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
@@ -59,6 +60,16 @@ export interface Orchestrator {
   stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
+  /** Each Project's Backlog rows as the last successful poll read them, in registry order. rows and updatedAt are null until the first one; a failed poll keeps the last and sets error. */
+  backlog(): { name: string; rows: BacklogRow[] | null; updatedAt: number | null; error: string | null }[];
+  /**
+   * A Backlog action on a Ticket, as the human. Re-reads the Ticket first and rejects with the reason, writing nothing, if the
+   * action is no longer allowed; else one bd update, then that Project's listReady is applied before this resolves. A failed
+   * refresh sets the Project's error and still resolves: the write landed.
+   */
+  ticketAction(project: string, ticketId: string, action: TicketAction): Promise<void>;
+  /** One Ticket's description and comments, read from bd now. The caller checks the Ticket is in the Project's Backlog. */
+  ticketDetail(project: string, ticketId: string): Promise<TicketDetail>;
   slots(): { used: number; total: number };
   projectStatuses(): ProjectStatus[];
   /**
@@ -160,7 +171,7 @@ export function createOrchestrator(deps: {
   removeLog?: (runId: number) => Promise<void>;
 }): Orchestrator {
   const { projects, beads, sandbox, host, store, clock, model, log: logRun = () => {}, removeLog = async () => {} } = deps;
-  const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
+  const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], rows: null as BacklogRow[] | null, updatedAt: null as number | null, error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
   /** Runs a kill() is settling, so a second click does not write the bead twice. */
@@ -199,6 +210,36 @@ export function createOrchestrator(deps: {
   async function removeCloneOf({ id, cloneDir }: RunRow) {
     await host.removeClone({ dir: cloneDir! });
     store.updateRun(id, { cloneDir: null });
+  }
+
+  /** How many listReady calls each Project has started, and the newest start whose result has been applied. */
+  const started = new Map(projects.map((p) => [p.name, 0]));
+  const applied = new Map(projects.map((p) => [p.name, 0]));
+
+  /**
+   * Read one Project's queue and apply it: Ready Tickets, Backlog rows, updatedAt, the run-now prune, error and a Stats
+   * Backlog point. A result (or failure) from a call that started before one already applied is dropped, so a poll that
+   * began before a click cannot overwrite the click's newer result. Never rejects.
+   */
+  async function refresh(p: Project): Promise<void> {
+    const gen = started.get(p.name)! + 1;
+    started.set(p.name, gen);
+    const listed = await beads.listReady(p).then((value) => ({ value }), (reason: unknown) => ({ reason }));
+    if (gen < applied.get(p.name)!) return;
+    applied.set(p.name, gen);
+    const snapshot = snapshots.get(p.name)!;
+    if ('value' in listed) {
+      const { tickets, rows } = listed.value;
+      snapshot.tickets = tickets;
+      snapshot.rows = rows;
+      snapshot.updatedAt = clock.now();
+      // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
+      for (const k of runNowKeys) if (k.startsWith(`${p.name}/`) && !tickets.some((t) => key(p.name, t.id) === k)) runNowKeys.delete(k);
+      snapshot.error = null;
+      store.recordBacklog(p.name, clock.now(), { backlog: rows.length, ready: tickets.length });
+    } else {
+      snapshot.error = message(listed.reason);
+    }
   }
 
   /** Run `work` as a background task of the Run; it never rejects. */
@@ -808,20 +849,26 @@ export function createOrchestrator(deps: {
     },
 
     async poll() {
-      const results = await Promise.allSettled(projects.map((p) => beads.listReady(p)));
-      results.forEach((result, i) => {
-        const snapshot = snapshots.get(projects[i].name)!;
-        if (result.status === 'fulfilled') {
-          const { tickets, backlog } = result.value;
-          snapshot.tickets = tickets;
-          // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
-          for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !tickets.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
-          snapshot.error = null;
-          store.recordBacklog(projects[i].name, clock.now(), { backlog, ready: tickets.length });
-        } else {
-          snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        }
-      });
+      await Promise.all(projects.map(refresh));
+    },
+
+    async ticketAction(project, ticketId, action) {
+      const p = byName.get(project);
+      if (!p) throw new Error(`Unknown Project ${project}`);
+      const why = refusal(await beads.ticketFacts(p, ticketId), action);
+      if (why) {
+        // The Backlog was out of date: show the human what bd has now.
+        await refresh(p);
+        throw new Error(why);
+      }
+      await beads.ticketAction(p, ticketId, action);
+      await refresh(p);
+    },
+
+    async ticketDetail(project, ticketId) {
+      const p = byName.get(project);
+      if (!p) throw new Error(`Unknown Project ${project}`);
+      return beads.ticketDetail(p, ticketId);
     },
 
     stats() {
@@ -830,6 +877,13 @@ export function createOrchestrator(deps: {
     },
 
     readyQueue,
+
+    backlog() {
+      return projects.map((p) => {
+        const { rows, updatedAt, error } = snapshots.get(p.name)!;
+        return { name: p.name, rows, updatedAt, error };
+      });
+    },
 
     slots() {
       return { used: store.slotProjects().length, total: SLOTS_TOTAL };

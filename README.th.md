@@ -51,8 +51,8 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 
 | ต้องการ | ทำแบบนี้ |
 | --- | --- |
-| ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
-| กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
+| ส่ง Ticket เข้าคิว | กด **Mark Ready** ที่แถวของ Ticket ในแท็บ Backlog ของ Dashboard (หรือ `bd update <id> --add-label ready-for-agent` ใน repo ของ Project) |
+| กัน Ticket ไม่ให้ ysz หยิบ | กด **Skip ysz** ที่แถวของ Ticket ในแท็บ Backlog (หรือ `bd update <id> --add-label orchestrator:skip`) |
 | ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic เมื่อ Spec เขียนเสร็จแล้ว และติดใหม่อีกครั้งหลังแก้ Spec |
 | ได้ PR เดียวสำหรับทั้ง epic | `bd update <epic-id> --add-label epic-branch` ก่อน child เริ่มรัน แล้ว ysz จะเปิด PR `epic/<epic-id>` → `baseBranch` ให้เมื่อ child ปิดครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |

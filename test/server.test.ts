@@ -16,10 +16,11 @@ let liveIds: number[] = [];
 const runLimits: (number | undefined)[] = [];
 const orchestrator = {
   slots: () => ({}),
-  readyQueue: () => [],
+  readyQueue: () => [{ project: 'lab', id: 'lab-1' }],
   runs: (limit?: number) => (runLimits.push(limit), { live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
   stats: () => ({ runs: [], backlog: [] }),
+  backlog: () => [{ name: 'lab', rows: [{ id: 'lab-1' }], updatedAt: 1234, error: null }],
   kill: async (id: number) => {
     if (id === 13) throw new Error('docker rm failed');
     actions.push(`kill ${id}`);
@@ -30,12 +31,23 @@ const orchestrator = {
   deleteRun: async (id: number) => void actions.push(`delete ${id}`),
   setArchived: (id: number, archived: boolean) => void actions.push(`${archived ? 'archive' : 'unarchive'} ${id}`),
   setPaused: (project: string, paused: boolean) => void actions.push(`${paused ? 'pause' : 'resume'} ${project}`),
+  ticketAction: async (project: string, id: string, action: string) => {
+    if (action === 'allow') throw new Error(`${id} is not skipped`);
+    actions.push(`${action} ${project}/${id}`);
+  },
+  ticketDetail: async (project: string, id: string) => {
+    detailReads.push(`${project}/${id}`);
+    if (id === 'lab-1' && detailFails) throw new Error('bd timed out');
+    return { description: 'line one\nline two', comments: [{ author: 'yoss', text: 'a note', createdAt: '2026-10-22T10:00:00Z' }] };
+  },
   runNow: (project: string, id: string) => {
     if (id === 'gone') throw new Error('gone is not in the Ready queue');
     actions.push(`run-now ${project}/${id}`);
   },
 } as unknown as Orchestrator;
 const actions: string[] = [];
+const detailReads: string[] = [];
+let detailFails = false;
 const realLogs = createRunLogs(logDir);
 let sizeCalls = 0;
 const logs: RunLogs = { ...realLogs, size: (id) => (sizeCalls++, realLogs.size(id)) };
@@ -95,6 +107,15 @@ function openStream(runId: number) {
   return { events, state };
 }
 
+it("serves each Project's Backlog rows with the Ready queue at /api/backlog", async () => {
+  const res = await get('/api/backlog');
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.body), {
+    projects: [{ name: 'lab', rows: [{ id: 'lab-1' }], updatedAt: 1234, error: null }],
+    ready: [{ project: 'lab', id: 'lab-1' }],
+  });
+});
+
 it('answers requests addressed to localhost or 127.0.0.1', async () => {
   assert.equal(await statusFor(`localhost:${port}`), 200);
   assert.equal(await statusFor(`127.0.0.1:${port}`), 200);
@@ -106,6 +127,8 @@ it('refuses every API route without the Dashboard cookie, as a sandbox sends it,
   const forged = { origin: `http://localhost:${port}`, cookie: '' };
   assert.equal((await send('/api/state', forged)).status, 401);
   assert.equal((await send('/api/stats', forged)).status, 401);
+  assert.equal((await send('/api/backlog', forged)).status, 401);
+  assert.equal((await send('/api/projects/lab/tickets/lab-1', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log/stream', forged)).status, 401);
   assert.equal((await send('/api/runs/7/kill', forged, 'POST')).status, 401);
@@ -254,4 +277,62 @@ it("answers a Run control the orchestrator refuses with 409 and the reason", asy
   const res = await post('/api/runs/13/kill');
   assert.equal(res.status, 409);
   assert.deepEqual(JSON.parse(res.body), { error: 'docker rm failed' });
+});
+
+it('runs a Backlog action posted from the dashboard itself, decoding the names, and answers a refusal with 409 and the reason', async () => {
+  actions.length = 0;
+  for (const action of ['mark-ready', 'unmark-ready', 'skip']) assert.equal((await post(`/api/projects/lab/tickets/lab-1/${action}`)).status, 200);
+  assert.deepEqual(actions, ['mark-ready lab/lab-1', 'unmark-ready lab/lab-1', 'skip lab/lab-1']);
+  const refused = await post('/api/projects/lab/tickets/lab-1/allow');
+  assert.equal(refused.status, 409);
+  assert.deepEqual(JSON.parse(refused.body), { error: 'lab-1 is not skipped' });
+});
+
+it('answers 404 to a Backlog action on an id the Project does not hold, or a Project it does not know, and does nothing', async () => {
+  actions.length = 0;
+  const missing = await post('/api/projects/lab/tickets/lab-9/skip');
+  assert.equal(missing.status, 404);
+  assert.deepEqual(JSON.parse(missing.body), { error: "lab-9 is not in lab's Backlog" });
+  assert.equal((await post('/api/projects/other/tickets/lab-1/skip')).status, 404);
+  assert.deepEqual(actions, []);
+});
+
+it("serves a Backlog Ticket's description and comments", async () => {
+  detailReads.length = 0;
+  const res = await get('/api/projects/lab/tickets/lab-1');
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.body), { description: 'line one\nline two', comments: [{ author: 'yoss', text: 'a note', createdAt: '2026-10-22T10:00:00Z' }] });
+  assert.deepEqual(detailReads, ['lab/lab-1']);
+});
+
+it('answers 404 to a detail of an id the Project does not hold, or a Project it does not know, without reading bd', async () => {
+  detailReads.length = 0;
+  assert.equal((await get('/api/projects/lab/tickets/lab-9')).status, 404);
+  assert.equal((await get('/api/projects/lab/tickets/--help')).status, 404);
+  assert.equal((await get('/api/projects/other/tickets/lab-1')).status, 404);
+  assert.deepEqual(detailReads, []);
+});
+
+it('answers a detail whose bd read fails with 502 and the reason, a malformed escape with 400, and a POST with 405', async () => {
+  detailFails = true;
+  const failed = await get('/api/projects/lab/tickets/lab-1');
+  detailFails = false;
+  assert.equal(failed.status, 502);
+  assert.deepEqual(JSON.parse(failed.body), { error: 'bd timed out' });
+  assert.equal((await get('/api/projects/lab/tickets/%E0')).status, 400);
+  assert.equal((await post('/api/projects/lab/tickets/lab-1')).status, 405);
+});
+
+it('answers a Backlog action on a malformed escape with 409 instead of crashing', async () => {
+  assert.equal((await post('/api/projects/lab/tickets/%E0/skip')).status, 409);
+});
+
+it('refuses a Backlog action from another origin, with no origin, or by GET, and does nothing', async () => {
+  actions.length = 0;
+  const path = '/api/projects/lab/tickets/lab-1/mark-ready';
+  assert.equal((await post(path, 'http://evil.example')).status, 403);
+  assert.equal((await send(path, {}, 'POST')).status, 403);
+  assert.equal((await get(path)).status, 405);
+  assert.equal((await send(path, { origin: `http://localhost:${port}`, cookie: '' }, 'POST')).status, 401);
+  assert.deepEqual(actions, []);
 });
