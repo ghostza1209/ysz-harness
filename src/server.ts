@@ -161,8 +161,8 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       if (runNow) return () => orchestrator.runNow(decodeURIComponent(runNow[1]), decodeURIComponent(runNow[2]));
       const action = /^\/api\/projects\/([^/]+)\/tickets\/([^/]+)\/(mark-ready|unmark-ready|skip|allow)$/.exec(path);
       if (action) {
-        const [project, id] = [decodeURIComponent(action[1]), decodeURIComponent(action[2])];
         return () => {
+          const [project, id] = [decodeURIComponent(action[1]), decodeURIComponent(action[2])];
           if (!orchestrator.backlog().some((p) => p.name === project && p.rows?.some((r) => r.id === id))) throw new NotFound(`${id} is not in ${project}'s Backlog`);
           return orchestrator.ticketAction(project, id, action[3] as TicketAction);
         };

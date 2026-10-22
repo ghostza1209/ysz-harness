@@ -6,8 +6,6 @@ import { promisify } from 'node:util';
 import type { Project } from './projects';
 import { ORCHESTRATOR, type TicketAction, type TicketFacts } from './ticketActions';
 
-export { ORCHESTRATOR };
-
 const execFileAsync = promisify(execFile);
 
 export interface Ticket {

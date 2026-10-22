@@ -289,6 +289,10 @@ it('answers 404 to a Backlog action on an id the Project does not hold, or a Pro
   assert.deepEqual(actions, []);
 });
 
+it('answers a Backlog action on a malformed escape with 409 instead of crashing', async () => {
+  assert.equal((await post('/api/projects/lab/tickets/%E0/skip')).status, 409);
+});
+
 it('refuses a Backlog action from another origin, with no origin, or by GET, and does nothing', async () => {
   actions.length = 0;
   const path = '/api/projects/lab/tickets/lab-1/mark-ready';
