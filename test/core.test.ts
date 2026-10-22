@@ -114,6 +114,9 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (!found) throw new Error(`no such bead ${id}`);
     return found;
   },
+  async ticketDetail() {
+    return { description: '', comments: [] };
+  },
   async ticketAction(project, id, action) {
     writes.push(`${action} ${project.name}/${id}`);
     if (ticketActionError) throw ticketActionError;

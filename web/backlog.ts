@@ -28,6 +28,8 @@ export interface Ticket {
   state: BacklogState;
   /** What the Ticket waits on, or its Run, worded for the row. */
   line: string;
+  /** Marked Ready only: each reason `line` joins, so the detail can list them one per line. */
+  reasons: string[];
 }
 
 /** A group's header: a parent that is in the Backlog, with its own state line ("Epic · 9 open" for an epic). */
@@ -35,6 +37,7 @@ export interface Header {
   row: BacklogRow;
   state: BacklogState | 'epic';
   line: string;
+  reasons: string[];
 }
 
 export interface Model {
@@ -61,12 +64,12 @@ export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t:
     const blockersOf = (r: BacklogRow) => r.dependencies.filter((d) => d.type === 'blocks').flatMap((d) => byRowId.get(d.depends_on_id) ?? []);
     const inReview = (r: BacklogRow) => isHeld(r) && has(r, 'in-review');
 
-    const lineOf = (r: BacklogRow): { state: BacklogState; line: string } => {
+    const lineOf = (r: BacklogRow): { state: BacklogState; line: string; reasons: string[] } => {
       const queued = queue.get(keyOf(p.name, r.id));
-      if (isHeld(r)) return { state: 'held', line: inReview(r) ? t.backlog.inReview : t.backlog.run(stages.get(keyOf(p.name, r.id))) };
+      if (isHeld(r)) return { state: 'held', line: inReview(r) ? t.backlog.inReview : t.backlog.run(stages.get(keyOf(p.name, r.id))), reasons: [] };
       if (queued) {
         const { place, q } = queued;
-        return { state: 'ready', line: q.runNow && q.waitReason === 'next up' ? t.runNowNext : t.backlog.queued(place, t.wait[q.waitReason] ?? q.waitReason) };
+        return { state: 'ready', line: q.runNow && q.waitReason === 'next up' ? t.runNowNext : t.backlog.queued(place, t.wait[q.waitReason] ?? q.waitReason), reasons: [] };
       }
       if (has(r, 'ready-for-agent')) {
         const blockers = blockersOf(r);
@@ -79,17 +82,17 @@ export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t:
           ...(open ? [t.backlog.openChildren(open)] : []),
         ];
         if (!reasons.length) reasons.push(r.status === 'open' ? t.backlog.notQueued : plain(r.status));
-        return { state: 'marked', line: t.backlog.markedWaits(reasons.join('; ')) };
+        return { state: 'marked', line: t.backlog.markedWaits(reasons.join('; ')), reasons };
       }
-      if (has(r, 'needs-info')) return { state: 'needs-info', line: t.backlog.needsInfo };
-      return { state: 'not-ready', line: t.backlog.notReady(r.assignee && r.assignee !== YSZ ? `${plain(r.status)}, ${r.assignee}` : null) };
+      if (has(r, 'needs-info')) return { state: 'needs-info', line: t.backlog.needsInfo, reasons: [] };
+      return { state: 'not-ready', line: t.backlog.notReady(r.assignee && r.assignee !== YSZ ? `${plain(r.status)}, ${r.assignee}` : null), reasons: [] };
     };
 
     for (const r of rows) if (r.issue_type !== 'epic') tickets.push({ project: p.name, row: r, ...lineOf(r) });
     for (const id of children.keys()) {
       const r = byRowId.get(id);
       if (!r) continue;
-      headers.set(keyOf(p.name, id), r.issue_type === 'epic' ? { row: r, state: 'epic', line: t.backlog.epicOpen(children.get(id)!) } : { row: r, ...lineOf(r) });
+      headers.set(keyOf(p.name, id), r.issue_type === 'epic' ? { row: r, state: 'epic', line: t.backlog.epicOpen(children.get(id)!), reasons: [] } : { row: r, ...lineOf(r) });
     }
   }
   return { tickets, headers, projects: data.projects.map((p) => p.name) };
@@ -181,4 +184,32 @@ export function ageText(p: BacklogProject, now: number, t: Dict): string {
   if (!p.rows) return t.backlog.loading;
   const ago = t.ago(short(now - (p.updatedAt ?? now), t));
   return p.error ? t.backlog.lastKnown(ago) : t.backlog.updated(ago);
+}
+
+/** A name as the Dashboard shows it: ysz's bd actor is ysz. */
+export const who = (name: string) => (name === YSZ ? 'ysz' : name);
+
+/** How long ago an RFC 3339 time was, as in `4m ago`. */
+export const since = (iso: string, now: number, t: Dict) => t.ago(short(now - Date.parse(iso), t));
+
+/** A Ticket a detail names: its title and status, or no title and "closed" when it is not in the rows. */
+export interface Related {
+  id: string;
+  title: string | null;
+  status: string;
+}
+
+/** A Ticket's neighbours, from the Project's rows: a blocker or parent that is not in them is closed. */
+export function relations(rows: BacklogRow[], row: BacklogRow) {
+  const byRowId = new Map(rows.map((r) => [r.id, r]));
+  const rel = (id: string): Related => {
+    const r = byRowId.get(id);
+    return { id, title: r?.title ?? null, status: r?.status ?? 'closed' };
+  };
+  return {
+    parent: row.parent ? rel(row.parent) : null,
+    blockedBy: row.dependencies.filter((d) => d.type === 'blocks').map((d) => rel(d.depends_on_id)),
+    blocks: rows.filter((r) => r.dependencies.some((d) => d.type === 'blocks' && d.depends_on_id === row.id)).map((r) => rel(r.id)),
+    children: rows.filter((r) => r.parent === row.id).map((r) => rel(r.id)),
+  };
 }

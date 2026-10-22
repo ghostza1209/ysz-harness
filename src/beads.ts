@@ -36,6 +36,12 @@ export interface BacklogRow {
   created_at: string;
 }
 
+/** What `bd show` adds to a Backlog row: the description and the comments, oldest first. */
+export interface TicketDetail {
+  description: string;
+  comments: { author: string; text: string; createdAt: string }[];
+}
+
 /** One child Ticket a breakdown agent planned; `blockedBy` holds the keys of other planned Tickets. */
 export interface PlannedTicket {
   key: string;
@@ -97,6 +103,8 @@ export interface BeadsGateway {
   showContext(project: Project, id: string): Promise<TicketContext>;
   /** One Ticket as bd shows it now, for the check before a Backlog action. */
   ticketFacts(project: Project, id: string): Promise<TicketFacts>;
+  /** One Ticket's description and comments as bd shows them now, for the Backlog tab's detail panel. */
+  ticketDetail(project: Project, id: string): Promise<TicketDetail>;
   /** A Backlog action as the human: one atomic bd update with bd's default actor (never the Orchestrator), touching only the labels the action names. */
   ticketAction(project: Project, id: string, action: TicketAction): Promise<void>;
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
@@ -341,6 +349,11 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     async ticketFacts(project, id) {
       const { issue_type, status, assignee, labels } = await show(project, [id]);
       return { id, issue_type, status, assignee: assignee || null, labels: labels ?? [] };
+    },
+
+    async ticketDetail(project, id) {
+      const { description, comments } = await show(project, [id, '--include-comments']);
+      return { description: description ?? '', comments: (comments ?? []).map((c: { author: string; text: string; created_at: string }) => ({ author: c.author, text: c.text, createdAt: c.created_at })) };
     },
 
     async ticketAction(project, id, action) {

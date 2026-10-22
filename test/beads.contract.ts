@@ -597,6 +597,17 @@ describe('Backlog actions against real bd', () => {
     assert.deepEqual(await gateway.ticketFacts(project, bare), { id: bare, issue_type: 'task', status: 'open', assignee: null, labels: [] });
   });
 
+  it("reads a Ticket's description and its comments with author and text, oldest first, and none for a Ticket without", async () => {
+    const id = await create('described', '-d', 'first line\nsecond <b>line</b>');
+    assert.deepEqual(await gateway.ticketDetail(project, id), { description: 'first line\nsecond <b>line</b>', comments: [] });
+    await bd('comment', id, 'one');
+    await bd('comment', id, 'two\nlines');
+    const { description, comments } = await gateway.ticketDetail(project, id);
+    assert.equal(description, 'first line\nsecond <b>line</b>');
+    assert.deepEqual(comments.map(({ author, text }) => ({ author, text })), [{ author: 'tester', text: 'one' }, { author: 'tester', text: 'two\nlines' }]);
+    assert.match(comments[0].createdAt, /^\d{4}-\d\d-\d\dT/);
+  });
+
   it('mark-ready adds ready-for-agent and drops needs-info, leaving orchestrator:skip and the assignee alone', async () => {
     const id = await create('answered', '-l', 'needs-info,orchestrator:skip,other', '-a', 'someone');
     await gateway.ticketAction(project, id, 'mark-ready');

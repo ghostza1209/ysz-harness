@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { BacklogRow } from '../src/beads';
 import type { QueueItem } from '../src/core';
-import { ageText, build, groupTickets, matches, parseSearch, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
+import { ageText, build, groupTickets, matches, parseSearch, relations, since, who, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
 import { en, th } from '../web/i18n';
 
 const row = (id: string, over: Partial<BacklogRow> = {}): BacklogRow => ({
@@ -171,4 +171,45 @@ it("words a Project's data age as loading, updated or last known", () => {
   assert.equal(ageText(project([], { error: 'bd timed out' }), 1000 + 4 * 60_000 + 5000, en), 'last known 4m ago');
   assert.equal(ageText(project([]), 1000 + 3 * 3_600_000, en), 'updated 3h ago');
   assert.equal(ageText(project([]), 1000 + 12_000, th), 'อัปเดต 12 วิ ที่แล้ว');
+});
+
+it('hands a Marked Ready Ticket its reasons one by one for the detail, and no other state any', () => {
+  const rows = [
+    row('b1', { title: 'First blocker' }),
+    row('m', { labels: ['ready-for-agent', 'orchestrator:skip'], assignee: 'yoss', dependencies: [blocks('b1')] }),
+    row('plain'),
+  ];
+  const byId = new Map(build(data(rows), noStages, en).tickets.map((tk) => [tk.row.id, tk]));
+  assert.deepEqual(byId.get('m')!.reasons, ['blocked by First blocker', 'assigned to yoss', 'skipped']);
+  assert.deepEqual(byId.get('plain')!.reasons, []);
+});
+
+it("lists a Ticket's parent, blockers, blocked Tickets and children from the rows, a blocker or parent outside them as closed", () => {
+  const rows = [
+    row('epic', { issue_type: 'epic' }),
+    row('t', { parent: 'epic', status: 'in_progress', dependencies: [blocks('b'), blocks('gone'), { depends_on_id: 'epic', type: 'parent-child' }] }),
+    row('b', { title: 'The blocker', status: 'blocked' }),
+    row('after', { dependencies: [blocks('t')] }),
+    row('kid', { parent: 't', title: 'A child' }),
+    row('orphan', { parent: 'closed-epic' }),
+  ];
+  assert.deepEqual(relations(rows, rows[1]), {
+    parent: { id: 'epic', title: 'Title of epic', status: 'open' },
+    blockedBy: [
+      { id: 'b', title: 'The blocker', status: 'blocked' },
+      { id: 'gone', title: null, status: 'closed' },
+    ],
+    blocks: [{ id: 'after', title: 'Title of after', status: 'open' }],
+    children: [{ id: 'kid', title: 'A child', status: 'open' }],
+  });
+  assert.deepEqual(relations(rows, rows[5]).parent, { id: 'closed-epic', title: null, status: 'closed' });
+  assert.equal(relations(rows, rows[0]).parent, null);
+});
+
+it('shows ysz for its bd actor in a name and ages a comment from its RFC 3339 time', () => {
+  assert.equal(who('orchestrator'), 'ysz');
+  assert.equal(who('yoss'), 'yoss');
+  const at = Date.parse('2026-10-22T10:00:00Z');
+  assert.equal(since('2026-10-22T10:00:00Z', at + 4 * 60_000 + 5000, en), '4m ago');
+  assert.equal(since('2026-10-22T10:00:00Z', at + 2 * 86_400_000, en), '2d ago');
 });

@@ -372,7 +372,7 @@ function Stages({ state }: { state: RunRow['state'] }) {
   );
 }
 
-function Copy({ text }: { text: string }) {
+export function Copy({ text }: { text: string }) {
   const t = useT();
   const [done, setDone] = useState(false);
   return (

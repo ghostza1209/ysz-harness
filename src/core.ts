@@ -1,4 +1,4 @@
-import type { BacklogRow, BeadsGateway, Ticket, TicketContext } from './beads';
+import type { BacklogRow, BeadsGateway, Ticket, TicketContext, TicketDetail } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
@@ -56,6 +56,8 @@ export interface Orchestrator {
    * refresh sets the Project's error and still resolves: the write landed.
    */
   ticketAction(project: string, ticketId: string, action: TicketAction): Promise<void>;
+  /** One Ticket's description and comments, read from bd now. The caller checks the Ticket is in the Project's Backlog. */
+  ticketDetail(project: string, ticketId: string): Promise<TicketDetail>;
   slots(): { used: number; total: number };
   projectStatuses(): ProjectStatus[];
   /**
@@ -763,6 +765,12 @@ export function createOrchestrator(deps: {
       if (why) throw new Error(why);
       await beads.ticketAction(p, ticketId, action);
       await refresh(p);
+    },
+
+    async ticketDetail(project, ticketId) {
+      const p = byName.get(project);
+      if (!p) throw new Error(`Unknown Project ${project}`);
+      return beads.ticketDetail(p, ticketId);
     },
 
     stats() {
