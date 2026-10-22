@@ -1,0 +1,185 @@
+import type { BacklogRow } from '../src/beads';
+import type { Orchestrator, QueueItem } from '../src/core';
+import type { Dict } from './i18n';
+
+/** What GET /api/backlog serves: each Project's rows in registry order, and the Ready queue of all Projects. */
+export interface BacklogData {
+  projects: ReturnType<Orchestrator['backlog']>;
+  ready: QueueItem[];
+}
+export type BacklogProject = BacklogData['projects'][number];
+
+/** The tabs' states, in tab order; 'all' is every one of them. */
+export const STATES = ['needs-info', 'marked', 'ready', 'held', 'not-ready'] as const;
+export type BacklogState = (typeof STATES)[number];
+
+/** The bd actor behind ysz's claims (src/beads.ts ORCHESTRATOR, which the browser bundle cannot import). */
+const YSZ = 'orchestrator';
+
+export const keyOf = (project: string, id: string) => `${project}/${id}`;
+const byId = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
+const has = (r: BacklogRow, label: string) => r.labels.includes(label);
+const isHeld = (r: BacklogRow) => r.status === 'in_progress' && r.assignee === YSZ;
+const plain = (status: string) => status.replace('_', ' ');
+
+export interface Ticket {
+  project: string;
+  row: BacklogRow;
+  state: BacklogState;
+  /** What the Ticket waits on, or its Run, worded for the row. */
+  line: string;
+}
+
+/** A group's header: a parent that is in the Backlog, with its own state line ("Epic · 9 open" for an epic). */
+export interface Header {
+  project: string;
+  row: BacklogRow;
+  state: BacklogState | 'epic';
+  line: string;
+}
+
+export interface Model {
+  tickets: Ticket[];
+  headers: Map<string, Header>;
+  /** Project names in registry order. */
+  projects: string[];
+}
+
+/**
+ * Every Ticket of every Project with its Backlog state, first match winning: held by ysz, Ready (in the Ready queue,
+ * never worked out from the rows), Marked Ready, Needs info, Not Ready. An epic is never a Ticket, only a header.
+ * `stages` maps a held Ticket's `project/id` to its Run's stage as the Run card shows it.
+ */
+export function build(data: BacklogData, stages: ReadonlyMap<string, string>, t: Dict): Model {
+  const queue = new Map(data.ready.map((q, i) => [keyOf(q.project, q.id), { place: i + 1, q }]));
+  const tickets: Ticket[] = [];
+  const headers = new Map<string, Header>();
+  for (const p of data.projects) {
+    const rows = p.rows ?? [];
+    const byRowId = new Map(rows.map((r) => [r.id, r]));
+    const children = new Map<string, number>();
+    for (const r of rows) if (r.parent) children.set(r.parent, (children.get(r.parent) ?? 0) + 1);
+    const blockersOf = (r: BacklogRow) => r.dependencies.filter((d) => d.type === 'blocks').flatMap((d) => byRowId.get(d.depends_on_id) ?? []);
+    const inReview = (r: BacklogRow) => isHeld(r) && has(r, 'in-review');
+
+    const lineOf = (r: BacklogRow): { state: BacklogState; line: string } => {
+      const queued = queue.get(keyOf(p.name, r.id));
+      if (isHeld(r)) return { state: 'held', line: inReview(r) ? t.backlog.inReview : t.backlog.run(stages.get(keyOf(p.name, r.id))) };
+      if (queued) {
+        const { place, q } = queued;
+        return { state: 'ready', line: q.runNow && q.waitReason === 'next up' ? t.runNowNext : t.backlog.queued(place, t.wait[q.waitReason] ?? q.waitReason) };
+      }
+      if (has(r, 'ready-for-agent')) {
+        const blockers = blockersOf(r);
+        const open = children.get(r.id) ?? 0;
+        const reasons = [
+          // A lone In review blocker is no reason: the Ticket stacks on its PR.
+          ...(blockers.length === 1 && inReview(blockers[0]) ? [] : blockers.map((b) => t.backlog.blockedBy(b.title))),
+          ...(r.assignee && r.assignee !== YSZ ? [t.backlog.assignedTo(r.assignee)] : []),
+          ...(has(r, 'orchestrator:skip') ? [t.backlog.skipped] : []),
+          ...(open ? [t.backlog.openChildren(open)] : []),
+        ];
+        if (!reasons.length) reasons.push(r.status === 'open' ? t.backlog.notQueued : plain(r.status));
+        return { state: 'marked', line: t.backlog.markedWaits(reasons.join('; ')) };
+      }
+      if (has(r, 'needs-info')) return { state: 'needs-info', line: t.backlog.needsInfo };
+      return { state: 'not-ready', line: t.backlog.notReady(r.assignee && r.assignee !== YSZ ? `${plain(r.status)}, ${r.assignee}` : null) };
+    };
+
+    for (const r of rows) if (r.issue_type !== 'epic') tickets.push({ project: p.name, row: r, ...lineOf(r) });
+    for (const id of children.keys()) {
+      const r = byRowId.get(id);
+      if (!r) continue;
+      headers.set(keyOf(p.name, id), r.issue_type === 'epic' ? { project: p.name, row: r, state: 'epic', line: t.backlog.epicOpen(children.get(id)!) } : { project: p.name, row: r, ...lineOf(r) });
+    }
+  }
+  return { tickets, headers, projects: data.projects.map((p) => p.name) };
+}
+
+export interface Search {
+  types: string[];
+  statuses: string[];
+  priorities: number[];
+  assignees: string[];
+  /** The rest, lower-cased. */
+  text: string;
+}
+
+/** `type:bug status:open p1 @yoss` and free text. */
+export function parseSearch(query: string): Search {
+  const s: Search = { types: [], statuses: [], priorities: [], assignees: [], text: '' };
+  const text: string[] = [];
+  for (const word of query.trim().split(/\s+/).filter(Boolean)) {
+    const kv = /^(type|status):(.+)$/i.exec(word);
+    if (kv) (kv[1].toLowerCase() === 'type' ? s.types : s.statuses).push(kv[2].toLowerCase());
+    else if (/^p[0-4]$/i.test(word)) s.priorities.push(Number(word[1]));
+    else if (/^@.+/.test(word)) s.assignees.push(word.slice(1).toLowerCase());
+    else text.push(word);
+  }
+  s.text = text.join(' ').toLowerCase();
+  return s;
+}
+
+/** Kinds combine with AND, several of one kind with OR. */
+export function matches({ row }: Ticket, s: Search): boolean {
+  return (
+    (!s.types.length || s.types.includes(row.issue_type.toLowerCase())) &&
+    (!s.statuses.length || s.statuses.includes(row.status.toLowerCase())) &&
+    (!s.priorities.length || s.priorities.includes(row.priority)) &&
+    (!s.assignees.length || (!!row.assignee && s.assignees.includes(row.assignee.toLowerCase()))) &&
+    (!s.text || `${row.id} ${row.title}`.toLowerCase().includes(s.text))
+  );
+}
+
+export interface Group {
+  key: string;
+  project: string;
+  /** The parent, when it is in the Backlog. */
+  header: Header | null;
+  /** The parent's id when it is not (closed); null with no header: the Project's "No epic". */
+  closedId: string | null;
+  tickets: Ticket[];
+}
+
+/**
+ * `tickets` under their parents. Headers are never filtered: a group exists when it holds a Ticket from `tickets`,
+ * whether or not its parent is one. Projects in registry order, then priority and id; closed parents after open ones, "No epic" last.
+ */
+export function groupTickets(tickets: Ticket[], model: Model): Group[] {
+  const groups = new Map<string, Group>();
+  for (const tk of tickets) {
+    const parent = tk.row.parent;
+    const header = (parent && model.headers.get(keyOf(tk.project, parent))) || null;
+    const key = keyOf(tk.project, header ? parent! : parent ? `closed:${parent}` : '');
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = { key, project: tk.project, header, closedId: header ? null : parent, tickets: [] }));
+    g.tickets.push(tk);
+  }
+  // 0 for a parent in the Backlog, 1 for a closed one, 2 for none.
+  const rank = (g: Group) => (g.header ? 0 : g.closedId ? 1 : 2);
+  for (const g of groups.values()) g.tickets.sort((a, b) => a.row.priority - b.row.priority || byId(a.row.id, b.row.id));
+  return [...groups.values()].sort(
+    (a, b) =>
+      model.projects.indexOf(a.project) - model.projects.indexOf(b.project) ||
+      rank(a) - rank(b) ||
+      (a.header && b.header ? a.header.row.priority - b.header.row.priority : 0) ||
+      byId(a.header?.row.id ?? a.closedId ?? '', b.header?.row.id ?? b.closedId ?? ''),
+  );
+}
+
+/** A duration in its largest short unit, as in `12s` or `4m`. */
+const short = (ms: number, { units: u }: Dict) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}${u.s}`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}${u.m}`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}${u.h}` : `${Math.floor(h / 24)}${u.d}`;
+};
+
+/** How fresh a Project's Tickets are: "loading…" before its first poll, "updated 12s ago", or "last known 4m ago" while its poll fails. */
+export function ageText(p: BacklogProject, now: number, t: Dict): string {
+  if (!p.rows) return t.backlog.loading;
+  const ago = t.ago(short(now - (p.updatedAt ?? now), t));
+  return p.error ? t.backlog.lastKnown(ago) : t.backlog.updated(ago);
+}
