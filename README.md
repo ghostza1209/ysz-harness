@@ -18,7 +18,7 @@
    A Ticket whose parent epic is labelled `epic-branch` clones `epic/<epic-id>` (the Project's `epicBranchPrefix`) in the Project repo instead and, with no PR of its own, lands on it: the branch fast-forwards and the bead closes. Once every child is closed, ysz pushes the branch and opens the epic's one PR onto `baseBranch`, then closes the epic when it merges. See [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md); an epic already on origin keeps child PRs ([ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)).
 5. If the agent needs information, the bead is handed back with a comment and the `needs-info` label.
 
-An epic labelled `ready-for-agent` with no children is a **Spec**. Its Run has no Review agent and no PR: a breakdown agent splits it into child Tickets, which ysz creates under the epic already labelled `ready-for-agent`. They join the queue on the next poll. See [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md).
+An epic labelled `ready-for-agent` is a **Spec**. Its Run has no Review agent and no PR: a breakdown agent splits it into child Tickets, which ysz creates under the epic already labelled `ready-for-agent`. They join the queue on the next poll, and ysz takes the label off the epic. After changing a broken-down Spec, label it again: the breakdown plans only what its children do not cover yet. See [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md) and [ADR 0009](docs/adr/0009-a-changed-spec-is-broken-down-again-when-relabelled.md).
 
 ## Requirements
 
@@ -53,7 +53,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | --- | --- |
 | Queue a Ticket | `bd update <id> --add-label ready-for-agent` in the Project's repo |
 | Keep a Ticket away from ysz | `bd update <id> --add-label orchestrator:skip` |
-| Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic with no children, once the Spec is final |
+| Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic once the Spec is final, and again after changing it |
 | Get one PR for a whole epic | `bd update <epic-id> --add-label epic-branch` before its children run; ysz opens `epic/<epic-id>` → `baseBranch` once they are all closed |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |
 | Stop a live Run | **Kill** on its card: the Ticket gets `orchestrator:skip` |

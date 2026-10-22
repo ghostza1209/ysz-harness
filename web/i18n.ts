@@ -82,7 +82,7 @@ export const en = {
   noReadyHint: "Label an open bead ready-for-agent in a Project's repo to queue it.",
   ageTitle: 'Time since the Ticket was created',
   specTitle:
-    'A Spec: an epic labelled ready-for-agent with no child Tickets. ysz picks it like a Ticket, but a breakdown agent splits it into child Tickets instead of writing code. They are created under the epic labelled ready-for-agent, with no review step and no PR, and become Ready on the next poll. To split it yourself, leave the label off or add orchestrator:skip. Each child opens its own PR on the base branch. For one PR there, label the epic epic-branch before its children run: each child lands on the epic branch with no PR of its own, and once all are closed ysz opens one PR for the epic. Or make it a task instead of an epic: one Run, one PR.',
+    'A Spec: an epic labelled ready-for-agent. ysz picks it like a Ticket, but a breakdown agent splits it into child Tickets instead of writing code. They are created under the epic labelled ready-for-agent, with no review step and no PR, and become Ready on the next poll. ysz takes the label off the epic after each breakdown: after changing a broken-down Spec, label it ready-for-agent again and ysz breaks down only what its children do not cover yet. To split it yourself, leave the label off or add orchestrator:skip. Each child opens its own PR on the base branch. For one PR there, label the epic epic-branch before its children run: each child lands on the epic branch with no PR of its own, and once all are closed ysz opens one PR for the epic. Or make it a task instead of an epic: one Run, one PR.',
   epicPrTitle:
     'An epic labelled epic-branch whose children are all closed. Its Run has no agent: ysz pushes the epic branch and opens its one PR onto the base branch, then closes the epic once you merge it. To open that PR yourself, add orchestrator:skip.',
   runNowNext: '⚡ Run now: next free slot',
@@ -206,7 +206,7 @@ export const en = {
     },
     ready: {
       title: 'Ready queue',
-      body: 'Ready Tickets in the order ysz will pick them, with priority, age and why each one waits. Run now jumps a Ticket to the next free slot. A Spec tag marks an epic with no child Tickets: ysz breaks it down into child Tickets instead of writing code, and the Run ends broken-down. Hover the tag for details.',
+      body: 'Ready Tickets in the order ysz will pick them, with priority, age and why each one waits. Run now jumps a Ticket to the next free slot. A Spec tag marks an epic labelled ready-for-agent: ysz breaks down what its child Tickets do not cover yet, all of it for an epic with none, instead of writing code, takes the label off, and the Run ends broken-down. Label a changed Spec again to have what its children miss broken down. Hover the tag for details.',
     },
     history: {
       title: 'History',
@@ -289,7 +289,7 @@ export const th: Dict = {
   noReadyHint: 'ใส่ label ready-for-agent ให้ bead ที่เปิดอยู่ใน repo ของ Project เพื่อเข้าคิว',
   ageTitle: 'เวลาตั้งแต่สร้าง Ticket',
   specTitle:
-    'Spec คือ epic ที่ติด label ready-for-agent แต่ยังไม่มี child Ticket ysz หยิบมาเหมือน Ticket แต่ให้ breakdown agent แตกเป็น child Ticket แทนการเขียนโค้ด child จะถูกสร้างใต้ epic พร้อม label ready-for-agent ไม่มีขั้นรีวิวและไม่มี PR แล้วเป็น Ready ใน poll ถัดไป ถ้าจะแตกเอง อย่าใส่ label หรือใส่ orchestrator:skip child แต่ละตัวเปิด PR ของตัวเองเข้า base branch ถ้าอยากได้ PR เดียว ใส่ label epic-branch ให้ epic ก่อน child เริ่มรัน แล้ว child แต่ละตัวจะเข้า epic branch โดยไม่มี PR ของตัวเอง และเมื่อ child ปิดครบ ysz จะเปิด PR เดียวของ epic ให้ หรือสร้างเป็น task แทน epic จะได้ Run เดียว PR เดียว',
+    'Spec คือ epic ที่ติด label ready-for-agent ysz หยิบมาเหมือน Ticket แต่ให้ breakdown agent แตกเป็น child Ticket แทนการเขียนโค้ด child จะถูกสร้างใต้ epic พร้อม label ready-for-agent ไม่มีขั้นรีวิวและไม่มี PR แล้วเป็น Ready ใน poll ถัดไป ysz จะเอา label ออกจาก epic หลังแตกทุกครั้ง ถ้าแก้ Spec ที่แตกไปแล้ว ให้ติด ready-for-agent ใหม่ ysz จะแตกเฉพาะส่วนที่ child ที่มีอยู่ยังไม่ครอบคลุม ถ้าจะแตกเอง อย่าใส่ label หรือใส่ orchestrator:skip child แต่ละตัวเปิด PR ของตัวเองเข้า base branch ถ้าอยากได้ PR เดียว ใส่ label epic-branch ให้ epic ก่อน child เริ่มรัน แล้ว child แต่ละตัวจะเข้า epic branch โดยไม่มี PR ของตัวเอง และเมื่อ child ปิดครบ ysz จะเปิด PR เดียวของ epic ให้ หรือสร้างเป็น task แทน epic จะได้ Run เดียว PR เดียว',
   epicPrTitle:
     'epic ที่ติด label epic-branch และ child ปิดครบแล้ว Run ของมันไม่มี agent: ysz push epic branch แล้วเปิด PR เดียวเข้า base branch และปิด epic ให้เมื่อคุณ merge ถ้าจะเปิด PR นั้นเอง ใส่ orchestrator:skip',
   runNowNext: '⚡ Run now: ได้ slot ว่างถัดไป',
@@ -413,7 +413,7 @@ export const th: Dict = {
     },
     ready: {
       title: 'คิว Ready',
-      body: 'Ready Ticket เรียงตามลำดับที่ ysz จะหยิบ พร้อม priority, อายุ และเหตุผลที่ยังรอ ปุ่ม Run now ส่ง Ticket ไปที่ slot ว่างถัดไป tag Spec คือ epic ที่ยังไม่มี child Ticket ysz จะแตกเป็น child Ticket แทนการเขียนโค้ด แล้ว Run จบด้วย broken-down ชี้ที่ tag เพื่อดูรายละเอียด',
+      body: 'Ready Ticket เรียงตามลำดับที่ ysz จะหยิบ พร้อม priority, อายุ และเหตุผลที่ยังรอ ปุ่ม Run now ส่ง Ticket ไปที่ slot ว่างถัดไป tag Spec คือ epic ที่ติด label ready-for-agent ysz จะแตกส่วนที่ child Ticket ยังไม่ครอบคลุม (ทั้งหมดถ้ายังไม่มี child) แทนการเขียนโค้ด แล้วเอา label ออก และ Run จบด้วย broken-down ถ้าแก้ Spec แล้ว ติด label ใหม่เพื่อให้แตกส่วนที่ขาด ชี้ที่ tag เพื่อดูรายละเอียด',
     },
     history: {
       title: 'ประวัติ',

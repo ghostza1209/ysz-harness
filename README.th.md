@@ -18,7 +18,7 @@
    Ticket ที่ epic แม่ติด label `epic-branch` จะ clone จาก `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) ใน repo ของ Project แทน และไม่มี PR ของตัวเอง แต่จะ land ลง branch นั้น คือ branch ถูก fast-forward แล้ว bead ปิด เมื่อ child ปิดครบ ysz จะ push branch แล้วเปิด PR เดียวของ epic เข้า `baseBranch` และปิด epic ให้เมื่อ PR นั้น merge ดู [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md) ส่วน epic ที่มี branch บน origin อยู่แล้วยังใช้ child PR ตาม [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
-epic ที่ติด label `ready-for-agent` และยังไม่มี child เลยเรียกว่า **Spec** Run ของ Spec ไม่มี Review agent และไม่เปิด PR: breakdown agent จะแตก Spec เป็น child Ticket แล้ว ysz สร้างไว้ใต้ epic โดยติด `ready-for-agent` ให้เลย Ticket เหล่านี้จะเข้าคิวใน poll ถัดไป ดู [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md)
+epic ที่ติด label `ready-for-agent` เรียกว่า **Spec** Run ของ Spec ไม่มี Review agent และไม่เปิด PR: breakdown agent จะแตก Spec เป็น child Ticket แล้ว ysz สร้างไว้ใต้ epic โดยติด `ready-for-agent` ให้เลย Ticket เหล่านี้จะเข้าคิวใน poll ถัดไป และ ysz จะเอา label ออกจาก epic ถ้าแก้ Spec ที่แตกไปแล้ว ให้ติด label ใหม่ การแตกรอบนั้นจะวางแผนเฉพาะส่วนที่ child ยังไม่ครอบคลุม ดู [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md) และ [ADR 0009](docs/adr/0009-a-changed-spec-is-broken-down-again-when-relabelled.md)
 
 ## สิ่งที่ต้องมี
 
@@ -53,7 +53,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | --- | --- |
 | ส่ง Ticket เข้าคิว | `bd update <id> --add-label ready-for-agent` ใน repo ของ Project |
 | กัน Ticket ไม่ให้ ysz หยิบ | `bd update <id> --add-label orchestrator:skip` |
-| ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic ที่ยังไม่มี child เมื่อ Spec เขียนเสร็จแล้ว |
+| ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic เมื่อ Spec เขียนเสร็จแล้ว และติดใหม่อีกครั้งหลังแก้ Spec |
 | ได้ PR เดียวสำหรับทั้ง epic | `bd update <epic-id> --add-label epic-branch` ก่อน child เริ่มรัน แล้ว ysz จะเปิด PR `epic/<epic-id>` → `baseBranch` ให้เมื่อ child ปิดครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |

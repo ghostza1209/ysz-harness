@@ -69,9 +69,14 @@ let writeTicketError: Error | undefined;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
-/** What each breakdown agent ends with; and whether the Spec has children by the time its plan is created. */
+/** What each breakdown agent ends with; whether the Spec's children changed by the time its plan is created; and how an empty plan leaves it. */
 let breakdowner: (attempt: number) => Promise<Awaited<ReturnType<SandboxRunner['breakDown']>>>;
-let specGotChildren: boolean;
+let specChildrenChanged: boolean;
+let specLeft: 'released' | 'closed' | 'handed-back';
+/** The children and baseline showContext reports for a Spec, by id; the children each breakdown agent was given; and what each breakDown write was told its agent saw. */
+let specContexts: Record<string, Pick<TicketContext, 'children' | 'baseline'>>;
+let agentChildren: string[][];
+let seenByBreakDown: { children: string[]; baseline: string }[];
 let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
 /** The branch the next publish reports its PR targets. */
@@ -112,9 +117,10 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (releaseError && id === 'tv-a') throw releaseError;
     writes.push(`release ${project.name}/${id}`);
   },
-  async breakDown(project, spec, plan) {
+  async breakDown(project, spec, plan, seen) {
     writes.push(`breakDown ${project.name}/${spec.id} P${spec.priority}: ${plan.map((t) => `${t.key}<${t.blockedBy.join(',')}>`).join(' ')}`);
-    return specGotChildren ? null : plan.map((_, i) => `${spec.id}.${i + 1}`);
+    seenByBreakDown.push(seen);
+    return specChildrenChanged ? null : { created: plan.map((_, i) => `${spec.id}.${i + 1}`), left: specLeft };
   },
   async fail(project, id, reason) {
     if (failError) throw failError;
@@ -137,7 +143,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id, ...beadFields[id] }, parent: null, closedBlockers, inReviewBlocker, openFriction: [] };
+    return { ticket: { id, ...beadFields[id] }, parent: null, closedBlockers, inReviewBlocker, openFriction: [], ...specContexts[id] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
@@ -202,6 +208,7 @@ const fakeSandbox: SandboxRunner = {
   },
   breakDown(req) {
     agentCalls.push(`breakdown attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
+    agentChildren.push(req.children);
     return breakdowner(req.attempt);
   },
   async stop({ dir }) {
@@ -303,7 +310,11 @@ beforeEach(() => {
   agent = async () => complete;
   reviewer = async () => complete;
   breakdowner = async () => ({ ...complete, plan: [planned('T1'), planned('T2', 'T1')] });
-  specGotChildren = false;
+  specChildrenChanged = false;
+  specLeft = 'released';
+  specContexts = {};
+  agentChildren = [];
+  seenByBreakDown = [];
   publish = async () => PR_URL;
   publishBase = 'main';
   publishOpts = undefined;
@@ -770,9 +781,35 @@ describe('a Spec', () => {
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
   });
 
-  it('creates nothing, and says so, when the Spec got children by hand while its agent ran', async () => {
-    specGotChildren = true;
-    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'The Spec got children by hand meanwhile, so none were created.']]);
+  it('creates nothing, and says so, when the Spec\'s children changed while its agent ran', async () => {
+    specChildrenChanged = true;
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, "The Spec's children changed while its agent ran, so none were created."]]);
+  });
+
+  it("hands the Spec's children and baseline, as read at the Run's start, to its agent and to the breakdown it writes", async () => {
+    specContexts = { ep1: { children: [{ id: 'ep1.1', title: 'done', status: 'closed', body: '', closeReason: 'PR merged' }, { id: 'ep1.2', title: 'open', status: 'open', body: '', closeReason: '' }], baseline: 'b1' } };
+    breakdowner = async (n) => {
+      // An edit made while the agent runs is not what it saw: the second Attempt gets the same as the first.
+      specContexts = { ep1: { children: [], baseline: 'b2' } };
+      return n === 1 ? { ...complete, plan: 'it output no <ticket> tags' } : { ...complete, plan: [planned('T3', 'ep1.2')] };
+    };
+    await run();
+    assert.deepEqual(agentChildren, [['ep1.1', 'ep1.2'], ['ep1.1', 'ep1.2']]);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'breakDown thaivis/ep1 P1: T3<ep1.2>']);
+    assert.deepEqual(seenByBreakDown, [{ children: ['ep1.1', 'ep1.2'], baseline: 'b1' }]);
+  });
+
+  it('ends broken-down saying nothing was left when its agent plans no Tickets', async () => {
+    breakdowner = async () => ({ ...complete, plan: [] });
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'Nothing left to break down']]);
+  });
+
+  it('says so when a breakdown with nothing left closed the Spec, or handed it back for changing while its agent ran', async () => {
+    breakdowner = async () => ({ ...complete, plan: [] });
+    specLeft = 'closed';
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'Nothing left to break down; closed the Spec']]);
+    specLeft = 'handed-back';
+    assert.deepEqual(historyOf(await run())[0], ['broken-down', 1, 'Nothing left to break down, but the Spec changed while its agent ran, so it went back to the human']);
   });
 
   it('tries a second Attempt, told why the first failed, then hands the Spec back with both reasons', async () => {

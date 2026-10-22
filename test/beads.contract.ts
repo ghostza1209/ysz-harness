@@ -141,7 +141,7 @@ describe('Beads gateway against real bd', () => {
     assert.deepEqual([issue.status, issue.close_reason, issue.labels], ['closed', 'PR merged: https://github.com/o/r/pull/3', ['ready-for-agent']]);
   });
 
-  it('closes a ready-for-agent parent, epic or not, once its last child merges', async () => {
+  it('closes a ready-for-agent non-epic parent once its last child merges, but not an epic still waiting for its breakdown', async () => {
     await create('specTask', 'spec as a task', '-l', 'ready-for-agent');
     await inReview('firstChild', '--parent', ids.specTask);
     await inReview('lastChild', '--parent', ids.specTask);
@@ -153,10 +153,9 @@ describe('Beads gateway against real bd', () => {
     await createBeadsGateway().merged(project, ids.lastChild, 'https://github.com/o/r/pull/5');
     await createBeadsGateway().merged(project, ids.epicChild, 'https://github.com/o/r/pull/6');
 
-    for (const [id, pr] of [[ids.specTask, 5], [ids.specEpic, 6]]) {
-      const [issue] = JSON.parse((await bd('show', String(id), '--json')).stdout);
-      assert.deepEqual([issue.status, issue.close_reason], ['closed', `Every child closed, the last by https://github.com/o/r/pull/${pr}`]);
-    }
+    const [issue] = JSON.parse((await bd('show', ids.specTask, '--json')).stdout);
+    assert.deepEqual([issue.status, issue.close_reason], ['closed', 'Every child closed, the last by https://github.com/o/r/pull/5']);
+    assert.deepEqual(await state(ids.specEpic), { status: 'open', assignee: '', labels: ['ready-for-agent'] });
   });
 
   it('leaves a parent open whose last child merged when it is not ready-for-agent or waits on its epic-branch PR', async () => {
@@ -553,8 +552,33 @@ describe('Specs against real bd', () => {
   async function create(key: string, title: string, ...flags: string[]) {
     ids[key] = (await bd('create', title, '--silent', ...flags)).stdout.trim();
   }
-  const show = async (id: string) => JSON.parse((await bd('show', id, '--json')).stdout)[0];
+  const show = async (id: string) => JSON.parse((await bd('show', id, '--json', '--include-comments')).stdout)[0];
   const children = async (id: string) => JSON.parse((await bd('children', id, '--json')).stdout) as { id: string }[];
+  const commentsOf = (i: { comments?: { text: string }[] }) => (i.comments ?? []).map((c) => c.text);
+  const blockers = (i: { dependencies?: { id: string; dependency_type: string }[] }) => (i.dependencies ?? []).filter((d) => d.dependency_type === 'blocks').map((d) => d.id);
+  const plain = (key: string, ...blockedBy: string[]) => ({ key, title: key, body: '', blockedBy });
+  const CHANGED = 'This Spec changed since its last breakdown read it, so its children may not cover all of it. Label it ready-for-agent to have what they do not cover yet broken down.';
+
+  /** Claim a Spec as its Run does, and return what its agent saw, which the Run hands back to breakDown. */
+  async function claimAndSee(id: string) {
+    const gateway = createBeadsGateway();
+    assert.equal(await gateway.claim(project, id), true);
+    const { children, baseline } = await gateway.showContext(project, id);
+    return { children: children!.map((c) => c.id), baseline: baseline! };
+  }
+  /** The Orchestrator holds the Ticket In review, as a Run leaves it once its PR is open. */
+  async function inReview(id: string) {
+    await bd('--actor', 'orchestrator', 'update', id, '--claim');
+    await bd('update', id, '--add-label', 'in-review');
+  }
+  /** A Spec ysz broke down into one child, which the Orchestrator holds In review. Returns that child's id. */
+  async function brokenDown(key: string, ...flags: string[]) {
+    await create(key, key, '-t', 'epic', '-l', 'ready-for-agent', '-d', 'what to build', '--design', 'how', '--acceptance', 'done when', ...flags);
+    const seen = await claimAndSee(ids[key]);
+    const [child] = (await createBeadsGateway().breakDown(project, { id: ids[key], priority: 2 }, [plain('only')], seen))!.created;
+    await inReview(child);
+    return child;
+  }
 
   before(async () => {
     dir = await mkdtemp(join(tmpdir(), 'beads-spec-'));
@@ -564,6 +588,13 @@ describe('Specs against real bd', () => {
     await create('finished', 'every child closed', '-t', 'epic', '-l', 'ready-for-agent');
     await create('finishedChild', 'the only child', '--parent', ids.finished);
     await bd('close', ids.finishedChild, '-r', 'done');
+    await create('relabelled', 'broken down before, labelled again', '-t', 'epic', '-l', 'ready-for-agent,needs-info', '-p', '0');
+    await create('relabelled1', 'the open child', '--parent', ids.relabelled, '--no-inherit-labels', '-d', 'open body');
+    await create('relabelled2', 'the closed child', '--parent', ids.relabelled, '--no-inherit-labels', '-d', 'closed body');
+    await bd('close', ids.relabelled2, '-r', 'PR merged: https://github.com/o/r/pull/1');
+    await create('branchSpec', 'on its own branch', '-t', 'epic', '-l', 'ready-for-agent,epic-branch');
+    await create('branchSpecChild', 'its child', '--parent', ids.branchSpec);
+    await bd('close', ids.branchSpecChild, '-r', 'done');
     await create('unlabelled', 'not for agents', '-t', 'epic');
     await create('blockedSpec', 'waits on a Ticket', '-t', 'epic', '-l', 'ready-for-agent');
     await create('gate', 'the gate');
@@ -572,20 +603,31 @@ describe('Specs against real bd', () => {
 
   after(() => rm(dir, { recursive: true, force: true }));
 
-  it('lists a childless labelled epic as a Spec, and not one whose children all closed, an unlabelled one or a blocked one', async () => {
+  it('lists a labelled epic as a Spec whether or not it has children, one on its own branch never for its Epic PR, and not an unlabelled or blocked one', async () => {
     const { tickets } = await createBeadsGateway().listReady(project);
-    assert.deepEqual(tickets.map(({ id, priority, spec }) => ({ id, priority, spec })), [{ id: ids.spec, priority: 1, spec: true }]);
+    assert.deepEqual(
+      tickets.map(({ id, spec, epicPr }) => [id, spec, epicPr]).sort(),
+      [[ids.spec, true, undefined], [ids.finished, true, undefined], [ids.relabelled, true, undefined], [ids.branchSpec, true, undefined]].sort(),
+    );
   });
 
-  it('creates the plan under the claimed Spec, labelled ready-for-agent at its priority with the blocking edges, then comments and releases it', async () => {
+  it('shows a Spec with every child, closed ones included, by title, status, body and close reason', async () => {
+    const { children } = await createBeadsGateway().showContext(project, ids.relabelled);
+    assert.deepEqual([...children!].sort((a, b) => a.id.localeCompare(b.id)), [
+      { id: ids.relabelled1, title: 'the open child', status: 'open', body: 'open body', closeReason: '' },
+      { id: ids.relabelled2, title: 'the closed child', status: 'closed', body: 'closed body', closeReason: 'PR merged: https://github.com/o/r/pull/1' },
+    ]);
+  });
+
+  it('creates the plan under the claimed Spec, labelled ready-for-agent at its priority with the blocking edges, then comments, drops its label and releases it', async () => {
     const gateway = createBeadsGateway();
-    assert.equal(await gateway.claim(project, ids.spec), true);
-    const created = await gateway.breakDown(project, { id: ids.spec, priority: 1 }, [
+    const seen = await claimAndSee(ids.spec);
+    const result = await gateway.breakDown(project, { id: ids.spec, priority: 1 }, [
       { key: 'schema', title: '--add the column', body: '## What to build\nThe column.', blockedBy: [] },
       { key: 'ui', title: 'show it', body: '', blockedBy: ['schema'] },
-    ]);
-    assert.deepEqual(created, [`${ids.spec}.1`, `${ids.spec}.2`]);
-    const [schema, ui] = await Promise.all(created!.map(show));
+    ], seen);
+    assert.deepEqual(result, { created: [`${ids.spec}.1`, `${ids.spec}.2`], left: 'released' });
+    const [schema, ui] = await Promise.all(result!.created.map(show));
     assert.deepEqual(
       [schema, ui].map((i) => [i.title, i.description ?? '', i.status, i.priority, i.parent, [...i.labels], i.created_by]),
       [
@@ -593,39 +635,130 @@ describe('Specs against real bd', () => {
         ['show it', '', 'open', 1, ids.spec, ['ready-for-agent'], 'orchestrator'],
       ],
     );
-    const blockers = (i: { dependencies?: { id: string; dependency_type: string }[] }) => (i.dependencies ?? []).filter((d) => d.dependency_type === 'blocks').map((d) => d.id);
     assert.deepEqual([blockers(schema), blockers(ui)], [[], [schema.id]]);
 
-    const [spec] = JSON.parse((await bd('show', ids.spec, '--json', '--include-comments')).stdout);
-    assert.deepEqual([spec.status, spec.assignee ?? ''], ['open', '']);
-    assert.deepEqual(spec.comments.map((c: { text: string }) => c.text), [`Broken down into ${schema.id}, ${ui.id}`]);
-    assert.deepEqual((await gateway.listReady(project)).tickets.map((t) => t.id), [schema.id]);
+    const spec = await show(ids.spec);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels ?? [], commentsOf(spec)], ['open', '', [], [`Broken down into ${schema.id}, ${ui.id}`]]);
+    const listed = (await gateway.listReady(project)).tickets.map((t) => t.id);
+    assert.deepEqual([ids.spec, schema.id, ui.id].filter((id) => listed.includes(id)), [schema.id]);
   });
 
-  it('creates nothing and releases the Spec when it got children by hand meanwhile', async () => {
+  it('adds new children after the existing ones, blocked by an existing one, drops ready-for-agent and needs-info, and closes the Spec once they merge', async () => {
+    const gateway = createBeadsGateway();
+    const seen = await claimAndSee(ids.relabelled);
+    assert.deepEqual(await gateway.breakDown(project, { id: ids.relabelled, priority: 0 }, [plain('more', ids.relabelled1)], seen), { created: [`${ids.relabelled}.3`], left: 'released' });
+    const added = await show(`${ids.relabelled}.3`);
+    assert.deepEqual([added.parent, [...added.labels], added.priority, blockers(added)], [ids.relabelled, ['ready-for-agent'], 0, [ids.relabelled1]]);
+    const spec = await show(ids.relabelled);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels ?? [], commentsOf(spec)], ['open', '', [], [`Broken down into ${ids.relabelled}.3`]]);
+
+    await bd('close', ids.relabelled1, '-r', 'done');
+    await inReview(added.id);
+    await gateway.merged(project, added.id, 'https://github.com/o/r/pull/2');
+    const closed = await show(ids.relabelled);
+    assert.deepEqual([closed.status, closed.close_reason], ['closed', 'Every child closed, the last by https://github.com/o/r/pull/2']);
+  });
+
+  it('creates nothing, keeps the label and releases the Spec when it got a child by hand after its agent saw it', async () => {
     await create('splitByHand', 'split while its agent ran', '-t', 'epic', '-l', 'ready-for-agent');
     const gateway = createBeadsGateway();
-    await gateway.claim(project, ids.splitByHand);
+    const seen = await claimAndSee(ids.splitByHand);
     await create('handChild', 'by hand', '--parent', ids.splitByHand);
-    assert.equal(await gateway.breakDown(project, { id: ids.splitByHand, priority: 2 }, [{ key: 'a', title: 'a', body: '', blockedBy: [] }]), null);
+    assert.equal(await gateway.breakDown(project, { id: ids.splitByHand, priority: 2 }, [plain('a')], seen), null);
     assert.deepEqual((await children(ids.splitByHand)).map((c) => c.id), [ids.handChild]);
     const spec = await show(ids.splitByHand);
-    assert.deepEqual([spec.status, spec.assignee ?? ''], ['open', '']);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels], ['open', '', ['ready-for-agent']]);
   });
 
   it('writes nothing, leaving the Spec claimed, on a plan bd refuses', async () => {
     await create('cyclic', 'planned in a circle', '-t', 'epic', '-l', 'ready-for-agent');
     const gateway = createBeadsGateway();
-    await gateway.claim(project, ids.cyclic);
-    await assert.rejects(
-      gateway.breakDown(project, { id: ids.cyclic, priority: 2 }, [
-        { key: 'a', title: 'a', body: '', blockedBy: ['b'] },
-        { key: 'b', title: 'b', body: '', blockedBy: ['a'] },
-      ]),
-      /cycle/,
-    );
+    const seen = await claimAndSee(ids.cyclic);
+    await assert.rejects(gateway.breakDown(project, { id: ids.cyclic, priority: 2 }, [plain('a', 'b'), plain('b', 'a')], seen), /cycle/);
     assert.deepEqual(await children(ids.cyclic), []);
     assert.equal((await show(ids.cyclic)).status, 'in_progress');
+  });
+
+  it('closes a Spec whose children are all closed when nothing is left to break down', async () => {
+    const seen = await claimAndSee(ids.finished);
+    assert.deepEqual(await createBeadsGateway().breakDown(project, { id: ids.finished, priority: 2 }, [], seen), { created: [], left: 'closed' });
+    const spec = await show(ids.finished);
+    assert.deepEqual([spec.status, commentsOf(spec)], ['closed', ['Nothing left to break down']]);
+  });
+
+  it('leaves a Spec on its own branch open and unlabelled for its Epic PR when nothing is left to break down', async () => {
+    const gateway = createBeadsGateway();
+    const seen = await claimAndSee(ids.branchSpec);
+    assert.deepEqual(await gateway.breakDown(project, { id: ids.branchSpec, priority: 2 }, [], seen), { created: [], left: 'released' });
+    const spec = await show(ids.branchSpec);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels], ['open', '', ['epic-branch']]);
+    assert.deepEqual((await gateway.listReady(project)).tickets.filter((t) => t.id === ids.branchSpec).map((t) => [t.spec, t.epicPr]), [[undefined, true]]);
+  });
+
+  it('releases a Spec with an open child, its label off, when nothing is left to break down', async () => {
+    await create('pending', 'one child still open', '-t', 'epic', '-l', 'ready-for-agent');
+    await create('pendingChild', 'still open', '--parent', ids.pending, '--no-inherit-labels');
+    const seen = await claimAndSee(ids.pending);
+    assert.deepEqual(await createBeadsGateway().breakDown(project, { id: ids.pending, priority: 2 }, [], seen), { created: [], left: 'released' });
+    const spec = await show(ids.pending);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels ?? []], ['open', '', []]);
+  });
+
+  it('hands a Spec back instead of closing it when nothing was left to break down but its text changed while its agent ran', async () => {
+    await create('editedMidRun', 'edited mid-Run', '-t', 'epic', '-l', 'ready-for-agent', '-d', 'before');
+    await create('editedMidRunChild', 'done', '--parent', ids.editedMidRun);
+    await bd('close', ids.editedMidRunChild, '-r', 'done');
+    const seen = await claimAndSee(ids.editedMidRun);
+    await bd('update', ids.editedMidRun, '-d', 'after');
+    assert.deepEqual(await createBeadsGateway().breakDown(project, { id: ids.editedMidRun, priority: 2 }, [], seen), { created: [], left: 'handed-back' });
+    const spec = await show(ids.editedMidRun);
+    assert.deepEqual([spec.status, spec.assignee ?? '', spec.labels, commentsOf(spec)], ['open', '', ['needs-info'], ['Nothing left to break down', CHANGED]]);
+  });
+
+  it('hands a Spec back, open with needs-info and a comment, when its last child merges after its description, design or acceptance criteria changed', async () => {
+    for (const [key, flag] of [['newDescription', '-d'], ['newDesign', '--design'], ['newAcceptance', '--acceptance']]) {
+      const child = await brokenDown(key);
+      await bd('update', ids[key], flag, 'changed');
+      assert.equal(await createBeadsGateway().merged(project, child, 'https://github.com/o/r/pull/10'), true);
+      assert.equal((await show(child)).status, 'closed');
+      const spec = await show(ids[key]);
+      assert.deepEqual([key, spec.status, spec.labels, commentsOf(spec)], [key, 'open', ['needs-info'], [`Broken down into ${child}`, CHANGED]]);
+    }
+  });
+
+  it('catches an edit made after its agent saw the Spec but before the breakdown was written, once its last child merges', async () => {
+    await create('midRun', 'edited before the write', '-t', 'epic', '-l', 'ready-for-agent', '-d', 'before');
+    const seen = await claimAndSee(ids.midRun);
+    await bd('update', ids.midRun, '-d', 'after');
+    const [child] = (await createBeadsGateway().breakDown(project, { id: ids.midRun, priority: 2 }, [plain('only')], seen))!.created;
+    await inReview(child);
+    await createBeadsGateway().merged(project, child, 'https://github.com/o/r/pull/11');
+    const spec = await show(ids.midRun);
+    assert.deepEqual([spec.status, spec.labels], ['open', ['needs-info']]);
+  });
+
+  it('closes a Spec whose title, notes or comments changed when its last child merges', async () => {
+    const child = await brokenDown('renamed');
+    await bd('update', ids.renamed, '--title', 'a new title', '--notes', 'a note');
+    await bd('comment', ids.renamed, 'a comment');
+    await createBeadsGateway().merged(project, child, 'https://github.com/o/r/pull/12');
+    assert.equal((await show(ids.renamed)).status, 'closed');
+  });
+
+  it('lists an unchanged Spec on its own branch for its Epic PR once its last child lands, and a changed one never: it goes back to the human', async () => {
+    const gateway = createBeadsGateway();
+    const unchanged = await brokenDown('unchangedBranch', '-l', 'epic-branch');
+    const changed = await brokenDown('changedBranch', '-l', 'epic-branch');
+    await bd('update', ids.changedBranch, '-d', 'changed');
+    assert.equal(await gateway.landed(project, unchanged, `epic/${ids.unchangedBranch}`, 'abc123'), true);
+    assert.equal(await gateway.landed(project, changed, `epic/${ids.changedBranch}`, 'abc123'), true);
+
+    const kept = await show(ids.unchangedBranch);
+    assert.deepEqual([kept.status, kept.labels], ['open', ['epic-branch']]);
+    const back = await show(ids.changedBranch);
+    assert.deepEqual([back.status, [...back.labels].sort(), commentsOf(back).at(-1)], ['open', ['epic-branch', 'needs-info'], CHANGED]);
+    const listed = (await gateway.listReady(project)).tickets;
+    assert.deepEqual(listed.filter((t) => [ids.unchangedBranch, ids.changedBranch].includes(t.id)).map((t) => [t.id, t.epicPr]), [[ids.unchangedBranch, true]]);
   });
 });
 
@@ -678,6 +811,7 @@ describe('An epic on its own branch (ADR 0008), against real bd', () => {
       tickets.map(({ id, priority, spec, epicPr }) => ({ id, priority, spec, epicPr })),
       [
         { id: ids.stackyNext, priority: 2, spec: undefined, epicPr: undefined },
+        { id: ids.plain, priority: 2, spec: true, epicPr: undefined }, // a Spec, labelled ready-for-agent (ADR 0009)
         { id: ids.done, priority: 1, spec: undefined, epicPr: true },
       ],
     );

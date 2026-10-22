@@ -25,8 +25,8 @@ _Avoid_: issues, beads list.
 
 **Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children, open or closed, not claimed, and not opted out of ysz.
 
-**Spec**: An epic the human has marked as fit for an agent, with every blocker closed and no children yet. ysz picks it like a Ready Ticket, but its Run breaks it down into child Tickets, each Ready by construction, instead of opening a PR.
-_Avoid_: PRD, plan.
+**Spec**: An epic the human has marked as fit for an agent, which ysz breaks down into child Tickets, each Ready by construction, instead of opening a PR. ysz picks it like a Ready Ticket once every blocker is closed, and each breakdown plans only what its children, if any, do not cover yet. A breakdown takes the mark off, so after changing a Spec the human marks it again. It stays a Spec after it is broken down. Once its children are all closed, a Spec changed since its last breakdown goes back to the human instead of closing or getting its Epic PR.
+_Avoid_: PRD, plan, top-up, re-break.
 
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
 _Avoid_: orchestrator.
@@ -52,7 +52,7 @@ _Avoid_: statistics, analytics, report.
 
 **In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
-**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, and so is its parent once every child of it is closed, if the parent is marked fit for an agent and is not an epic on its own branch.
+**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, and so is its parent once every child of it is closed, if the parent is not an epic on its own branch and is either a Spec ysz has broken down or a non-epic Ticket marked fit for an agent.
 
 **Landed**: A Run's end once ysz has put its Ticket's work on the branch of its parent epic, an epic on its own branch, with no pull request of its own. The Ticket is then closed, and the human first sees that work in the Epic PR.
 _Avoid_: merged (for this)

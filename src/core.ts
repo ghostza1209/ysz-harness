@@ -7,6 +7,13 @@ import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
 
+/** A Spec Run's note when its agent planned no Tickets, by how the breakdown left the Spec (ADR 0009). */
+const NOTHING_LEFT = {
+  released: 'Nothing left to break down',
+  closed: 'Nothing left to break down; closed the Spec',
+  'handed-back': 'Nothing left to break down, but the Spec changed while its agent ran, so it went back to the human',
+};
+
 export type WaitReason = 'next up' | 'waiting for slot' | 'Project already has a Run' | 'not onboarded' | 'Project paused' | 'run-now · waiting for slot' | 'preflight failed' | 'image missing' | 'docker down';
 
 export interface QueueItem {
@@ -243,11 +250,14 @@ export function createOrchestrator(deps: {
   }
 
   /**
-   * A claimed Spec's Attempts: a breakdown agent plans its child Tickets, which bd then creates under it and hands it
-   * back. No review agent and no PR. Returns null once broken down, else the note to hand the Spec back with. No host
-   * job is saved, so after a crash recover() hands the Spec back, and once its children exist it is a Spec no more.
+   * A claimed Spec's Attempts: a breakdown agent plans the child Tickets its existing children do not cover yet, which bd
+   * then creates under it and hands it back. No review agent and no PR. Returns null once broken down, else the note to
+   * hand the Spec back with. No host job is saved, so after a crash recover() hands the Spec back with its label, and the
+   * next breakdown sees any children already created (ADR 0009).
    */
   async function breakDown(runId: number, project: Project, spec: Pick<Ticket, 'id' | 'priority'>, context: TicketContext, signal: AbortSignal): Promise<string | null> {
+    // What the agent sees, read once at the Run's start, so an edit made while it runs does not count as covered.
+    const children = (context.children ?? []).map((c) => c.id);
     let note = '';
     for (let n = 1; n <= 2; n++) {
       signal.throwIfAborted();
@@ -257,7 +267,7 @@ export function createOrchestrator(deps: {
       let result: Awaited<ReturnType<SandboxRunner['breakDown']>> | undefined;
       let reason: string;
       try {
-        result = await sandbox.breakDown({ project, runId, attempt: n, signal, ...prepared, previousAttemptSummary: note || undefined, onUsage: (u) => store.setUsage(runId, `attempt${n}-breakdown`, u) });
+        result = await sandbox.breakDown({ project, runId, attempt: n, signal, ...prepared, children, previousAttemptSummary: note || undefined, onUsage: (u) => store.setUsage(runId, `attempt${n}-breakdown`, u) });
       } catch (err) {
         signal.throwIfAborted();
         reason = `the breakdown agent failed: ${message(err)}`;
@@ -269,8 +279,12 @@ export function createOrchestrator(deps: {
       if (result?.outcome === 'needs-info') return `The breakdown agent needs information:\n${result.question}`;
       if (result?.outcome === 'complete' && typeof result.plan !== 'string') {
         store.updateRun(runId, { state: 'host' });
-        const ids = await beads.breakDown(project, spec, result.plan);
-        const done = ids ? `Broken down into ${ids.join(', ')}` : 'The Spec got children by hand meanwhile, so none were created.';
+        const written = await beads.breakDown(project, spec, result.plan, { children, baseline: context.baseline! });
+        const done = !written
+          ? "The Spec's children changed while its agent ran, so none were created."
+          : written.created.length
+            ? `Broken down into ${written.created.join(', ')}`
+            : NOTHING_LEFT[written.left];
         logRun(runId, done);
         end(runId, { state: 'broken-down', note: done });
         return null;

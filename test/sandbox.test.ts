@@ -105,7 +105,7 @@ Show it
 </ticket>
 <ticket key="T1b">Backfill</ticket>
 ${COMPLETE}`;
-    assert.deepEqual(planOf(stdout), [
+    assert.deepEqual(planOf(stdout, []), [
       { key: 'T1', title: 'Add the column', body: '## What to build\nThe column.', blockedBy: [] },
       { key: 'T2', title: 'Show it', body: '', blockedBy: ['T1', 'T1b'] },
       { key: 'T1b', title: 'Backfill', body: '', blockedBy: [] },
@@ -113,7 +113,7 @@ ${COMPLETE}`;
   });
 
   it('takes a diamond of blockers for no cycle', () => {
-    const plan = planOf('<ticket key="A">a</ticket><ticket key="B" blocked-by="A">b</ticket><ticket key="C" blocked-by="A">c</ticket><ticket key="D" blocked-by="B,C">d</ticket>');
+    const plan = planOf('<ticket key="A">a</ticket><ticket key="B" blocked-by="A">b</ticket><ticket key="C" blocked-by="A">c</ticket><ticket key="D" blocked-by="B,C">d</ticket>', []);
     assert.deepEqual(typeof plan === 'string' ? plan : plan.map((t) => t.key), ['A', 'B', 'C', 'D']);
   });
 
@@ -121,15 +121,30 @@ ${COMPLETE}`;
     for (const [stdout, why] of [
       ['no tags here', 'it output no <ticket> tags'],
       ['<ticket key="A">a</ticket><ticket key="A">b</ticket>', 'it gave two tickets the same key'],
-      ['<ticket key="A" blocked-by="Z">a</ticket>', 'ticket A is blocked by Z, which is no ticket in the plan'],
+      ['<ticket key="A" blocked-by="Z">a</ticket>', 'ticket A is blocked by Z, which is neither a ticket in the plan nor a child of the Spec'],
       ['<ticket key="A">\n\n</ticket>', 'ticket A has no title, or one over 200 characters'],
       [`<ticket key="A">a\n${'x'.repeat(8001)}</ticket>`, 'ticket A has a body over 8000 characters'],
       ['<ticket key="T">t</ticket>'.repeat(31), 'it planned 31 tickets, more than 30'],
       ['<ticket key="A" blocked-by="A">a</ticket>', 'ticket A is blocked by itself through its blockers'],
       ['<ticket key="A">a</ticket><ticket key="B" blocked-by="A,C">b</ticket><ticket key="C" blocked-by="B">c</ticket>', 'ticket B is blocked by itself through its blockers'],
     ]) {
-      assert.equal(planOf(stdout), why);
+      assert.equal(planOf(stdout, []), why);
     }
+  });
+
+  it("lets a ticket be blocked by one of the Spec's existing children, and no other id", () => {
+    const plan = planOf('<ticket key="A" blocked-by="ep.1">a</ticket><ticket key="B" blocked-by="A, ep.2">b</ticket>', ['ep.1', 'ep.2']);
+    assert.deepEqual(typeof plan === 'string' ? plan : plan.map((t) => [t.key, t.blockedBy]), [['A', ['ep.1']], ['B', ['A', 'ep.2']]]);
+    assert.equal(planOf('<ticket key="A" blocked-by="ep.3">a</ticket>', ['ep.1']), 'ticket A is blocked by ep.3, which is neither a ticket in the plan nor a child of the Spec');
+  });
+
+  it('takes no tickets for a plan only when the Spec already has children', () => {
+    assert.deepEqual(planOf(`Nothing is missing.\n${COMPLETE}`, ['ep.1']), []);
+    assert.equal(planOf(`Nothing is missing.\n${COMPLETE}`, []), 'it output no <ticket> tags');
+  });
+
+  it("refuses a key that is an existing child's id", () => {
+    assert.equal(planOf('<ticket key="ep.1">a</ticket>', ['ep.1']), 'ticket ep.1 has the id of an existing child as its key');
   });
 });
 

@@ -40,8 +40,11 @@ export interface SandboxRunner {
   implement(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult>;
   /** One review agent in a fresh sandbox on the same clone, after the implement agent. Throws like `implement`. */
   review(req: AgentRequest): Promise<AgentResult>;
-  /** One breakdown agent in a fresh sandbox on a clone of the Spec's base, with no install. `plan` is the child Tickets it planned, or why its output holds no usable plan. Throws like `implement`. */
-  breakDown(req: AgentRequest & { previousAttemptSummary?: string }): Promise<AgentResult & { plan: PlannedTicket[] | string }>;
+  /**
+   * One breakdown agent in a fresh sandbox on a clone of the Spec's base, with no install. `plan` is the child Tickets it
+   * planned, or why its output holds no usable plan; `children` are the ids of the Spec's existing children. Throws like `implement`.
+   */
+  breakDown(req: AgentRequest & { previousAttemptSummary?: string; children: string[] }): Promise<AgentResult & { plan: PlannedTicket[] | string }>;
   /** Remove the Run's sandbox container now, if any is left. Throws unless it is gone afterwards: sandcastle's own teardown ignores docker errors. */
   stop(prepared: Pick<Prepared, 'dir'>): Promise<void>;
   /** Remove every leftover sandcastle container, of any Run. Throws unless none is left. */
@@ -106,21 +109,26 @@ const parseReports = (stdout: string): AgentReports => ({
 const MAX_TICKETS = 30;
 const MAX_TICKET_BODY = 8000;
 
-/** The `<ticket>`s of a breakdown agent's output, or why they make no plan to create. */
-export function planOf(stdout: string): PlannedTicket[] | string {
+/**
+ * The `<ticket>`s of a breakdown agent's output, or why they make no plan to create. `children` are the ids of the Spec's
+ * existing children (ADR 0009): a ticket may be blocked by one, and with any, a plan of no tickets says nothing is missing.
+ */
+export function planOf(stdout: string, children: string[]): PlannedTicket[] | string {
   const plan = [...stdout.matchAll(/<ticket\s+key="([^"]+)"(?:\s+blocked-by="([^"]*)")?\s*>([\s\S]*?)<\/ticket>/g)].map(([, key, blockedBy = '', text]) => {
     const [title = '', ...rest] = text.trim().split('\n');
     return { key, title: title.trim(), body: rest.join('\n').trim(), blockedBy: blockedBy.split(',').map((k) => k.trim()).filter(Boolean) };
   });
-  if (!plan.length) return 'it output no <ticket> tags';
+  if (!plan.length && !children.length) return 'it output no <ticket> tags';
   if (plan.length > MAX_TICKETS) return `it planned ${plan.length} tickets, more than ${MAX_TICKETS}`;
   const keys = new Set(plan.map((t) => t.key));
   if (keys.size < plan.length) return 'it gave two tickets the same key';
+  const existing = new Set(children);
   for (const t of plan) {
+    if (existing.has(t.key)) return `ticket ${t.key} has the id of an existing child as its key`;
     if (!t.title || t.title.length > MAX_TITLE) return `ticket ${t.key} has no title, or one over ${MAX_TITLE} characters`;
     if (t.body.length > MAX_TICKET_BODY) return `ticket ${t.key} has a body over ${MAX_TICKET_BODY} characters`;
-    const unknown = t.blockedBy.find((k) => !keys.has(k));
-    if (unknown) return `ticket ${t.key} is blocked by ${unknown}, which is no ticket in the plan`;
+    const unknown = t.blockedBy.find((k) => !keys.has(k) && !existing.has(k));
+    if (unknown) return `ticket ${t.key} is blocked by ${unknown}, which is neither a ticket in the plan nor a child of the Spec`;
   }
   // bd refuses a cycle too, but finding it here lets the next Attempt hear about it.
   const byKey = new Map(plan.map((t) => [t.key, t]));
@@ -128,7 +136,7 @@ export function planOf(stdout: string): PlannedTicket[] | string {
   const onPath = new Set<string>();
   const cycleAt = (key: string): string | undefined => {
     if (onPath.has(key)) return key;
-    if (done.has(key)) return undefined;
+    if (done.has(key) || existing.has(key)) return undefined; // nothing in the plan blocks an existing child
     onPath.add(key);
     for (const b of byKey.get(key)!.blockedBy) {
       const found = cycleAt(b);
@@ -283,9 +291,9 @@ export function createSandboxRunner(root: string): SandboxRunner {
     hasImage: (project) => imageExists(project.image!),
     implement: async ({ previousAttemptSummary, ...req }) => agentResult(await runAgent('implement', req, { PREVIOUS_ATTEMPT: previousAttempt(previousAttemptSummary) })),
     review: async (req) => agentResult(await runAgent('review', req, { BASE: req.base })),
-    breakDown: async ({ previousAttemptSummary, ...req }) => {
+    breakDown: async ({ previousAttemptSummary, children, ...req }) => {
       const result = await runAgent('breakdown', req, { PREVIOUS_ATTEMPT: previousAttempt(previousAttemptSummary) });
-      return { ...agentResult(result), plan: planOf(result.stdout) };
+      return { ...agentResult(result), plan: planOf(result.stdout, children) };
     },
     stop: (prepared) => stopSandbox(prepared),
     removeLeftovers: () => removeLeftoverSandboxes(),
