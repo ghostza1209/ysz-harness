@@ -107,8 +107,9 @@ function Detail({ t, project, row, state, line, reasons, rows, entry, now, go }:
           {reasons.length ? (
             <>
               <b>{t.backlog.markedHead}</b>
-              {reasons.map((r) => (
-                <div key={r}>{r}</div>
+              {reasons.map((r, i) => (
+                // Two blockers can share a title.
+                <div key={i}>{r}</div>
               ))}
             </>
           ) : (
@@ -162,9 +163,9 @@ function Detail({ t, project, row, state, line, reasons, rows, entry, now, go }:
   );
 }
 
-function GroupHead({ t, project, header, closedId, count, toggle }: { t: Dict; project: string; header: Header | null; closedId: string | null; count: number; toggle: (() => void) | null }) {
+function GroupHead({ t, project, header, closedId, count, toggle, open }: { t: Dict; project: string; header: Header | null; closedId: string | null; count: number; toggle: (() => void) | null; open: boolean }) {
   return (
-    <div className={`bl-ghead ${toggle ? 'bl-click' : ''}`} {...(toggle ? press(toggle) : {})}>
+    <div className={`bl-ghead ${toggle ? 'bl-click' : ''}`} {...(toggle ? { ...press(toggle), 'aria-expanded': open } : {})}>
       <span className="tag">{project}</span>
       {header ? (
         <>
@@ -296,7 +297,7 @@ function Backlog({ t, stages, refreshMs }: { t: Dict; stages: ReadonlyMap<string
           )}
           {groups.map((g) => (
             <div key={g.key} className="bl-group">
-              <GroupHead t={t} project={g.project} header={g.header} closedId={g.closedId} count={g.tickets.length} toggle={g.header?.row.issue_type === 'epic' ? () => flip(g.project, g.header!.row.id) : null} />
+              <GroupHead t={t} project={g.project} header={g.header} closedId={g.closedId} count={g.tickets.length} toggle={g.header?.row.issue_type === 'epic' ? () => flip(g.project, g.header!.row.id) : null} open={!!(g.header && opened[keyOf(g.project, g.header.row.id)])} />
               {g.header?.row.issue_type === 'epic' && opened[keyOf(g.project, g.header.row.id)] && <div className="bl-item">{detail(g.project, g.header)}</div>}
               {g.tickets.map((tk) => (
                 <div key={tk.row.id} className="bl-item">
