@@ -1,4 +1,4 @@
-import type { BeadsGateway, Ticket, TicketContext } from './beads';
+import type { BacklogRow, BeadsGateway, Ticket, TicketContext } from './beads';
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
@@ -47,6 +47,8 @@ export interface Orchestrator {
   stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
   readyQueue(): QueueItem[];
+  /** Each Project's Backlog rows as the last successful poll read them, in registry order. rows and updatedAt are null until the first one; a failed poll keeps the last and sets error. */
+  backlog(): { name: string; rows: BacklogRow[] | null; updatedAt: number | null; error: string | null }[];
   slots(): { used: number; total: number };
   projectStatuses(): ProjectStatus[];
   /**
@@ -141,7 +143,7 @@ export function createOrchestrator(deps: {
   removeLog?: (runId: number) => Promise<void>;
 }): Orchestrator {
   const { projects, beads, sandbox, host, store, clock, model, log: logRun = () => {}, removeLog = async () => {} } = deps;
-  const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], error: null as string | null }]));
+  const snapshots = new Map(projects.map((p) => [p.name, { tickets: [] as Ticket[], rows: null as BacklogRow[] | null, updatedAt: null as number | null, error: null as string | null }]));
   const inFlight = new Set<Promise<void>>();
   const controls = new Map<number, Control>();
   /** Runs a kill() is settling, so a second click does not write the bead twice. */
@@ -718,12 +720,14 @@ export function createOrchestrator(deps: {
       results.forEach((result, i) => {
         const snapshot = snapshots.get(projects[i].name)!;
         if (result.status === 'fulfilled') {
-          const { tickets, backlog } = result.value;
+          const { tickets, rows } = result.value;
           snapshot.tickets = tickets;
+          snapshot.rows = rows;
+          snapshot.updatedAt = clock.now();
           // A Ticket that is no longer Ready (claimed elsewhere, closed) drops its run-now.
           for (const k of runNowKeys) if (k.startsWith(`${projects[i].name}/`) && !tickets.some((t) => key(projects[i].name, t.id) === k)) runNowKeys.delete(k);
           snapshot.error = null;
-          store.recordBacklog(projects[i].name, clock.now(), { backlog, ready: tickets.length });
+          store.recordBacklog(projects[i].name, clock.now(), { backlog: rows.length, ready: tickets.length });
         } else {
           snapshot.error = result.reason instanceof Error ? result.reason.message : String(result.reason);
         }
@@ -736,6 +740,13 @@ export function createOrchestrator(deps: {
     },
 
     readyQueue,
+
+    backlog() {
+      return projects.map((p) => {
+        const { rows, updatedAt, error } = snapshots.get(p.name)!;
+        return { name: p.name, rows, updatedAt, error };
+      });
+    },
 
     slots() {
       return { used: store.slotProjects().length, total: SLOTS_TOTAL };

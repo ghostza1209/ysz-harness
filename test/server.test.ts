@@ -16,10 +16,11 @@ let liveIds: number[] = [];
 const runLimits: (number | undefined)[] = [];
 const orchestrator = {
   slots: () => ({}),
-  readyQueue: () => [],
+  readyQueue: () => [{ project: 'lab', id: 'lab-1' }],
   runs: (limit?: number) => (runLimits.push(limit), { live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
   stats: () => ({ runs: [], backlog: [] }),
+  backlog: () => [{ name: 'lab', rows: [{ id: 'lab-1' }], updatedAt: 1234, error: null }],
   kill: async (id: number) => {
     if (id === 13) throw new Error('docker rm failed');
     actions.push(`kill ${id}`);
@@ -95,6 +96,15 @@ function openStream(runId: number) {
   return { events, state };
 }
 
+it("serves each Project's Backlog rows with the Ready queue at /api/backlog", async () => {
+  const res = await get('/api/backlog');
+  assert.equal(res.status, 200);
+  assert.deepEqual(JSON.parse(res.body), {
+    projects: [{ name: 'lab', rows: [{ id: 'lab-1' }], updatedAt: 1234, error: null }],
+    ready: [{ project: 'lab', id: 'lab-1' }],
+  });
+});
+
 it('answers requests addressed to localhost or 127.0.0.1', async () => {
   assert.equal(await statusFor(`localhost:${port}`), 200);
   assert.equal(await statusFor(`127.0.0.1:${port}`), 200);
@@ -106,6 +116,7 @@ it('refuses every API route without the Dashboard cookie, as a sandbox sends it,
   const forged = { origin: `http://localhost:${port}`, cookie: '' };
   assert.equal((await send('/api/state', forged)).status, 401);
   assert.equal((await send('/api/stats', forged)).status, 401);
+  assert.equal((await send('/api/backlog', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log', forged)).status, 401);
   assert.equal((await send('/api/runs/1/log/stream', forged)).status, 401);
   assert.equal((await send('/api/runs/7/kill', forged, 'POST')).status, 401);

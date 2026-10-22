@@ -41,8 +41,8 @@ describe('Beads gateway against real bd', () => {
   after(() => rm(dir, { recursive: true, force: true }));
 
   it('lists only unassigned, unblocked ready-for-agent Tickets without orchestrator:skip or epic type, then the childless epic as a Spec, and counts every unclosed bead', async () => {
-    const { tickets, backlog } = await createBeadsGateway().listReady(project);
-    assert.equal(backlog, 9);
+    const { tickets, rows } = await createBeadsGateway().listReady(project);
+    assert.equal(rows.length, 9);
     assert.deepEqual(
       tickets.map(({ id, title, priority, spec }) => ({ id, title, priority, spec })),
       [
@@ -63,6 +63,25 @@ describe('Beads gateway against real bd', () => {
     await bd('close', ids.child, '-r', 'done');
     const found = (await createBeadsGateway().listReady(project)).tickets.map((t) => t.id).sort();
     assert.deepEqual(found, [ids.blocked, ids.ready, ids.readyEpic].sort());
+  });
+
+  it('keeps every unclosed bead as a row with its type, labels, parent, edges and comment count, and no closed one', async () => {
+    await bd('comment', ids.ready, 'a note');
+    await create('child2', 'unclosed child', '--parent', ids.parent);
+    const { rows } = await createBeadsGateway().listReady(project);
+    assert.deepEqual(rows.map((r) => r.id).sort(), Object.values(ids).filter((id) => id !== ids.blocker && id !== ids.child).sort());
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const ready = byId.get(ids.ready)!;
+    assert.match(ready.created_at, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual(ready, {
+      id: ids.ready, title: 'ready one', status: 'open', issue_type: 'task', priority: 1, assignee: null,
+      labels: ['ready-for-agent'], parent: null, dependencies: [], comment_count: 1, created_at: ready.created_at,
+    });
+    assert.equal(byId.get(ids.readyEpic)!.issue_type, 'epic');
+    assert.equal(byId.get(ids.assigned)!.assignee, 'someone');
+    assert.deepEqual(byId.get(ids.blocked)!.dependencies, [{ depends_on_id: ids.blocker, type: 'blocks' }]);
+    assert.equal(byId.get(ids.child2)!.parent, ids.parent);
+    assert.deepEqual(byId.get(ids.child2)!.dependencies, [{ depends_on_id: ids.parent, type: 'parent-child' }]);
   });
 
   it('kills a bd call that runs past the timeout', async () => {
@@ -538,9 +557,9 @@ describe('Follow-up Tickets in the Project\'s own queue, against real bd', () =>
   });
 
   it('never appears in listReady, though it counts in the Backlog', async () => {
-    const { tickets, backlog } = await createBeadsGateway().listReady(project);
+    const { tickets, rows } = await createBeadsGateway().listReady(project);
     assert.deepEqual(tickets.map((t) => t.id), [ticket]);
-    assert.equal(backlog, 2);
+    assert.equal(rows.length, 2);
   });
 });
 

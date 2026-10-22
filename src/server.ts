@@ -70,7 +70,7 @@ const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
 /** The most ended (and archived) Runs one /api/state may ask for. */
 const MAX_HISTORY = 500;
 
-/** JSON state at /api/state (`?limit=N` ended Runs), and what the Stats page graphs at /api/stats; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+/** JSON state at /api/state (`?limit=N` ended Runs), what the Stats page graphs at /api/stats, and each Project's Backlog rows with the Ready queue at /api/backlog; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
   // An empty token would match a missing cookie.
   if (!token) throw new Error('the Dashboard needs a token');
@@ -127,6 +127,13 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
     if (path === '/api/stats') {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify(orchestrator.stats()));
+      return;
+    }
+
+    if (path === '/api/backlog') {
+      // One request reads both, so a row's Ready state and its queue place come from the same snapshot.
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ projects: orchestrator.backlog(), ready: orchestrator.readyQueue() }));
       return;
     }
 

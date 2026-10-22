@@ -18,6 +18,23 @@ export interface Ticket {
   spec?: true;
 }
 
+/** One unclosed bead of a Project's Backlog, as the poll's `bd list --brief` reads it. */
+export interface BacklogRow {
+  id: string;
+  title: string;
+  status: string;
+  issue_type: string;
+  priority: number;
+  assignee: string | null;
+  labels: string[];
+  parent: string | null;
+  /** Blocks and parent-child edges alike. */
+  dependencies: { depends_on_id: string; type: string }[];
+  comment_count: number;
+  /** RFC 3339. */
+  created_at: string;
+}
+
 /** One child Ticket a breakdown agent planned; `blockedBy` holds the keys of other planned Tickets. */
 export interface PlannedTicket {
   key: string;
@@ -50,10 +67,10 @@ export const ORCHESTRATOR = 'orchestrator';
 export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
-   * and every blocker closed except at most one In review. Also counts its Backlog, from the same bd call.
+   * and every blocker closed except at most one In review. Also returns its Backlog rows, from the same bd call.
    * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, and no children at all.
    */
-  listReady(project: Project): Promise<{ tickets: Ticket[]; backlog: number }>;
+  listReady(project: Project): Promise<{ tickets: Ticket[]; rows: BacklogRow[] }>;
   /** Atomic claim as the Orchestrator. false = someone else got the Ticket first. */
   claim(project: Project, id: string): Promise<boolean>;
   /** Hand a claimed Ticket back: open and unassigned. */
@@ -136,6 +153,7 @@ interface Bead {
   labels?: string[] | null;
   parent?: string;
   dependencies?: { depends_on_id: string; type: string }[];
+  comment_count?: number;
 }
 
 /** A Run left it In review: in_progress, the Orchestrator's, labelled in-review. */
@@ -208,7 +226,20 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
           !parents.has(b.id) && (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
       );
       for (const b of specs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
-      return { tickets, backlog: beads.length };
+      const rows = beads.map((b): BacklogRow => ({
+        id: b.id,
+        title: b.title,
+        status: b.status,
+        issue_type: b.issue_type,
+        priority: b.priority,
+        assignee: b.assignee || null,
+        labels: b.labels ?? [],
+        parent: b.parent ?? null,
+        dependencies: (b.dependencies ?? []).map((d) => ({ depends_on_id: d.depends_on_id, type: d.type })),
+        comment_count: b.comment_count ?? 0,
+        created_at: b.created_at,
+      }));
+      return { tickets, rows };
     },
 
     async claim(project, id) {

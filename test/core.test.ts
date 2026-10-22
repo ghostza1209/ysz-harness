@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import type { BeadsGateway, PlannedTicket, Ticket, TicketContext } from '../src/beads';
+import type { BacklogRow, BeadsGateway, PlannedTicket, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
 import type { HostSteps } from '../src/host';
 import type { Project } from '../src/projects';
@@ -11,8 +11,12 @@ const projects: Project[] = ['fazwaz', 'PopDeal', 'thaivis'].map((name) => ({ na
 
 /** Each Project's bd queue, or the error its bd call fails with. */
 type Queues = Record<string, Ticket[] | Error>;
-/** Each Project's count of unclosed beads, as its poll reports it; 0 if unset. */
-let backlogs: Record<string, number>;
+/** Each Project's unclosed beads, as its poll reports them; none if unset. */
+let backlogs: Record<string, BacklogRow[]>;
+
+function row(id: string): BacklogRow {
+  return { id, title: `title of ${id}`, status: 'open', issue_type: 'task', priority: 2, assignee: null, labels: [], parent: null, dependencies: [], comment_count: 0, created_at: '2026-01-01T00:00:00Z' };
+}
 
 function ticket(id: string, priority: number, createdAt: string): Ticket {
   return { id, title: `title of ${id}`, priority, createdAt };
@@ -95,7 +99,7 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
     const queue = queues[project.name];
     if (queue instanceof Error) throw queue;
-    return { tickets: queue ?? [], backlog: backlogs[project.name] ?? 0 };
+    return { tickets: queue ?? [], rows: backlogs[project.name] ?? [] };
   },
   async claim(project, id) {
     if (claimErrors[project.name]) throw claimErrors[project.name];
@@ -293,8 +297,8 @@ beforeEach(() => {
   preflights = [];
 });
 
-async function polled(registry: readonly Project[] = projects) {
-  const orchestrator = createOrchestrator({
+function unpolled(registry: readonly Project[] = projects) {
+  return createOrchestrator({
     projects: registry,
     beads: fakeBeads(queues),
     sandbox: fakeSandbox,
@@ -305,6 +309,10 @@ async function polled(registry: readonly Project[] = projects) {
     log: (runId, line) => runLog.push(`${runId}: ${line}`),
     removeLog: async (runId) => void removedLogs.push(runId),
   });
+}
+
+async function polled(registry: readonly Project[] = projects) {
+  const orchestrator = unpolled(registry);
   await orchestrator.poll();
   return orchestrator;
 }
@@ -452,12 +460,35 @@ describe('polling', () => {
 
   it("records each Project's Backlog and Ready counts, but none for a Project whose poll fails", async () => {
     queues = { fazwaz: new Error('boom'), PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')] };
-    backlogs = { fazwaz: 4, PopDeal: 9 };
+    backlogs = { fazwaz: [row('fz1'), row('fz2')], PopDeal: [row('pd1'), row('pd2'), row('pd3')] };
     await polled();
     assert.deepEqual(store.backlogHistory(), [
-      { project: 'PopDeal', at: now, backlog: 9, ready: 1 },
+      { project: 'PopDeal', at: now, backlog: 3, ready: 1 },
       { project: 'thaivis', at: now, backlog: 0, ready: 0 },
     ]);
+  });
+
+  it("keeps each Project's Backlog rows and when the poll applied them, and a failing poll keeps the last ones beside its error", async () => {
+    const o = await polled();
+    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows, b.updatedAt, b.error]), [['fazwaz', [], now, null], ['PopDeal', [], now, null], ['thaivis', [], now, null]]);
+    const first = now;
+    now += 5000;
+    backlogs = { fazwaz: [row('fz1')] };
+    queues.PopDeal = new Error('boom');
+    await o.poll();
+    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows?.map((r) => r.id), b.updatedAt, b.error]), [
+      ['fazwaz', ['fz1'], now, null],
+      ['PopDeal', [], first, 'boom'],
+      ['thaivis', [], now, null],
+    ]);
+  });
+
+  it('has no rows and no updatedAt before a Project polls successfully, and still none after a failing first poll', async () => {
+    queues = { fazwaz: new Error('boom') };
+    const o = unpolled();
+    assert.deepEqual(o.backlog().map((b) => [b.rows, b.updatedAt]), [[null, null], [null, null], [null, null]]);
+    await o.poll();
+    assert.deepEqual(o.backlog().map((b) => [b.rows === null, b.updatedAt === null, b.error]), [[true, true, 'boom'], [false, false, null], [false, false, null]]);
   });
 });
 
