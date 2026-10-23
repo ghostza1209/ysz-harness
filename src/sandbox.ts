@@ -33,7 +33,7 @@ export interface AgentReports {
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
 type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void;
-  /** Role-relative part name ('implement', 'review', 'breakdown'); the caller adds the Attempt. Called once, also when the agent failed, unless no sample was taken. */
+  /** Role-relative part name ('implement', 'review', 'breakdown', and 'install' for implement's installCommand); the caller adds the Attempt. Called once, also when the agent failed, unless no sample was taken. */
   onFootprint?: (role: string, footprint: Footprint) => void;
 } & Prepared;
 
@@ -101,17 +101,15 @@ export function parseStats(line: string): { cores: number; memory: number; rx: n
  * one `docker stats` in flight at a time. `readDisk()`, to be called just before teardown, ends the sampling and takes
  * the disk reading once, so du and the teardown count toward neither the time nor the CPU; `finish()` sums up, or gives
  * undefined if no sample was ever taken. Neither throws.
+ * `installRan(start, end)` splits the install off: the samples inside it make `installFootprint()`, with the disk read
+ * once at its end, and `finish()` keeps the rest, its network-in being what the install did not download.
  */
 export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000) {
   const repo = join(dir, 'repo');
   const startedAt = Date.now();
   const abort = new AbortController();
   let container = '';
-  let samples = 0;
-  let cpuSum = 0;
-  let cpuPeak = 0;
-  let peakMemory = 0;
-  let networkIn = 0;
+  const samples: { at: number; cores: number; memory: number; rx: number }[] = [];
   const docker = (...args: string[]) => execFileAsync(dockerBin, args, { timeout: 30_000, signal: abort.signal }).then((r) => r.stdout.trim());
 
   const polling = (async () => {
@@ -120,11 +118,7 @@ export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000
         container ||= (await docker('ps', '-q', '--no-trunc', '--filter', 'name=sandcastle-', '--filter', `volume=${repo}`)).split('\n')[0];
         const sample = container && parseStats(await docker('stats', '--no-stream', '--format', '{{json .}}', container));
         if (sample) {
-          samples++;
-          cpuSum += sample.cores;
-          cpuPeak = Math.max(cpuPeak, sample.cores);
-          peakMemory = Math.max(peakMemory, sample.memory);
-          networkIn = sample.rx;
+          samples.push({ at: Date.now(), ...sample });
         }
       } catch {
         // docker unreachable, or the container just went: the next poll finds out
@@ -133,26 +127,64 @@ export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000
     }
   })();
 
-  // The clone with node_modules, plus the container's writable layer, where the pnpm store lives. du is slow on a big clone: once only.
+  // The clone with node_modules, plus the container's writable layer, where the pnpm store lives. du is slow on a big clone: once per part.
+  const diskNow = () =>
+    Promise.all([
+      execFileAsync('du', ['-sk', repo], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0),
+      container ? execFileAsync(dockerBin, ['inspect', '--size', '--format', '{{.SizeRw}}', container], { timeout: 30_000 }).then((r) => Number(r.stdout) || 0, () => 0) : 0,
+    ]).then(([clone, layer]) => clone + layer);
   let disk: Promise<number> | undefined;
   let endedAt = 0;
   const readDisk = () => {
     if (disk) return disk;
     endedAt = Date.now();
     abort.abort();
-    return (disk = Promise.all([
-      execFileAsync('du', ['-sk', repo], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0),
-      container ? execFileAsync(dockerBin, ['inspect', '--size', '--format', '{{.SizeRw}}', container], { timeout: 30_000 }).then((r) => Number(r.stdout) || 0, () => 0) : 0,
-    ]).then(([clone, layer]) => clone + layer));
+    return (disk = diskNow());
+  };
+
+  const summarize = (part: typeof samples, from: number, ms: number, bytes: number, networkIn: number): Footprint | undefined =>
+    part.length
+      ? {
+          startedAt: from,
+          seconds: Math.round(ms / 1000),
+          peakMemory: Math.max(...part.map((s) => s.memory)),
+          cpuAvg: part.reduce((sum, s) => sum + s.cores, 0) / part.length,
+          cpuPeak: Math.max(...part.map((s) => s.cores)),
+          disk: bytes,
+          networkIn,
+        }
+      : undefined;
+
+  // ponytail: one install per sandbox, as the installCommand is one hook; several would need a list of windows.
+  let install: { start: number; end: number; disk: Promise<number> } | undefined;
+  const inInstall = (s: { at: number }) => !!install && s.at >= install.start && s.at <= install.end;
+  const installFrom = () => {
+    if (!install) return undefined;
+    const inside = samples.filter(inInstall);
+    const before = samples.filter((s) => s.at < install!.start).at(-1)?.rx ?? 0;
+    return { inside, networkIn: (inside.at(-1)?.rx ?? 0) - before };
   };
 
   return {
     readDisk,
+    /** The installCommand ran from `start` to `end`: its disk is read now, without holding the caller up. */
+    installRan(start: number, end: number) {
+      install = { start, end, disk: diskNow() };
+    },
+    async installFootprint(): Promise<Footprint | undefined> {
+      await polling;
+      const part = installFrom();
+      return part && summarize(part.inside, install!.start, install!.end - install!.start, await install!.disk, part.networkIn);
+    },
     async finish(): Promise<Footprint | undefined> {
       const bytes = await readDisk();
       await polling;
-      if (!samples) return undefined;
-      return { startedAt, seconds: Math.round((endedAt - startedAt) / 1000), peakMemory, cpuAvg: cpuSum / samples, cpuPeak, disk: bytes, networkIn };
+      const installed = installFrom();
+      // An install window without a sample inside leaves everything, its download too, in this part.
+      const split = installed?.inside.length ? installed : undefined;
+      const rest = split ? samples.filter((s) => !inInstall(s)) : samples;
+      const ms = endedAt - startedAt - (split ? install!.end - install!.start : 0);
+      return summarize(rest, startedAt, ms, bytes, (samples.at(-1)?.rx ?? 0) - (split?.networkIn ?? 0));
     },
   };
 }
@@ -276,13 +308,15 @@ type SandboxHandle = Awaited<ReturnType<CreateSandbox>>;
  * Append `command`'s output to `logPath` as it runs, each line indented so the Run log shows it under the setup step.
  * sandcastle's file log holds a hook's output back until the hook ends, so a long install looks hung.
  */
-export function teeCommand(handle: SandboxHandle, command: string, logPath: string): SandboxHandle {
+export function teeCommand(handle: SandboxHandle, command: string, logPath: string, onRan?: (startedAt: number, endedAt: number) => void): SandboxHandle {
   const write = (line: string) => appendFileSync(logPath, `  ${line}\n`);
   return {
     ...handle,
     exec: async (cmd, opts) => {
       if (cmd !== command) return handle.exec(cmd, opts);
+      const startedAt = Date.now();
       const result = await handle.exec(cmd, { ...opts, onLine: write });
+      onRan?.(startedAt, Date.now());
       // onLine gets stdout only: stderr comes back once the command ends.
       for (const line of result.stderr.split('\n').filter(Boolean)) write(line);
       return result;
@@ -324,7 +358,7 @@ export function createSandboxRunner(root: string): SandboxRunner {
         const handle = await create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] });
         const started = sampleFootprint(dir);
         sampler = started;
-        const teed = installCommand ? teeCommand(handle, installCommand, logPath) : handle;
+        const teed = installCommand ? teeCommand(handle, installCommand, logPath, started.installRan) : handle;
         // The writable layer dies with the container, so the disk is read just before the real close.
         return {
           ...teed,
@@ -364,6 +398,8 @@ export function createSandboxRunner(root: string): SandboxRunner {
       // Also for a killed or failed agent: whatever was sampled counts.
       const footprint = await sampler?.finish();
       if (footprint) onFootprint?.(role, footprint);
+      const install = await sampler?.installFootprint();
+      if (install) onFootprint?.('install', install);
       await checks?.close();
     }
   }
