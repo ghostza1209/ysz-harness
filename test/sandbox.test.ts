@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, parseSize, parseStats, planOf, removeLeftoverSandboxes, sampleFootprint, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
+import { parseSize, parseStats } from '../src/dockerStats';
+import { agentResult, imageExists, planOf, removeLeftoverSandboxes, sampleFootprint, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
