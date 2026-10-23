@@ -214,11 +214,16 @@ const short = (ms: number, { units: u }: Dict) => {
   return h < 24 ? `${h}${u.h}` : `${Math.floor(h / 24)}${u.d}`;
 };
 
-/** How fresh a Project's Tickets are: "loading…" before its first poll, "updated 12s ago", or "last known 4m ago" while its poll fails. */
-export function ageText(p: BacklogProject, now: number, t: Dict): string {
+/** A pill's data age, only where it parts from the strip's: "loading…" before its first poll, or "last known 4m ago" while its poll fails. */
+export function ageText(p: BacklogProject, now: number, t: Dict): string | null {
   if (!p.rows) return t.backlog.loading;
-  const ago = t.ago(short(now - (p.updatedAt ?? now), t));
-  return p.error ? t.backlog.lastKnown(ago) : t.backlog.updated(ago);
+  return p.error ? t.backlog.lastKnown(t.ago(short(now - (p.updatedAt ?? now), t))) : null;
+}
+
+/** The strip's one data age, "updated 12s ago": every Project polls in the same round, so the stalest healthy one speaks for all. */
+export function stripAge(projects: BacklogProject[], now: number, t: Dict): string | null {
+  const times = projects.filter((p) => p.rows && !p.error).map((p) => p.updatedAt ?? now);
+  return times.length ? t.backlog.updated(t.ago(short(now - Math.min(...times), t))) : null;
 }
 
 /** A name as the Dashboard shows it: ysz's bd actor is ysz. */

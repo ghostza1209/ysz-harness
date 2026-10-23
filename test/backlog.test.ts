@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { BacklogRow } from '../src/beads';
 import type { QueueItem } from '../src/core';
-import { ageText, build, buttons, groupTickets, matches, parseSearch, relations, since, who, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
+import { ageText, build, buttons, stripAge, groupTickets, matches, parseSearch, relations, since, who, type BacklogData, type BacklogProject, type Ticket } from '../web/backlog';
 import { en, th } from '../web/i18n';
 
 const row = (id: string, over: Partial<BacklogRow> = {}): BacklogRow => ({
@@ -165,12 +165,23 @@ it('searches the rest as case-insensitive text over id and title', () => {
   assert.deepEqual(find(''), ['t1', 't2', 't3']);
 });
 
-it("words a Project's data age as loading, updated or last known", () => {
+it("words a pill's data age only while loading or failed, leaving a healthy one to the strip", () => {
   assert.equal(ageText(project(null, { updatedAt: null }), 100_000, en), 'loading…');
-  assert.equal(ageText(project([]), 1000 + 12_000, en), 'updated 12s ago');
   assert.equal(ageText(project([], { error: 'bd timed out' }), 1000 + 4 * 60_000 + 5000, en), 'last known 4m ago');
-  assert.equal(ageText(project([]), 1000 + 3 * 3_600_000, en), 'updated 3h ago');
-  assert.equal(ageText(project([]), 1000 + 12_000, th), 'อัปเดต 12 วิ ที่แล้ว');
+  assert.equal(ageText(project([]), 1000 + 12_000, en), null);
+});
+
+it("words the strip's data age from its stalest healthy Project, skipping loading and failed ones", () => {
+  const ps = [
+    project([], { name: 'a', updatedAt: 3000 }),
+    project([], { name: 'b', updatedAt: 1000 }),
+    project([], { name: 'c', updatedAt: 0, error: 'bd timed out' }),
+    project(null, { name: 'd', updatedAt: null }),
+  ];
+  assert.equal(stripAge(ps, 1000 + 12_000, en), 'updated 12s ago');
+  assert.equal(stripAge(ps.slice(0, 1), 3000 + 3 * 3_600_000, en), 'updated 3h ago');
+  assert.equal(stripAge(ps.slice(0, 1), 3000 + 12_000, th), 'อัปเดต 12 วิ ที่แล้ว');
+  assert.equal(stripAge(ps.slice(2), 100_000, en), null);
 });
 
 it('hands a Marked Ready Ticket its reasons one by one for the detail, and no other state any', () => {

@@ -3,7 +3,7 @@ import type { BacklogRow, TicketDetail } from '../src/beads';
 import { Copy } from './App';
 import type { Dict } from './i18n';
 import { Md } from './Md';
-import { ageText, build, buttons, groupTickets, keyOf, matches, parseSearch, relations, since, STATES, who, type BacklogAction, type BacklogData, type Button, type Header, type Related, type Ticket } from './backlog';
+import { ageText, build, stripAge, buttons, groupTickets, keyOf, matches, parseSearch, relations, since, STATES, who, type BacklogAction, type BacklogData, type Button, type Header, type Related, type Ticket } from './backlog';
 
 /** An open panel: loading, its detail, or why the detail failed. */
 type Entry = { loading: true } | { detail: TicketDetail } | { error: string };
@@ -37,6 +37,7 @@ function useNow() {
 /** One pill per Project, toggling it in the filter, and a banner for each failed Project. Alone in ticking, so the rows stay put. */
 function Strip({ t, data, picked, toggle }: { t: Dict; data: BacklogData; picked: ReadonlySet<string>; toggle: (name: string) => void }) {
   const now = useNow();
+  const age = stripAge(data.projects, now, t);
   return (
     <>
       <div className="bl-strip" role="group" aria-label={t.backlog.projectsLabel}>
@@ -45,10 +46,11 @@ function Strip({ t, data, picked, toggle }: { t: Dict; data: BacklogData; picked
             <span className={`dot ${p.error ? 'bad' : p.rows ? 'ok' : 'idle'}`} />
             <b>{p.name}</b>
             {p.rows && <span>{p.rows.filter((r) => r.issue_type !== 'epic').length}</span>}
-            <span className="mute">{ageText(p, now, t)}</span>
+            {ageText(p, now, t) && <span className="mute">{ageText(p, now, t)}</span>}
             {p.error && <span className="bl-failed">{t.backlog.pollFailed}</span>}
           </button>
         ))}
+        {age && <span className="mute">{age}</span>}
       </div>
       {data.projects
         .filter((p) => p.error)
