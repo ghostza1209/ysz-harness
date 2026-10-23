@@ -2,7 +2,7 @@ import type { BacklogRow, BeadsGateway, Ticket, TicketContext, TicketDetail } fr
 import type { HostSteps, Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
-import type { AgentUsage, BacklogPoint, Reports, RunRow, Store } from './store';
+import type { AgentUsage, BacklogPoint, Footprint, Reports, RunRow, Store } from './store';
 import { refusal, type TicketAction } from './ticketActions';
 
 /** Runs at once, across all Projects. Each Project also runs at most one. */
@@ -169,6 +169,9 @@ export function createOrchestrator(deps: {
 
   const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+  /** The sandbox's role-relative part name gets its Attempt here. */
+  const footprint = (runId: number, attempt: number) => (role: string, fp: Footprint) => store.setFootprint(runId, `attempt${attempt}-${role}`, fp);
+
   /** End a Run: record the outcome and drop its controls. */
   function end(runId: number, patch: Parameters<Store['updateRun']>[1]) {
     store.updateRun(runId, { ...patch, endedAt: clock.now() });
@@ -275,7 +278,7 @@ export function createOrchestrator(deps: {
       let result: Awaited<ReturnType<SandboxRunner['breakDown']>> | undefined;
       let reason: string;
       try {
-        result = await sandbox.breakDown({ project, runId, attempt: n, signal, ...prepared, previousAttemptSummary: note || undefined, onUsage: (u) => store.setUsage(runId, `attempt${n}-breakdown`, u) });
+        result = await sandbox.breakDown({ project, runId, attempt: n, signal, ...prepared, previousAttemptSummary: note || undefined, onUsage: (u) => store.setUsage(runId, `attempt${n}-breakdown`, u), onFootprint: footprint(runId, n) });
       } catch (err) {
         signal.throwIfAborted();
         reason = `the breakdown agent failed: ${message(err)}`;
@@ -405,7 +408,7 @@ export function createOrchestrator(deps: {
         store.updateRun(runId, { state: 'agent' });
         let implemented: AgentResult;
         try {
-          implemented = await sandbox.implement({ ...req, previousAttemptSummary, onUsage: usage('implement') });
+          implemented = await sandbox.implement({ ...req, previousAttemptSummary, onUsage: usage('implement'), onFootprint: footprint(runId, n) });
         } catch (err) {
           signal.throwIfAborted();
           return { kind: 'failed', prepared, reason: `the implement agent failed: ${message(err)}` };
@@ -440,7 +443,7 @@ export function createOrchestrator(deps: {
         store.updateRun(runId, { state: 'agent-review' });
         let skipped: string;
         try {
-          const reviewed = await sandbox.review({ ...req, onUsage: usage('review') });
+          const reviewed = await sandbox.review({ ...req, onUsage: usage('review'), onFootprint: footprint(runId, n) });
           signal.throwIfAborted();
           await recordFriction(n, 'review', reviewed.reports);
           signal.throwIfAborted();

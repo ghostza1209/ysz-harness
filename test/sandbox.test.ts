@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { agentResult, imageExists, planOf, removeLeftoverSandboxes, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
+import { parseSize, parseStats } from '../src/dockerStats';
+import { agentResult, imageExists, planOf, removeLeftoverSandboxes, sampleFootprint, stopSandbox, teeCommand, usageTracker } from '../src/sandbox';
 
 const COMPLETE = '<promise>COMPLETE</promise>';
 const NEEDS_INFO = '<promise>NEEDS_INFO</promise>';
@@ -280,6 +281,20 @@ describe('teeCommand', () => {
     assert.equal((await teeCommand(handle, 'pnpm install', log).exec('git rev-parse HEAD')).exitCode, 1);
     assert.throws(() => readFileSync(log), /ENOENT/);
   });
+
+  it('reports when the command started and ended, and for no other command', async () => {
+    const ran: number[][] = [];
+    // The install takes 50 ms, so an end taken before it finished shows.
+    const slow = { ...handle, exec: async (c: string, o?: { onLine?: (line: string) => void }) => (await new Promise((r) => setTimeout(r, 50)), handle.exec(c, o)) };
+    const teed = teeCommand(slow, 'pnpm install', log, (start, end) => ran.push([start, end]));
+    await teed.exec('echo hi');
+    assert.deepEqual(ran, []);
+    const before = Date.now();
+    await teed.exec('pnpm install');
+    const after = Date.now();
+    assert.equal(ran.length, 1);
+    assert.ok(before <= ran[0][0] && ran[0][0] + 45 <= ran[0][1] && ran[0][1] <= after, String(ran));
+  });
 });
 
 /** stopSandbox against a fake `docker`: containers live in a file, every call is logged. */
@@ -402,4 +417,154 @@ it('stops writing to the log of an aborted agent, even when the agent prints aft
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+it('reads docker\'s sizes: binary for KiB/MiB/GiB, decimal for kB/MB/GB, NaN for anything else', () => {
+  assert.equal(parseSize('1.5GiB'), 1_610_612_736);
+  assert.equal(parseSize('300MiB'), 314_572_800);
+  assert.equal(parseSize('12.3MB'), 12_300_000);
+  assert.equal(parseSize('4kB'), 4000);
+  assert.equal(parseSize('0B'), 0);
+  assert.ok(Number.isNaN(parseSize('--')));
+});
+
+it('reads a docker stats line as cores, memory bytes and the rx half of the network, and nothing from a line without readings', () => {
+  assert.deepEqual(parseStats('{"CPUPerc":"123.45%","MemUsage":"1.2GiB / 7.6GiB","NetIO":"12.3MB / 4kB"}'), { cores: 1.2345, memory: 1_288_490_188.8, rx: 12_300_000 });
+  assert.deepEqual(parseStats('{"CPUPerc":"0.00%","MemUsage":"10MiB / 7.6GiB","NetIO":"--"}'), { cores: 0, memory: 10_485_760, rx: 0 });
+  assert.equal(parseStats('{"CPUPerc":"--","MemUsage":"-- / --","NetIO":"-- / --"}'), undefined);
+  assert.equal(parseStats('Error response from daemon'), undefined);
+});
+
+/** sampleFootprint against a fake `docker`: a sandcastle container, and a php-check one that mounts the same clone and is listed first when only the volume is asked for. */
+describe('sampleFootprint', () => {
+  let root: string;
+  let clone: string;
+  let docker: string;
+  const logOf = () => readFileSync(join(root, 'log'), 'utf8').trim().split('\n');
+  const statsCalls = () => logOf().filter((l) => l.startsWith('stats')).length;
+  const until = async (done: () => boolean) => {
+    for (let i = 0; i < 500 && !done(); i++) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(done(), 'timed out');
+  };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'fake-docker-'));
+    clone = join(root, 'clone');
+    mkdirSync(join(clone, 'repo'), { recursive: true });
+    writeFileSync(join(clone, 'repo', 'node_modules.bin'), Buffer.alloc(1_048_576));
+    writeFileSync(join(root, 'log'), '');
+    writeFileSync(join(root, 'sandcastle'), 'sand1\n');
+    docker = join(root, 'docker');
+    // The third stats call hangs, as one that is still running when the agent ends does.
+    writeFileSync(
+      docker,
+      `#!/bin/sh
+echo "$@" >> ${root}/log
+case "$1" in
+  ps)
+    case "$*" in
+      *name=sandcastle-*) cat ${root}/sandcastle ;;
+      *) echo php1; cat ${root}/sandcastle ;;
+    esac ;;
+  stats)
+    case "$*" in
+      *php1) echo '{"CPUPerc":"800.00%","MemUsage":"7GiB / 7.6GiB","NetIO":"9GB / 1GB"}' ;;
+      *) case $(grep -c '^stats' ${root}/log) in
+        1) echo '{"CPUPerc":"50.00%","MemUsage":"300MiB / 7.6GiB","NetIO":"1kB / 1kB"}' ;;
+        2) echo '{"CPUPerc":"150.00%","MemUsage":"100MiB / 7.6GiB","NetIO":"2.5MB / 4kB"}' ;;
+        *) exec sleep 30 ;;
+      esac ;;
+    esac ;;
+  inspect) echo 500 ;;
+esac
+`,
+    );
+    chmodSync(docker, 0o755);
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('sums up the samples of the sandcastle container alone, with the disk of the clone and the writable layer read once', async () => {
+    const sampler = sampleFootprint(clone, docker, 5);
+    await until(() => statsCalls() >= 3);
+    await sampler.readDisk();
+    const footprint = await sampler.finish();
+
+    assert.ok(logOf().includes(`ps -q --no-trunc --filter name=sandcastle- --filter volume=${join(clone, 'repo')}`));
+    assert.equal(logOf().filter((l) => l.startsWith('stats')).every((l) => l.endsWith(' sand1')), true);
+    assert.equal(logOf().filter((l) => l.startsWith('inspect')).length, 1);
+    assert.ok(footprint);
+    const { startedAt, seconds, disk, ...figures } = footprint;
+    assert.deepEqual(figures, { peakMemory: 314_572_800, cpuAvg: 1, cpuPeak: 1.5, networkIn: 2_500_000 });
+    assert.ok(Math.abs(startedAt - Date.now()) < 5000 && seconds < 5);
+    // 1 MiB of clone and 500 B of writable layer, give or take the directory's own blocks.
+    assert.ok(disk >= 1_048_576 + 500 && disk <= 1_048_576 + 500 + 65_536, String(disk));
+    assert.equal(await sampler.installFootprint(), undefined);
+  });
+
+  it('splits the samples inside the install off, with their own network-in and a disk read at its end', async () => {
+    // Four samples: before the install, two inside it, after it; the fifth stats call hangs. Each answer takes 100 ms, so until() sees a call start before its sample lands.
+    const stats = [
+      '{"CPUPerc":"50.00%","MemUsage":"300MiB / 7.6GiB","NetIO":"1MB / 1kB"}',
+      '{"CPUPerc":"400.00%","MemUsage":"2GiB / 7.6GiB","NetIO":"6MB / 1kB"}',
+      '{"CPUPerc":"200.00%","MemUsage":"1GiB / 7.6GiB","NetIO":"11MB / 1kB"}',
+      '{"CPUPerc":"100.00%","MemUsage":"100MiB / 7.6GiB","NetIO":"12MB / 1kB"}',
+    ];
+    writeFileSync(
+      docker,
+      `#!/bin/sh
+echo "$@" >> ${root}/log
+case "$1" in
+  ps) echo sand1 ;;
+  stats) case $(grep -c '^stats' ${root}/log) in
+${stats.map((line, i) => `    ${i + 1}) sleep 0.1; echo '${line}' ;;`).join('\n')}
+    *) exec sleep 30 ;;
+  esac ;;
+  inspect) echo 500 ;;
+esac
+`,
+    );
+    const sampler = sampleFootprint(clone, docker, 5);
+    await until(() => statsCalls() >= 2);
+    const start = Date.now();
+    await until(() => statsCalls() >= 4);
+    sampler.installRan(start, Date.now());
+    await until(() => logOf().some((l) => l.startsWith('inspect')));
+    await new Promise((r) => setTimeout(r, 200));
+    writeFileSync(join(clone, 'repo', 'agent-work.bin'), Buffer.alloc(1_048_576));
+    await until(() => statsCalls() >= 5);
+    await sampler.readDisk();
+    const implement = await sampler.finish();
+    const install = await sampler.installFootprint();
+
+    assert.ok(implement && install);
+    const { startedAt, seconds, disk, ...implementFigures } = implement;
+    assert.deepEqual(implementFigures, { peakMemory: 314_572_800, cpuAvg: 0.75, cpuPeak: 1, networkIn: 2_000_000 });
+    assert.ok(disk >= 2 * 1_048_576 + 500 && disk <= 2 * 1_048_576 + 500 + 65_536, String(disk));
+    assert.equal(install.startedAt, start);
+    assert.deepEqual(
+      { peakMemory: install.peakMemory, cpuAvg: install.cpuAvg, cpuPeak: install.cpuPeak, networkIn: install.networkIn },
+      { peakMemory: 2_147_483_648, cpuAvg: 3, cpuPeak: 4, networkIn: 10_000_000 },
+    );
+    assert.ok(install.disk >= 1_048_576 + 500 && install.disk <= 1_048_576 + 500 + 65_536, String(install.disk));
+  });
+
+  it('stops polling once the disk is read, so the teardown after it is not sampled', async () => {
+    writeFileSync(join(root, 'sandcastle'), '');
+    const sampler = sampleFootprint(clone, docker, 5);
+    await until(() => logOf().length >= 2);
+    await sampler.readDisk();
+    const polls = logOf().length;
+    await new Promise((r) => setTimeout(r, 100));
+    const later = logOf().length;
+    await sampler.finish();
+    assert.equal(later, polls);
+  });
+
+  it('gives nothing when the container never showed up', async () => {
+    writeFileSync(join(root, 'sandcastle'), '');
+    const sampler = sampleFootprint(clone, docker, 5);
+    await until(() => logOf().length >= 3);
+    assert.equal(await sampler.finish(), undefined);
+    assert.equal(statsCalls(), 0);
+  });
 });

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,7 +22,11 @@ function check(server: CheckServer, argv: unknown, token = server.token): Promis
   });
 }
 
-/** A fake `docker`: one compose php container unless `stack-down` exists; `run` prints and exits 3, or blocks until `rm` while `run-blocks` exists. */
+/**
+ * A fake `docker`: one compose php container unless `stack-down` exists; `run` prints and exits 3 (after 0.8s while
+ * `run-sleeps` exists), blocks until `rm` while `run-blocks` exists, or until the test ends while `run-hangs` exists;
+ * `stats` answers unless `stats-fails` exists, and `inspect --size` always does.
+ */
 describe('check server', () => {
   let root: string;
   let docker: string;
@@ -38,9 +43,12 @@ describe('check server', () => {
 echo "$@" >> ${root}/log
 case "$1" in
   ps) [ -f ${root}/ps-slow ] && sleep 0.3; [ -f ${root}/stack-down ] || echo abc123 ;;
-  inspect) if [ -f ${root}/no-label ]; then printf 'fazwaz-php:latest\\t\\n'; else printf 'fazwaz-php:latest\\t/Users/me/fazwaz\\n'; fi ;;
+  stats) [ -f ${root}/stats-fails ] && exit 1; echo '{"CPUPerc":"50.00%","MemUsage":"100MiB / 8GiB","NetIO":"2kB / 1kB"}' ;;
+  inspect) if [ "$2" = --size ]; then echo 5000; elif [ -f ${root}/no-label ]; then printf 'fazwaz-php:latest\\t\\n'; else printf 'fazwaz-php:latest\\t/Users/me/fazwaz\\n'; fi ;;
   run)
+    if [ -f ${root}/run-hangs ]; then while [ -d ${root} ]; do sleep 0.05; done; exit 137; fi
     if [ -f ${root}/run-blocks ]; then while [ ! -f ${root}/removed ] && [ -d ${root} ]; do sleep 0.05; done; exit 137; fi
+    [ -f ${root}/run-sleeps ] && sleep 0.8
     echo 'Tests: 1 passed'; echo 'a warning' >&2; exit 3 ;;
   rm) touch ${root}/removed ;;
 esac
@@ -51,11 +59,13 @@ esac
   afterEach(async () => {
     await server?.close();
     server = undefined;
-    rmSync(root, { recursive: true, force: true });
+    // A finished command's `docker rm`, which nothing awaits, may still be appending to the log. rm retries the whole
+    // removal; rmSync's retries only redo the rmdir, so a log written meanwhile fails it with ENOTEMPTY.
+    await rm(root, { recursive: true, force: true, maxRetries: 5 });
   });
 
   const start = (timeoutMs?: number) =>
-    startCheckServer({ composeProject: 'fazwaz', service: 'php', clone: '/clones/fz1-1/repo', dockerBin: docker, timeoutMs }).then((s) => (server = s));
+    startCheckServer({ composeProject: 'fazwaz', service: 'php', clone: '/clones/fz1-1/repo', dockerBin: docker, timeoutMs, pollMs: 20 }).then((s) => (server = s));
 
   it('refuses a request without the token, and runs nothing', async () => {
     const s = await start();
@@ -141,5 +151,58 @@ esac
     await first;
     await new Promise((r) => setTimeout(r, 400));
     assert.ok(!logOf().some((l) => l.startsWith('run ')));
+  });
+
+  it('sums the run time of the commands into one Footprint, with the largest memory and layer and the clone', async () => {
+    writeFileSync(join(root, 'run-sleeps'), '');
+    const s = await start();
+    await check(s, ['php', '-v']);
+    await check(s, ['php', '-v']);
+    await s.close();
+    const fp = (await s.footprint())!;
+    assert.equal(fp.seconds, 2); // 0.8s + 0.8s; one command alone would round to 1
+    assert.equal(fp.peakMemory, 104_857_600);
+    assert.equal(fp.cpuAvg, 0.5);
+    assert.equal(fp.cpuPeak, 0.5);
+    assert.equal(fp.disk, 5000); // the fake clone is not on disk: only the layer
+    assert.equal(fp.networkIn, 4000); // 2kB from each of two containers
+    assert.ok(Date.now() - fp.startedAt < 60_000);
+  });
+
+  it('counts what a command cut by the timeout had sampled', async () => {
+    writeFileSync(join(root, 'run-blocks'), '');
+    const s = await start(300);
+    await check(s, ['php', 'artisan', 'test']);
+    await s.close();
+    const fp = (await s.footprint())!;
+    assert.equal(fp.peakMemory, 104_857_600);
+    assert.equal(fp.networkIn, 2000);
+  });
+
+  it('counts what a command running when the server closes had sampled, though its container never goes', async () => {
+    writeFileSync(join(root, 'run-hangs'), '');
+    const s = await start();
+    const first = check(s, ['php', 'artisan', 'test']).catch(() => {});
+    // Polls run one after another: a second stats call means the first one's reading is in.
+    while (logOf().filter((l) => l.startsWith('stats ')).length < 2) await new Promise((r) => setTimeout(r, 20));
+    await s.close();
+    await first;
+    assert.equal((await s.footprint())!.networkIn, 2000);
+  });
+
+  it('has a Footprint for a command that ran too briefly to be sampled', async () => {
+    writeFileSync(join(root, 'run-sleeps'), '');
+    writeFileSync(join(root, 'stats-fails'), '');
+    const s = await start();
+    await check(s, ['php', '-l', 'app/User.php']);
+    await s.close();
+    const { startedAt, ...fp } = (await s.footprint())!;
+    assert.deepEqual(fp, { seconds: 1, peakMemory: 0, cpuAvg: 0, cpuPeak: 0, disk: 5000, networkIn: 0 });
+  });
+
+  it('has no Footprint when no command ran', async () => {
+    const s = await start();
+    await s.close();
+    assert.equal(await s.footprint(), undefined);
   });
 });
