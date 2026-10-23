@@ -181,6 +181,43 @@ function Detail({ t, project, row, state, line, reasons, buttons, busy, act, row
   );
 }
 
+/** Where the drawer's width is remembered, in px as last set here. */
+const WIDTH_KEY = 'backlogDrawer';
+const saveWidth = (px: number) => {
+  try {
+    localStorage.setItem(WIDTH_KEY, String(Math.round(px)));
+  } catch {}
+};
+
+/** The drawer's left edge: drag it, or focus it and press ← →, to set the drawer's width. Its right edge stays put; the CSS bounds the width. */
+function Grip({ t, setWidth }: { t: Dict; setWidth: (px: number) => void }) {
+  const drawer = (e: { currentTarget: HTMLElement }) => e.currentTarget.parentElement!.getBoundingClientRect();
+  return (
+    <div
+      className="bl-grip"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={t.backlog.resizeDrawer}
+      tabIndex={0}
+      onPointerDown={(e) => {
+        // No text selection while dragging.
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => e.currentTarget.hasPointerCapture(e.pointerId) && setWidth(Math.round(drawer(e).right - e.clientX))}
+      // Saved once the drag ends, as it rendered.
+      onLostPointerCapture={(e) => saveWidth(drawer(e).width)}
+      onKeyDown={(e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        const px = Math.round(drawer(e).width) + (e.key === 'ArrowLeft' ? 32 : -32);
+        setWidth(px);
+        saveWidth(px);
+      }}
+    />
+  );
+}
+
 function GroupHead({ t, project, header, closedId, count, toggle, open }: { t: Dict; project: string; header: Header | null; closedId: string | null; count: number; toggle: (() => void) | null; open: boolean }) {
   return (
     <div className={`bl-ghead ${toggle ? 'bl-click' : ''}`} {...(toggle ? { ...press(toggle), 'aria-expanded': open } : {})}>
@@ -209,6 +246,14 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [open, setOpen] = useState<Open | null>(null);
   const openKey = open && keyOf(open.project, open.id);
+  // null keeps the CSS default width.
+  const [width, setWidth] = useState<number | null>(() => {
+    try {
+      return Number(localStorage.getItem(WIDTH_KEY)) || null;
+    } catch {
+      return null;
+    }
+  });
   // The Tickets with an action in flight, by `project/id`.
   const [flying, setFlying] = useState<Record<string, BacklogAction>>({});
 
@@ -293,7 +338,7 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
     });
 
   return (
-    <div className={openRow ? 'bl-split' : undefined}>
+    <div className={openRow ? 'bl-split' : undefined} style={width ? ({ '--drawer': `${width}px` } as React.CSSProperties) : undefined}>
       <section className="bl">
         {error && (
           <div className="banner bad-banner" role="alert">
@@ -347,7 +392,10 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
         )}
       </section>
       {open && openRow && (
-        <Detail key={openKey} t={t} project={open.project} row={openRow.row} state={openRow.state} line={openDoing ? t.backlog.inFlight[openDoing] : openRow.line} reasons={openDoing ? [] : openRow.reasons} buttons={openTk ? buttons(openTk, t) : []} busy={!!openDoing} act={(a) => openTk && void act(openTk, a)} rows={data?.projects.find((p) => p.name === open.project)?.rows ?? []} entry={open.entry} now={Date.now()} go={expand} close={() => setOpen(null)} />
+        <div className="bl-drawer">
+          <Grip t={t} setWidth={setWidth} />
+          <Detail key={openKey} t={t} project={open.project} row={openRow.row} state={openRow.state} line={openDoing ? t.backlog.inFlight[openDoing] : openRow.line} reasons={openDoing ? [] : openRow.reasons} buttons={openTk ? buttons(openTk, t) : []} busy={!!openDoing} act={(a) => openTk && void act(openTk, a)} rows={data?.projects.find((p) => p.name === open.project)?.rows ?? []} entry={open.entry} now={Date.now()} go={expand} close={() => setOpen(null)} />
+        </div>
       )}
     </div>
   );

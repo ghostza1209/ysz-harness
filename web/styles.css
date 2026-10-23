@@ -2462,19 +2462,53 @@ ol.waiting {
   color: var(--accent);
 }
 
-/* The list, with the drawer beside it while a Ticket is open. */
+/* The list, with the drawer beside it while a Ticket is open. --drawer is the width last dragged; the page bounds it either way. */
 .bl-split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) min(720px, 45%);
+  grid-template-columns: minmax(0, 1fr) clamp(360px, var(--drawer, min(720px, 45%)), 75%);
   gap: 16px;
   align-items: start;
 }
 
-/* The drawer: stays in view under the sticky topbar and scrolls on its own. */
-.bl-detail {
+/* The drawer: stays in view under the sticky topbar. */
+.bl-drawer {
   position: sticky;
   /* The topbar is 57px tall. */
   top: 73px;
+}
+
+/* The drawer's left edge, dragged to resize it. */
+.bl-grip {
+  position: absolute;
+  inset: 0 auto 0 -6px;
+  width: 11px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* A grab bar on the border, always shown, so the edge reads as draggable. */
+.bl-grip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 5px;
+  height: 40px;
+  translate: 0 -50%;
+  border-radius: 3px;
+  background: var(--mute);
+}
+
+.bl-grip:is(:hover, :active, :focus-visible)::after {
+  background: var(--accent);
+}
+
+.bl-grip:focus-visible {
+  outline: none;
+}
+
+/* Its Ticket, scrolling on its own. */
+.bl-detail {
   display: grid;
   align-content: start;
   gap: 10px;
@@ -2767,6 +2801,10 @@ ol.waiting {
 @media (max-width: 900px) {
   .bl-split {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bl-grip {
+    display: none;
   }
 
   /* Too narrow to share: the drawer covers the page, toasts still on top. */
