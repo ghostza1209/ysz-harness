@@ -1,5 +1,5 @@
 import type { StatsRun } from '../src/core';
-import type { BacklogPoint, RunState } from '../src/store';
+import type { BacklogPoint, Footprint, RunState } from '../src/store';
 
 export type Range = '7' | '30' | 'all';
 /** Where a Run is now, as the Stats page groups it; bottom of a stack first. */
@@ -57,6 +57,47 @@ export function tokensPerDay(runs: StatsRun[], days: number[]) {
     for (const [part, u] of Object.entries(r.usage)) row[part.endsWith('-review') ? 'review' : 'implement']! += u.tokens;
   }
   return [...rows.values()];
+}
+
+export const FOOTPRINT_ROLES = ['implement', 'review', 'install', 'checks', 'breakdown'] as const;
+export const FOOTPRINT_FIGURES = ['seconds', 'peakMemory', 'cpuAvg', 'cpuPeak', 'disk', 'networkIn'] as const;
+export type FootprintFigure = (typeof FOOTPRINT_FIGURES)[number];
+
+/** `attempt2-implement-checks` is the role checks; `attempt1-review-checks` too. */
+const roleOf = (part: string) => {
+  const role = part.replace(/^attempt\d+-/, '');
+  return role.endsWith('-checks') ? 'checks' : role;
+};
+
+const median = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return (s[(s.length - 1) >> 1] + s[s.length >> 1]) / 2;
+};
+
+/**
+ * Median and max of each Footprint figure, per Project (by name) and then role, over every part entry (one per Run x
+ * Attempt x part). A Project or role with no entry is left out.
+ */
+export function footprintByRole(runs: StatsRun[]) {
+  const parts = new Map<string, Map<string, Footprint[]>>();
+  for (const r of runs) {
+    for (const [part, fp] of Object.entries(r.footprint)) {
+      const roles = parts.get(r.project) ?? new Map<string, Footprint[]>();
+      const role = roleOf(part);
+      parts.set(r.project, roles.set(role, [...(roles.get(role) ?? []), fp]));
+    }
+  }
+  const figures = <T,>(fps: Footprint[], f: (xs: number[]) => T) => Object.fromEntries(FOOTPRINT_FIGURES.map((k) => [k, f(fps.map((fp) => fp[k]))])) as Record<FootprintFigure, T>;
+  return [...parts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([project, roles]) => ({
+      project,
+      roles: FOOTPRINT_ROLES.filter((role) => roles.has(role)).map((role) => {
+        const fps = roles.get(role)!;
+        return { role, parts: fps.length, median: figures(fps, median), max: figures(fps, (xs) => Math.max(...xs)) };
+      }),
+    }))
+    .filter((p) => p.roles.length);
 }
 
 /** How long each ended Run's agents took: from its start to In review, or to its end. */

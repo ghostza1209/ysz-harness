@@ -3,7 +3,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import type { StatsRun } from '../src/core';
 import type { BacklogPoint } from '../src/store';
 import { span, type Dict } from './i18n';
-import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, mergeRate, OUTCOMES, reviewWaits, runsPerDay, tokensPerDay, waitingNow, type Outcome, type Range } from './stats';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, FOOTPRINT_FIGURES, footprintByRole, mergeRate, OUTCOMES, reviewWaits, runsPerDay, tokensPerDay, waitingNow, type FootprintFigure, type Outcome, type Range } from './stats';
 
 /** The History pills' colours, so a state reads the same on both pages. Names stay English, as pills do. */
 const OUTCOME_STYLE: Record<Outcome, { name: string; color: string }> = {
@@ -20,6 +20,16 @@ const TIP = { contentStyle: { background: 'var(--card)', border: '1px solid var(
 /** In series order, with text in ink: a series colour on text fails contrast. */
 const LEGEND = { itemSorter: null, wrapperStyle: { fontSize: 12 }, formatter: (name: string) => <span style={{ color: 'var(--ink)' }}>{name}</span> };
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+
+/** Docker's own units: 1.2 GB. */
+const bytes = (n: number) => {
+  const i = n > 0 ? Math.min(Math.floor(Math.log10(n) / 3), 4) : 0;
+  return `${+(n / 1000 ** i).toFixed(i ? 1 : 0)} ${['B', 'kB', 'MB', 'GB', 'TB'][i]}`;
+};
+
+const FIGURE_LABEL = { seconds: 'time', peakMemory: 'memory', cpuAvg: 'cpuAvg', cpuPeak: 'cpuPeak', disk: 'disk', networkIn: 'network' } as const;
+const figure = (f: FootprintFigure, n: number, t: Dict) =>
+  f === 'seconds' ? span(n * 1000, t) : f === 'cpuAvg' || f === 'cpuPeak' ? n.toFixed(2) : bytes(n);
 
 function Panel({ title, hint, wide, children }: { title: string; hint: string; wide?: boolean; children: ReactNode }) {
   return (
@@ -86,6 +96,7 @@ function Stats(props: { t: Dict; projects: string[]; project: string; setProject
   // By when the Run reached In review, so a wait shows up once its Run has one.
   const waits = reviewWaits(ofProject.filter((r) => r.endedAt !== null && r.endedAt >= days[0]));
   const waiting = waitingNow(ofProject, now);
+  const footprints = footprintByRole(runs);
   const backlog = backlogOverTime(data.backlog, project, days[0], now);
   const timeAxis = { type: 'number', dataKey: 'at', domain: [days[0], now], scale: 'time', tickFormatter: dayLabel, ...AXIS } as const;
   const dateTime = (ms: number) => new Date(ms).toLocaleString(t.locale, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
@@ -197,6 +208,43 @@ function Stats(props: { t: Dict; projects: string[]; project: string; setProject
                 </li>
               ))}
             </ol>
+          )}
+        </Panel>
+        <Panel title={t.footprint} hint={t.footprintHint} wide>
+          {footprints.length === 0 ? (
+            <p className="mute">{t.noFootprint}</p>
+          ) : (
+            footprints.map(({ project: name, roles }) => (
+              <div key={name} className="footprint">
+                <table>
+                  <caption>{name}</caption>
+                  <thead>
+                    <tr>
+                      <th rowSpan={2}>{t.footprintFigures.role}</th>
+                      <th rowSpan={2}>{t.footprintFigures.parts}</th>
+                      {FOOTPRINT_FIGURES.map((f) => (
+                        <th key={f} colSpan={2}>{t.footprintFigures[FIGURE_LABEL[f]]}</th>
+                      ))}
+                    </tr>
+                    <tr>
+                      {FOOTPRINT_FIGURES.flatMap((f) => [<th key={`${f}-median`}>{t.footprintFigures.median}</th>, <th key={`${f}-max`}>{t.footprintFigures.max}</th>])}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {roles.map((row) => (
+                      <tr key={row.role}>
+                        <th>{row.role}</th>
+                        <td>{row.parts}</td>
+                        {FOOTPRINT_FIGURES.flatMap((f) => [
+                          <td key={`${f}-median`}>{figure(f, row.median[f], t)}</td>,
+                          <td key={`${f}-max`}>{figure(f, row.max[f], t)}</td>,
+                        ])}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))
           )}
         </Panel>
         <Panel title={t.backlogOverTime} hint={t.backlogOverTimeHint} wide>

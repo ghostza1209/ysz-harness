@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { parseEnv, promisify } from 'node:util';
 import { claudeCode, createBindMountSandboxProvider, createWorktree } from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
@@ -8,7 +9,7 @@ import type { PlannedTicket } from './beads';
 import { startCheckServer } from './checks';
 import type { Prepared } from './host';
 import type { Project } from './projects';
-import type { AgentUsage } from './store';
+import type { AgentUsage, Footprint } from './store';
 
 export const MODEL = 'claude-sonnet-5-5';
 export const TICKET_JSON = '.orchestrator/ticket.json';
@@ -31,7 +32,10 @@ export interface AgentReports {
 }
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
-type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void } & Prepared;
+type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void;
+  /** Role-relative part name ('implement', 'review', 'breakdown'); the caller adds the Attempt. Called once, also when the agent failed, unless no sample was taken. */
+  onFootprint?: (role: string, footprint: Footprint) => void;
+} & Prepared;
 
 export interface SandboxRunner {
   /** Whether the Project's sandbox image exists locally. Never throws: docker being unreachable counts as missing. */
@@ -71,6 +75,81 @@ export const removeLeftoverSandboxes = (dockerBin = 'docker') => removeContainer
 
 export async function imageExists(image: string, dockerBin = 'docker'): Promise<boolean> {
   return execFileAsync(dockerBin, ['image', 'inspect', image], { timeout: 30_000 }).then(() => true, () => false);
+}
+
+/** Docker's human size: "1.2GiB" is binary, "12.3MB" and "4kB" decimal. NaN when it is not one ("--"). */
+export function parseSize(text: string): number {
+  const m = /^([\d.]+)\s*([kmgt]?)(i?)b$/i.exec(text.trim());
+  if (!m) return NaN;
+  return Number(m[1]) * (m[3] ? 1024 : 1000) ** (m[2] ? 'kmgt'.indexOf(m[2].toLowerCase()) + 1 : 0);
+}
+
+/** One `docker stats --format '{{json .}}'` line as cores, memory bytes and network-in bytes; undefined if it holds no CPU or memory reading. */
+export function parseStats(line: string): { cores: number; memory: number; rx: number } | undefined {
+  try {
+    const s = JSON.parse(line);
+    const cores = parseFloat(s.CPUPerc) / 100;
+    const memory = parseSize(s.MemUsage.split('/')[0]);
+    return Number.isFinite(cores) && Number.isFinite(memory) ? { cores, memory, rx: parseSize(s.NetIO.split('/')[0]) || 0 } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Polls the agent's sandcastle container (the clone's `php-check-*` containers mount it too, so the name narrows it),
+ * one `docker stats` in flight at a time. `readDisk()` takes the disk reading once, to be called just before teardown;
+ * `finish()` stops polling and sums up, or gives undefined if no sample was ever taken. Neither throws.
+ */
+export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000) {
+  const repo = join(dir, 'repo');
+  const startedAt = Date.now();
+  const abort = new AbortController();
+  let container = '';
+  let samples = 0;
+  let cpuSum = 0;
+  let cpuPeak = 0;
+  let peakMemory = 0;
+  let networkIn = 0;
+  const docker = (...args: string[]) => execFileAsync(dockerBin, args, { timeout: 30_000, signal: abort.signal }).then((r) => r.stdout.trim());
+
+  const polling = (async () => {
+    while (!abort.signal.aborted) {
+      try {
+        container ||= (await docker('ps', '-q', '--no-trunc', '--filter', 'name=sandcastle-', '--filter', `volume=${repo}`)).split('\n')[0];
+        const sample = container && parseStats(await docker('stats', '--no-stream', '--format', '{{json .}}', container));
+        if (sample) {
+          samples++;
+          cpuSum += sample.cores;
+          cpuPeak = Math.max(cpuPeak, sample.cores);
+          peakMemory = Math.max(peakMemory, sample.memory);
+          networkIn = sample.rx;
+        }
+      } catch {
+        // docker unreachable, or the container just went: the next poll finds out
+      }
+      await sleep(pollMs, undefined, { signal: abort.signal }).catch(() => {});
+    }
+  })();
+
+  // The clone with node_modules, plus the container's writable layer, where the pnpm store lives. du is slow on a big clone: once only.
+  let disk: Promise<number> | undefined;
+  const readDisk = () =>
+    (disk ??= Promise.all([
+      execFileAsync('du', ['-sk', repo], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0),
+      container ? execFileAsync(dockerBin, ['inspect', '--size', '--format', '{{.SizeRw}}', container], { timeout: 30_000 }).then((r) => Number(r.stdout) || 0, () => 0) : 0,
+    ]).then(([clone, layer]) => clone + layer));
+
+  return {
+    readDisk,
+    async finish(): Promise<Footprint | undefined> {
+      const bytes = await readDisk();
+      abort.abort();
+      await polling;
+      if (!samples) return undefined;
+      return { startedAt, seconds: Math.round((Date.now() - startedAt) / 1000), peakMemory, cpuAvg: cpuSum / samples, cpuPeak, disk: bytes, networkIn };
+    },
+  };
 }
 
 const COMPLETE = '<promise>COMPLETE</promise>';
@@ -210,7 +289,7 @@ export function teeCommand(handle: SandboxHandle, command: string, logPath: stri
 export function createSandboxRunner(root: string): SandboxRunner {
   async function runAgent(
     role: 'implement' | 'review' | 'breakdown',
-    { project, runId, attempt, branch, dir, key, signal, onUsage }: AgentRequest,
+    { project, runId, attempt, branch, dir, key, signal, onUsage, onFootprint }: AgentRequest,
     promptArgs: Record<string, string>,
   ): Promise<{ completionSignal?: string; stdout: string }> {
     signal.throwIfAborted();
@@ -233,11 +312,22 @@ export function createSandboxRunner(root: string): SandboxRunner {
     const inner = docker({ imageName: project.image, containerUid: project.containerUid, containerGid: project.containerGid });
     // docker's provider has create() at runtime; its public type hides it.
     const create = (inner as unknown as { create: CreateSandbox }).create;
+    let sampler: ReturnType<typeof sampleFootprint> | undefined;
     const sandbox = createBindMountSandboxProvider({
       ...inner,
       create: async (opts) => {
         const handle = await create({ ...opts, mounts: [{ hostPath: join(dir, 'repo'), sandboxPath: '/home/agent/workspace' }] });
-        return installCommand ? teeCommand(handle, installCommand, logPath) : handle;
+        const started = sampleFootprint(dir);
+        sampler = started;
+        const teed = installCommand ? teeCommand(handle, installCommand, logPath) : handle;
+        // The writable layer dies with the container, so the disk is read just before the real close.
+        return {
+          ...teed,
+          close: async () => {
+            await started.readDisk();
+            return teed.close();
+          },
+        };
       },
     });
 
@@ -266,6 +356,9 @@ export function createSandboxRunner(root: string): SandboxRunner {
       });
       return result;
     } finally {
+      // Also for a killed or failed agent: whatever was sampled counts.
+      const footprint = await sampler?.finish();
+      if (footprint) onFootprint?.(role, footprint);
       await checks?.close();
     }
   }
