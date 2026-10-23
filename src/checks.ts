@@ -16,7 +16,7 @@ export interface CheckServer {
   url: string;
   token: string;
   close(): Promise<void>;
-  /** What all the commands took from the host, for after close(); undefined if none was sampled. */
+  /** What all the commands took from the host, for after close(); undefined if none ran. A command too brief to sample still adds its time. */
   footprint(): Promise<Footprint | undefined>;
 }
 
@@ -178,14 +178,14 @@ export async function startCheckServer({
     },
     async footprint() {
       await Promise.all(stops);
-      if (!total.samples) return undefined;
+      if (!total.startedAt) return undefined;
       // The clone with node_modules, plus the largest writable layer a command left.
       const cloneSize = await execFileAsync('du', ['-sk', clone], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0);
       return {
         startedAt: total.startedAt,
         seconds: Math.round(total.ms / 1000),
         peakMemory: total.peakMemory,
-        cpuAvg: total.cores / total.samples,
+        cpuAvg: total.samples ? total.cores / total.samples : 0,
         cpuPeak: total.cpuPeak,
         disk: cloneSize + total.layer,
         networkIn: total.networkIn,
