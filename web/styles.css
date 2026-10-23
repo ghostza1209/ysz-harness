@@ -2521,6 +2521,8 @@ ol.waiting {
 .bl-md {
   line-height: 1.6;
   overflow-wrap: break-word;
+  /* A wide table or code line scrolls in place instead of widening the panel. */
+  contain: inline-size;
 }
 
 .bl-md > :not(table, pre) {
@@ -2539,10 +2541,20 @@ ol.waiting {
   margin: 0 0 10px;
 }
 
+/* Undoes the page's section-heading h2 (mono, uppercase, // marker). */
 .bl-md :is(h1, h2, h3, h4, h5, h6) {
+  display: block;
   margin: 18px 0 6px;
+  font-family: inherit;
   font-size: 13.5px;
+  font-weight: 650;
   line-height: 1.4;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.bl-md h2::before {
+  content: none;
 }
 
 .bl-md :is(h1, h2) {
@@ -2563,13 +2575,13 @@ ol.waiting {
   margin: 2px 0 0;
 }
 
-.bl-md .contains-task-list {
+/* The checkbox takes the bullet's place, so a list mixing tasks and plain items lines up. */
+.bl-md .task-list-item {
   list-style: none;
-  padding-left: 4px;
 }
 
 .bl-md .task-list-item input {
-  margin: 0 6px 0 0;
+  margin: 0 6px 0 -19px;
   vertical-align: -1px;
 }
 
