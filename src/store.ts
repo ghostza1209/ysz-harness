@@ -17,6 +17,17 @@ export interface AgentUsage {
   tokens: number;
 }
 
+/** What one agent sandbox took from the host, summarised over its life; memory, disk and network in bytes, CPU in cores of the Docker VM. */
+export interface Footprint {
+  startedAt: number;
+  seconds: number;
+  peakMemory: number;
+  cpuAvg: number;
+  cpuPeak: number;
+  disk: number;
+  networkIn: number;
+}
+
 export interface RunRow {
   id: number;
   project: string;
@@ -42,6 +53,8 @@ export interface RunRow {
   model: string | null;
   /** Each agent's usage by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
   usage: Record<string, AgentUsage>;
+  /** Each sandbox's Footprint by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
+  footprint: Record<string, Footprint>;
   /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
   prClosedAt: number | null;
   /** What the Run's agents reported and ysz recorded as Tickets; null when nothing was. Not a live view of bd. */
@@ -89,6 +102,8 @@ export interface Store {
   getRun(id: number): RunRow | undefined;
   /** Record one agent's usage so far, under its log part name. */
   setUsage(id: number, part: string, usage: AgentUsage): void;
+  /** Record one sandbox's Footprint, under its log part name. */
+  setFootprint(id: number, part: string, footprint: Footprint): void;
   /** Replace what the Run reported. */
   setReports(id: number, reports: Reports): void;
   deleteRun(id: number): void;
@@ -153,6 +168,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 10) {
     db.exec('ALTER TABLE runs ADD COLUMN clone_bytes INTEGER; PRAGMA user_version = 10');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 11) {
+    db.exec('ALTER TABLE runs ADD COLUMN footprint TEXT; PRAGMA user_version = 11');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
@@ -167,6 +185,7 @@ export function openStore(path: string): Store {
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
   const every = db.prepare('SELECT * FROM runs ORDER BY id');
   const setUsage = db.prepare("UPDATE runs SET usage = json_set(coalesce(usage, '{}'), ?, json(?)) WHERE id = ?");
+  const setFootprint = db.prepare("UPDATE runs SET footprint = json_set(coalesce(footprint, '{}'), ?, json(?)) WHERE id = ?");
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
   const paused = db.prepare('SELECT project FROM paused_projects');
@@ -190,6 +209,7 @@ export function openStore(path: string): Store {
     archivedAt: r.archived_at as number | null,
     model: r.model as string | null,
     usage: JSON.parse((r.usage as string | null) ?? '{}'),
+    footprint: JSON.parse((r.footprint as string | null) ?? '{}'),
     prClosedAt: r.pr_closed_at as number | null,
     reports: r.reports ? JSON.parse(r.reports as string) : null,
   });
@@ -214,6 +234,7 @@ export function openStore(path: string): Store {
       return row && toRow(row);
     },
     setUsage: (id, part, usage) => void setUsage.run(`$."${part}"`, JSON.stringify(usage), id),
+    setFootprint: (id, part, footprint) => void setFootprint.run(`$."${part}"`, JSON.stringify(footprint), id),
     setReports: (id, reports) => void db.prepare('UPDATE runs SET reports = ? WHERE id = ?').run(JSON.stringify(reports), id),
     deleteRun: (id) => void db.prepare('DELETE FROM runs WHERE id = ?').run(id),
     setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),

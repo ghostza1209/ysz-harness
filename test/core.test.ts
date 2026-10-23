@@ -237,6 +237,9 @@ const spec = (id: string, priority: number): Ticket => ({ ...ticket(id, priority
 const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
 
+/** What a fake sandbox reports as its Footprint: startedAt tells the Attempt apart. */
+const footprintOf = (attempt: number) => ({ startedAt: attempt, seconds: 9, peakMemory: 1, cpuAvg: 0.5, cpuPeak: 1, disk: 2, networkIn: 3 });
+
 const fakeSandbox: SandboxRunner = {
   async hasImage(project) {
     if (dockerDown) throw new Error('request returned 500 Internal Server Error');
@@ -244,15 +247,18 @@ const fakeSandbox: SandboxRunner = {
   },
   implement(req) {
     agentCalls.push(`implement attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
+    req.onFootprint?.('implement', footprintOf(req.attempt));
     return agent(req.attempt, req.signal);
   },
   review(req) {
     agentCalls.push(`review attempt ${req.attempt}`);
+    req.onFootprint?.('review', footprintOf(req.attempt));
     return reviewer(req.attempt, req.signal);
   },
   breakDown(req) {
     agentCalls.push(`breakdown attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
     agentChildren.push(req.children);
+    req.onFootprint?.('breakdown', footprintOf(req.attempt));
     return breakdowner(req.attempt);
   },
   async stop({ dir }) {
@@ -799,6 +805,23 @@ describe('a happy-path Run', () => {
     );
   });
 
+  it("stores each sandbox's Footprint under its Attempt and role, also for the Attempt whose agent failed", async () => {
+    agent = async (attempt) => {
+      if (attempt === 1) throw new Error('container exited 137');
+      return complete;
+    };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [run] = o.runs().history;
+    assert.deepEqual(run.footprint, {
+      'attempt1-implement': footprintOf(1),
+      'attempt2-implement': footprintOf(2),
+      'attempt2-review': footprintOf(2),
+    });
+  });
+
   it("records the branch its PR targets on the Run only when that is not the Project's baseBranch", async () => {
     for (const [id, base, expected] of [['tv1', 'epic/e-1', 'epic/e-1'], ['tv2', 'main', null]] as const) {
       queues = { thaivis: [ticket(id, 2, '2026-01-01T00:00:00Z')] };
@@ -867,6 +890,11 @@ describe('a Spec', () => {
     assert.deepEqual(historyOf(o), [['broken-down', 1, 'Broken down into ep1.1, ep1.2']]);
     assert.equal(o.runs().history[0].cloneDir, null);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it("stores the breakdown agent's Footprint under its Attempt", async () => {
+    const o = await run();
+    assert.deepEqual(o.runs().history[0].footprint, { 'attempt1-breakdown': footprintOf(1) });
   });
 
   it('creates nothing, and says so, when the Spec\'s children changed while its agent ran', async () => {

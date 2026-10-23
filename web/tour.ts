@@ -6,7 +6,7 @@ const MIN = 60_000;
 
 /** What the Dashboard shows during the tour: one of every card and control the tour points at. Negative ids never reach the API. */
 export function sampleState(now: number): State {
-  const run = { prUrl: null, prBase: null, note: null, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: 'claude-sonnet-5-5', usage: {}, prClosedAt: null, reports: null };
+  const run = { prUrl: null, prBase: null, note: null, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: 'claude-sonnet-5-5', usage: {}, footprint: {}, prClosedAt: null, reports: null };
   const failed = { ...run, id: -4, project: 'blog', ticketId: 'blog-7b', title: 'Paginate the archive page', state: 'failed' as const, attempt: 2, startedAt: now - 26 * 60 * MIN, endedAt: now - 25 * 60 * MIN, cloneDir: '~/.ysz/clones/blog-7b', cloneBytes: 1_400_000_000, note: 'Tests still failing after 2 Attempts' };
   return {
     slots: { used: 1, total: 2 },

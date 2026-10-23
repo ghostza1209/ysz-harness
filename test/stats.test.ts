@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { BacklogPoint, RunRow } from '../src/store';
-import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, footprintByRole, footprintCsv, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
 
 const run = (over: Partial<RunRow>): RunRow => ({
   id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, prBase: null, note: null,
-  startedAt: 0, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: null, usage: {}, prClosedAt: null, reports: null, ...over,
+  startedAt: 0, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: null, usage: {}, footprint: {}, prClosedAt: null, reports: null, ...over,
 });
 /** Local time on a day of October 2026. */
 const oct = (day: number, hour = 0, minute = 0) => new Date(2026, 9, day, hour, minute).getTime();
@@ -68,6 +68,47 @@ it("sums each day's tokens by agent across Attempts, with no value for a day who
     { day: oct(17), implement: 150, review: 20 },
     { day: oct(18), implement: null, review: null },
   ]);
+});
+
+it('gives the median and max of each Footprint figure per Project and role, folding both checks parts into checks and skipping Runs without one', () => {
+  const fp = (n: number) => ({ startedAt: 0, seconds: n, peakMemory: n * 1000, cpuAvg: n / 10, cpuPeak: n / 5, disk: n * 1e6, networkIn: n });
+  const rows = footprintByRole([
+    run({ project: 'b', footprint: { 'attempt1-implement': fp(10), 'attempt1-review': fp(2), 'attempt1-install': fp(1) } }),
+    run({ project: 'a', footprint: { 'attempt1-implement': fp(30), 'attempt2-implement': fp(10), 'attempt2-implement-checks': fp(4), 'attempt2-review-checks': fp(8) } }),
+    run({ project: 'a', footprint: { 'attempt1-implement': fp(20), 'attempt1-breakdown': fp(6), 'attempt1-mystery': fp(99) } }),
+    run({ project: 'a' }),
+    run({ project: 'c', footprint: { 'attempt1-mystery': fp(99) } }),
+  ]);
+  assert.deepEqual(rows.map((r) => [r.project, r.roles.map((x) => [x.role, x.parts])]), [
+    ['a', [['implement', 3], ['checks', 2], ['breakdown', 1]]],
+    ['b', [['implement', 1], ['review', 1], ['install', 1]]],
+  ]);
+  const [implement, checks] = rows[0].roles;
+  assert.deepEqual(implement.median, { seconds: 20, peakMemory: 20_000, cpuAvg: 2, cpuPeak: 4, disk: 20e6, networkIn: 20 });
+  assert.deepEqual(implement.max, { seconds: 30, peakMemory: 30_000, cpuAvg: 3, cpuPeak: 6, disk: 30e6, networkIn: 30 });
+  assert.deepEqual([checks.median.seconds, checks.max.seconds], [6, 8]);
+});
+
+it('writes one CSV row per Run x Footprint part with raw numbers and the same part\'s tokens, and none for a Run without a Footprint', () => {
+  const fp = (startedAt: number, n: number) => ({ startedAt, seconds: n, peakMemory: n * 1000, cpuAvg: n / 4, cpuPeak: n / 2, disk: n * 1e6, networkIn: n * 10 });
+  const csv = footprintCsv([
+    run({
+      id: 7, project: 'a "b", c', ticketId: 'x-1', state: 'in-review',
+      footprint: { 'attempt1-implement': fp(Date.UTC(2026, 9, 18, 9), 8), 'attempt1-install': fp(Date.UTC(2026, 9, 18, 9, 1), 2), 'attempt1-implement-checks': fp(Date.UTC(2026, 9, 18, 9, 30), 4) },
+      usage: { 'attempt1-implement': { context: 5, tokens: 1234 }, 'attempt1-review': { context: 1, tokens: 99 } },
+    }),
+    run({ id: 8, usage: { 'attempt1-implement': { context: 5, tokens: 500 } } }),
+  ]);
+  assert.equal(
+    csv,
+    [
+      'run,project,ticket,state,part,started,seconds,peak_memory_bytes,cpu_avg_cores,cpu_peak_cores,disk_bytes,network_in_bytes,tokens',
+      '7,"a ""b"", c",x-1,in-review,attempt1-implement,2026-10-18T09:00:00.000Z,8,8000,2,4,8000000,80,1234',
+      '7,"a ""b"", c",x-1,in-review,attempt1-install,2026-10-18T09:01:00.000Z,2,2000,0.5,1,2000000,20,',
+      '7,"a ""b"", c",x-1,in-review,attempt1-implement-checks,2026-10-18T09:30:00.000Z,4,4000,1,2,4000000,40,',
+      '',
+    ].join('\r\n'),
+  );
 });
 
 it("gives each ended Run's agent time in minutes, and none for a live Run", () => {

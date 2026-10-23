@@ -2252,6 +2252,41 @@ a.chip {
   grid-column: 1 / -1;
 }
 
+.footprint {
+  overflow-x: auto;
+  margin-bottom: 12px;
+}
+
+.footprint table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.footprint caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 4px;
+}
+
+.footprint th,
+.footprint td {
+  padding: 3px 10px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+.footprint thead th {
+  font-weight: 500;
+  color: var(--mute);
+}
+
+.footprint tbody th {
+  text-align: left;
+  font-weight: 500;
+}
+
 ol.waiting {
   display: grid;
   gap: 6px;

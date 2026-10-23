@@ -90,6 +90,17 @@ it('keeps each agent\'s latest usage under its log part name', () => {
   assert.deepEqual(store.getRun(id)?.usage, { 'attempt1-implement': { context: 30, tokens: 90 }, 'attempt1-review': { context: 5, tokens: 6 } });
 });
 
+it("keeps each sandbox's Footprint under its log part name, and none for a Run without one", () => {
+  const store = openStore(':memory:');
+  const id = store.insertRun({ project: 'a', ticketId: 'a-1', title: 't', state: 'agent', startedAt: 1 });
+  assert.deepEqual(store.getRun(id)?.footprint, {});
+  const fp = { startedAt: 7, seconds: 60, peakMemory: 100, cpuAvg: 0.5, cpuPeak: 2, disk: 300, networkIn: 40 };
+  store.setFootprint(id, 'attempt1-implement', fp);
+  store.setFootprint(id, 'attempt1-review', { ...fp, seconds: 5 });
+  store.setFootprint(id, 'attempt1-implement', { ...fp, seconds: 61 });
+  assert.deepEqual(store.getRun(id)?.footprint, { 'attempt1-implement': { ...fp, seconds: 61 }, 'attempt1-review': { ...fp, seconds: 5 } });
+});
+
 it("keeps a Project's Backlog counts only when they change from its last ones, across a reopen", () => {
   const dir = mkdtempSync(join(tmpdir(), 'store-'));
   try {
@@ -173,6 +184,31 @@ it('migrates a version-9 database: its Runs have no clone size, and one saved su
     assert.equal(row.cloneBytes, null);
     store.updateRun(row.id, { cloneBytes: 1024 });
     assert.equal(openStore(path).getRun(row.id)?.cloneBytes, 1024);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('migrates a version-10 database: its Runs have an empty Footprint, and one saved on a Run survives a reopen', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'orchestrator.db');
+    const old = new DatabaseSync(path);
+    old.exec(`CREATE TABLE runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, ticket_id TEXT NOT NULL, title TEXT NOT NULL,
+      state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, pr_url TEXT, note TEXT, started_at INTEGER NOT NULL, ended_at INTEGER,
+      clone_dir TEXT, host_job TEXT, archived_at INTEGER, model TEXT, usage TEXT, pr_base TEXT, pr_closed_at INTEGER, reports TEXT, clone_bytes INTEGER
+    );
+    INSERT INTO runs (project, ticket_id, title, state, started_at, clone_dir) VALUES ('thaivis', 'tv-1', 'old Run', 'failed', 5, '/clones/x');
+    PRAGMA user_version = 10`);
+    old.close();
+
+    const store = openStore(path);
+    const [row] = store.history(10);
+    assert.deepEqual(row.footprint, {});
+    const fp = { startedAt: 7, seconds: 60, peakMemory: 100, cpuAvg: 0.5, cpuPeak: 2, disk: 300, networkIn: 40 };
+    store.setFootprint(row.id, 'attempt1-implement', fp);
+    assert.deepEqual(openStore(path).getRun(row.id)?.footprint, { 'attempt1-implement': fp });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
