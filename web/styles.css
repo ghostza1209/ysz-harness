@@ -383,10 +383,18 @@ a:focus-visible {
   background: var(--soft);
 }
 
-.tag.p0,
+.tag.p0 {
+  color: var(--card);
+  background: var(--bad);
+  border-color: var(--bad);
+  font-weight: 700;
+}
+
 .tag.p1 {
   color: var(--bad);
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  background: color-mix(in srgb, var(--bad) 22%, transparent);
+  border-color: color-mix(in srgb, var(--bad) 60%, transparent);
+  font-weight: 700;
 }
 
 .pill {
@@ -2416,6 +2424,14 @@ ol.waiting {
   padding: 6px 2px 2px;
 }
 
+.tag.bl-proj {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
 .bl-row {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) minmax(0, auto);
@@ -2492,7 +2508,8 @@ ol.waiting {
   gap: 4px;
 }
 
-.bl-sec h4 {
+/* Only the section's own heading: a description's #### is Markdown. */
+.bl-sec > h4 {
   margin: 0;
   font-size: 12px;
   color: var(--mute);
@@ -2500,17 +2517,122 @@ ol.waiting {
   letter-spacing: 0.04em;
 }
 
-/* Agent-written text: plain, with its line breaks kept. */
-.bl-text {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+/* Agent-written Markdown. Headings stay at or under the Ticket title's size; prose keeps a readable line length. */
+.bl-md {
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+
+.bl-md > :not(table, pre) {
+  max-width: 80ch;
+}
+
+.bl-md > :first-child {
+  margin-top: 0;
+}
+
+.bl-md > :last-child {
+  margin-bottom: 0;
+}
+
+.bl-md :is(p, ul, ol, pre, table, blockquote) {
+  margin: 0 0 10px;
+}
+
+.bl-md :is(h1, h2, h3, h4, h5, h6) {
+  margin: 18px 0 6px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.bl-md :is(h1, h2) {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px;
+}
+
+.bl-md h3 {
+  font-size: 14px;
+}
+
+.bl-md :is(ul, ol) {
+  padding-left: 22px;
+}
+
+.bl-md li > :is(ul, ol) {
+  margin: 2px 0 0;
+}
+
+.bl-md .contains-task-list {
+  list-style: none;
+  padding-left: 4px;
+}
+
+.bl-md .task-list-item input {
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
+}
+
+.bl-md code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--soft);
+  font-size: 12.5px;
+}
+
+.bl-md pre {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+  overflow-x: auto;
+}
+
+.bl-md pre code {
+  padding: 0;
+  background: none;
+}
+
+.bl-md table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.bl-md :is(th, td) {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.bl-md th {
+  background: var(--soft);
+}
+
+.bl-md blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--mute);
+}
+
+.bl-md hr {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.bl-md a {
+  color: var(--accent);
 }
 
 .bl-comment {
   display: grid;
-  gap: 2px;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
+  gap: 4px;
+  max-width: calc(80ch + 26px);
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 
 .bl-dep {

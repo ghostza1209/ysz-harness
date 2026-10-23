@@ -1,4 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import Markdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { BacklogRow, TicketDetail } from '../src/beads';
 import { Copy } from './App';
 import type { Dict } from './i18n';
@@ -80,7 +82,25 @@ function Relation({ t, heading, items, go }: { t: Dict; heading: string; items: 
   );
 }
 
-/** A Ticket's opened panel. Description and comments are agent-written: they are text nodes, with line breaks kept by CSS, never HTML or Markdown. */
+const GFM = [remarkGfm];
+// A link opens a new tab and sends no Referer: the Dashboard's URL carries its token.
+const LINKS: Components = { a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" /> };
+
+/**
+ * Agent-written Markdown, GitHub-flavoured. Never HTML: react-markdown's defaults keep raw HTML as literal text and
+ * drop unsafe link URLs (javascript: and the like), so keep rehype-raw and a custom urlTransform out.
+ */
+const Md = memo(function Md({ text }: { text: string }) {
+  return (
+    <div className="bl-md">
+      <Markdown remarkPlugins={GFM} components={LINKS}>
+        {text}
+      </Markdown>
+    </div>
+  );
+});
+
+/** A Ticket's opened panel. Description and comments are agent-written Markdown, rendered by `Md`. */
 function Detail({ t, project, row, state, line, reasons, buttons, busy, act, rows, entry, now, go }: { t: Dict; project: string; row: BacklogRow; state: string; line: string; reasons: string[]; buttons: Button[]; busy: boolean; act: (action: BacklogAction) => void; rows: BacklogRow[]; entry: Entry; now: number; go: (project: string, id: string) => void }) {
   const rel = relations(rows, row);
   const goHere = (id: string) => go(project, id);
@@ -133,8 +153,10 @@ function Detail({ t, project, row, state, line, reasons, buttons, busy, act, row
             <div className="banner bad-banner" role="alert">
               {t.backlog.detailFailed(entry.error)}
             </div>
+          ) : entry.detail.description ? (
+            <Md text={entry.detail.description} />
           ) : (
-            <div className="bl-text">{entry.detail.description || t.backlog.noDescription}</div>
+            <span className="mute">{t.backlog.noDescription}</span>
           ),
         )}
         {rel.parent && <Relation t={t} heading={t.backlog.parentHeading} items={[rel.parent]} go={goHere} />}
@@ -150,7 +172,7 @@ function Detail({ t, project, row, state, line, reasons, buttons, busy, act, row
                   <div className="mute">
                     <b>{who(c.author)}</b> · {since(c.createdAt, now, t)}
                   </div>
-                  <div className="bl-text">{c.text}</div>
+                  <Md text={c.text} />
                 </div>
               ))
             ) : (
@@ -175,7 +197,7 @@ function Detail({ t, project, row, state, line, reasons, buttons, busy, act, row
 function GroupHead({ t, project, header, closedId, count, toggle, open }: { t: Dict; project: string; header: Header | null; closedId: string | null; count: number; toggle: (() => void) | null; open: boolean }) {
   return (
     <div className={`bl-ghead ${toggle ? 'bl-click' : ''}`} {...(toggle ? { ...press(toggle), 'aria-expanded': open } : {})}>
-      <span className="tag">{project}</span>
+      <span className="tag bl-proj">{project}</span>
       {header ? (
         <>
           <span className="tag">{header.row.issue_type}</span>
