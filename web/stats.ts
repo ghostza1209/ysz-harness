@@ -82,9 +82,9 @@ export function footprintByRole(runs: StatsRun[]) {
   const parts = new Map<string, Map<string, Footprint[]>>();
   for (const r of runs) {
     for (const [part, fp] of Object.entries(r.footprint)) {
-      const roles = parts.get(r.project) ?? new Map<string, Footprint[]>();
+      const roles = parts.get(r.project) ?? parts.set(r.project, new Map()).get(r.project)!;
       const role = roleOf(part);
-      parts.set(r.project, roles.set(role, [...(roles.get(role) ?? []), fp]));
+      (roles.get(role) ?? roles.set(role, []).get(role)!).push(fp);
     }
   }
   const figures = <T,>(fps: Footprint[], f: (xs: number[]) => T) => Object.fromEntries(FOOTPRINT_FIGURES.map((k) => [k, f(fps.map((fp) => fp[k]))])) as Record<FootprintFigure, T>;

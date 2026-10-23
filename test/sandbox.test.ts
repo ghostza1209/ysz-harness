@@ -485,6 +485,18 @@ esac
     assert.ok(disk >= 1_048_576 + 500 && disk <= 1_048_576 + 500 + 65_536, String(disk));
   });
 
+  it('stops polling once the disk is read, so the teardown after it is not sampled', async () => {
+    writeFileSync(join(root, 'sandcastle'), '');
+    const sampler = sampleFootprint(clone, docker, 5);
+    await until(() => logOf().length >= 2);
+    await sampler.readDisk();
+    const polls = logOf().length;
+    await new Promise((r) => setTimeout(r, 100));
+    const later = logOf().length;
+    await sampler.finish();
+    assert.equal(later, polls);
+  });
+
   it('gives nothing when the container never showed up', async () => {
     writeFileSync(join(root, 'sandcastle'), '');
     const sampler = sampleFootprint(clone, docker, 5);

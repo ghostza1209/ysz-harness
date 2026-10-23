@@ -23,7 +23,7 @@ const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFracti
 
 /** Docker's own units: 1.2 GB. */
 const bytes = (n: number) => {
-  const i = n > 0 ? Math.min(Math.floor(Math.log10(n) / 3), 4) : 0;
+  const i = n >= 1 ? Math.min(Math.floor(Math.log10(n) / 3), 4) : 0;
   return `${+(n / 1000 ** i).toFixed(i ? 1 : 0)} ${['B', 'kB', 'MB', 'GB', 'TB'][i]}`;
 };
 

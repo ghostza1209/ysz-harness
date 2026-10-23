@@ -98,8 +98,9 @@ export function parseStats(line: string): { cores: number; memory: number; rx: n
 
 /**
  * Polls the agent's sandcastle container (the clone's `php-check-*` containers mount it too, so the name narrows it),
- * one `docker stats` in flight at a time. `readDisk()` takes the disk reading once, to be called just before teardown;
- * `finish()` stops polling and sums up, or gives undefined if no sample was ever taken. Neither throws.
+ * one `docker stats` in flight at a time. `readDisk()`, to be called just before teardown, ends the sampling and takes
+ * the disk reading once, so du and the teardown count toward neither the time nor the CPU; `finish()` sums up, or gives
+ * undefined if no sample was ever taken. Neither throws.
  */
 export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000) {
   const repo = join(dir, 'repo');
@@ -134,20 +135,24 @@ export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000
 
   // The clone with node_modules, plus the container's writable layer, where the pnpm store lives. du is slow on a big clone: once only.
   let disk: Promise<number> | undefined;
-  const readDisk = () =>
-    (disk ??= Promise.all([
+  let endedAt = 0;
+  const readDisk = () => {
+    if (disk) return disk;
+    endedAt = Date.now();
+    abort.abort();
+    return (disk = Promise.all([
       execFileAsync('du', ['-sk', repo], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0),
       container ? execFileAsync(dockerBin, ['inspect', '--size', '--format', '{{.SizeRw}}', container], { timeout: 30_000 }).then((r) => Number(r.stdout) || 0, () => 0) : 0,
     ]).then(([clone, layer]) => clone + layer));
+  };
 
   return {
     readDisk,
     async finish(): Promise<Footprint | undefined> {
       const bytes = await readDisk();
-      abort.abort();
       await polling;
       if (!samples) return undefined;
-      return { startedAt, seconds: Math.round((Date.now() - startedAt) / 1000), peakMemory, cpuAvg: cpuSum / samples, cpuPeak, disk: bytes, networkIn };
+      return { startedAt, seconds: Math.round((endedAt - startedAt) / 1000), peakMemory, cpuAvg: cpuSum / samples, cpuPeak, disk: bytes, networkIn };
     },
   };
 }
