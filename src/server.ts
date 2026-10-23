@@ -74,7 +74,7 @@ const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
 /** The most ended (and archived) Runs one /api/state may ask for. */
 const MAX_HISTORY = 500;
 
-/** JSON state at /api/state (`?limit=N` ended Runs), what the Stats page graphs at /api/stats, each Project's Backlog rows with the Ready queue at /api/backlog, and a Backlog Ticket's description and comments at GET /api/projects/:name/tickets/:id; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume}, /api/projects/:name/run-now/:ticketId and /api/projects/:name/tickets/:id/{mark-ready,unmark-ready,skip,allow}; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+/** JSON state at /api/state (`?limit=N` ended Runs), what the Stats page graphs at /api/stats, each Project's Backlog rows with the Ready queue at /api/backlog, and a Backlog Ticket's description and comments at GET /api/projects/:name/tickets/:id; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume}, /api/projects/:name/run-now/:ticketId and /api/projects/:name/tickets/:id/{mark-ready,unmark-ready,skip,allow,unassign}; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
 export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
   // An empty token would match a missing cookie.
   if (!token) throw new Error('the Dashboard needs a token');
@@ -182,7 +182,7 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       if (pause) return () => orchestrator.setPaused(decodeURIComponent(pause[1]), pause[2] === 'pause');
       const runNow = /^\/api\/projects\/([^/]+)\/run-now\/([^/]+)$/.exec(path);
       if (runNow) return () => orchestrator.runNow(decodeURIComponent(runNow[1]), decodeURIComponent(runNow[2]));
-      const action = /^\/api\/projects\/([^/]+)\/tickets\/([^/]+)\/(mark-ready|unmark-ready|skip|allow)$/.exec(path);
+      const action = /^\/api\/projects\/([^/]+)\/tickets\/([^/]+)\/(mark-ready|unmark-ready|skip|allow|unassign)$/.exec(path);
       if (action) {
         return () => {
           const [project, id] = [decodeURIComponent(action[1]), decodeURIComponent(action[2])];

@@ -234,7 +234,8 @@ const buttonsOf = (rows: BacklogRow[], ready: QueueItem[] = [], id = rows[rows.l
 it('offers the buttons each Backlog state allows', () => {
   assert.deepEqual(buttonsOf([row('plain')]), ['Mark Ready*', 'Skip ysz']);
   assert.deepEqual(buttonsOf([row('asks', { labels: ['needs-info'] })]), ['Mark Ready*', 'Skip ysz']);
-  assert.deepEqual(buttonsOf([row('mine', { status: 'in_progress', assignee: 'yoss' })]), ['Mark Ready*', 'Skip ysz']);
+  assert.deepEqual(buttonsOf([row('mine', { status: 'in_progress', assignee: 'yoss' })]), ['Mark Ready*', 'Skip ysz', 'Unassign']);
+  assert.deepEqual(buttonsOf([row('theirs', { labels: ['ready-for-agent'], assignee: 'someone' })]), ['Unmark Ready', 'Skip ysz', 'Unassign']);
   assert.deepEqual(buttonsOf([row('marked', { labels: ['ready-for-agent'] })]), ['Unmark Ready', 'Skip ysz']);
   assert.deepEqual(buttonsOf([row('ready', { labels: ['ready-for-agent'] })], [queued('ready', { waitReason: 'next up' })]), ['Unmark Ready', 'Run now*', 'Skip ysz']);
   assert.deepEqual(buttonsOf([row('held', { status: 'in_progress', assignee: 'orchestrator' })]), []);

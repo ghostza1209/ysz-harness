@@ -13,9 +13,14 @@ it('offers Unmark Ready and Allow ysz on a Ready, skipped Ticket', () => {
 });
 
 it('still offers Mark Ready on a Ticket a human is assigned, one labelled needs-info, and one a human has in progress', () => {
-  assert.deepEqual(allowedActions(task({ assignee: 'somebody' })), ['mark-ready', 'skip']);
+  assert.deepEqual(allowedActions(task({ assignee: 'somebody' })), ['mark-ready', 'skip', 'unassign']);
   assert.deepEqual(allowedActions(task({ labels: ['needs-info'] })), ['mark-ready', 'skip']);
-  assert.deepEqual(allowedActions(task({ status: 'in_progress', assignee: 'somebody' })), ['mark-ready', 'skip']);
+  assert.deepEqual(allowedActions(task({ status: 'in_progress', assignee: 'somebody' })), ['mark-ready', 'skip', 'unassign']);
+});
+
+it('offers Unassign only on an open or in-progress Ticket with an assignee, since it reopens a claim', () => {
+  assert.deepEqual(allowedActions(task({ status: 'deferred', assignee: 'somebody' })), ['mark-ready', 'skip']);
+  assert.deepEqual(allowedActions(task({ status: 'blocked', assignee: 'somebody' })), ['mark-ready', 'skip']);
 });
 
 it('offers nothing on an epic, a closed Ticket, or one ysz holds, in-review included', () => {

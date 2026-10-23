@@ -3,7 +3,7 @@
 /** The bd actor behind ysz's claims and writes, so they are told apart from the human's. */
 export const ORCHESTRATOR = 'orchestrator';
 
-export const TICKET_ACTIONS = ['mark-ready', 'unmark-ready', 'skip', 'allow'] as const;
+export const TICKET_ACTIONS = ['mark-ready', 'unmark-ready', 'skip', 'allow', 'unassign'] as const;
 export type TicketAction = (typeof TICKET_ACTIONS)[number];
 
 /** A Ticket's fields as `bd list --brief` and `bd show --json` both name them. */
@@ -28,8 +28,11 @@ export function refusal(t: TicketFacts, action: TicketAction): string | null {
   if (action === 'unmark-ready' && !labels.includes('ready-for-agent')) return `${t.id} is not Ready`;
   if (action === 'skip' && labels.includes('orchestrator:skip')) return `${t.id} is already skipped`;
   if (action === 'allow' && !labels.includes('orchestrator:skip')) return `${t.id} is not skipped`;
+  if (action === 'unassign' && !t.assignee) return `${t.id} has no assignee`;
+  // Unassign reopens the Ticket, so a deferred or blocked one keeps its status and its assignee.
+  if (action === 'unassign' && t.status !== 'open' && t.status !== 'in_progress') return `${t.id} is ${t.status}`;
   return null;
 }
 
-/** The actions the Ticket allows now: Mark Ready or Unmark Ready, and Skip ysz or Allow ysz. */
+/** The actions the Ticket allows now: Mark Ready or Unmark Ready, Skip ysz or Allow ysz, and Unassign while it has an assignee. */
 export const allowedActions = (t: TicketFacts): TicketAction[] => TICKET_ACTIONS.filter((a) => !refusal(t, a));

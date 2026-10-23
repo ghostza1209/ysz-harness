@@ -614,6 +614,23 @@ describe('Backlog actions against real bd', () => {
     assert.equal((await show(id)).assignee, 'someone');
   });
 
+  it("unassign clears the assignee and puts the human's own claim back to open, leaving its labels alone", async () => {
+    const id = await create('claimed by hand', '-l', 'ready-for-agent,other');
+    await bd('update', id, '--claim');
+    await gateway.ticketAction(project, id, 'unassign');
+    const { assignee, status } = await show(id);
+    assert.deepEqual({ assignee: assignee ?? null, status }, { assignee: null, status: 'open' });
+    assert.deepEqual(await labels(id), ['other', 'ready-for-agent']);
+  });
+
+  it("unassign leaves someone else's live claim to bd's guard: refused, nothing changed", async () => {
+    const id = await create('their claim', '-a', 'someone');
+    await bd('update', id, '--status', 'in_progress');
+    await assert.rejects(gateway.ticketAction(project, id, 'unassign'), /held by "someone"/);
+    const { assignee, status } = await show(id);
+    assert.deepEqual({ assignee, status }, { assignee: 'someone', status: 'in_progress' });
+  });
+
   it('unmark-ready drops only ready-for-agent', async () => {
     const id = await create('retracted', '-l', 'ready-for-agent,needs-info,other');
     await gateway.ticketAction(project, id, 'unmark-ready');

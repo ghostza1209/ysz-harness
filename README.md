@@ -53,6 +53,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | --- | --- |
 | Queue a Ticket | **Mark Ready** on its row in the Dashboard's Backlog tab (or `bd update <id> --add-label ready-for-agent` in the Project's repo) |
 | Keep a Ticket away from ysz | **Skip ysz** on its row in the Backlog tab (or `bd update <id> --add-label orchestrator:skip`) |
+| Queue a Marked Ready Ticket someone is assigned | **Unassign** on its row in the Backlog tab: clears the assignee and puts your own claim back to open; bd refuses someone else's live claim (or `bd update <id> --assignee "" --status open`) |
 | Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic once the Spec is final, and again after changing it |
 | Get one PR for a whole epic | `bd update <epic-id> --add-label epic-branch` before its children run; ysz opens `epic/<epic-id>` → `baseBranch` once they are all closed |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |

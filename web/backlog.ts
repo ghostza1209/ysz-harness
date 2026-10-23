@@ -114,7 +114,7 @@ export interface Button {
 }
 
 /**
- * The buttons a Ticket's panel shows, in order: Mark Ready or Unmark Ready, Run now, Skip ysz or Allow ysz. The Ticket
+ * The buttons a Ticket's panel shows, in order: Mark Ready or Unmark Ready, Run now, Skip ysz or Allow ysz, Unassign. The Ticket
  * actions come from the function the server checks them with. A Ticket ysz holds gets none. Allow ysz says it returns
  * the Ticket to the queue when skipped is the only reason a Marked Ready Ticket waits.
  */
@@ -129,8 +129,9 @@ export function buttons(tk: Ticket, t: Dict): Button[] {
     'run-now': { action: 'run-now', label: t.runNow, primary: true },
     skip: { action: 'skip', label: b.skip, primary: false },
     allow: { action: 'allow', label: returns ? b.allowReturns : b.allow, primary: false },
+    unassign: { action: 'unassign', label: b.unassign, primary: false },
   };
-  return (['mark-ready', 'unmark-ready', 'run-now', 'skip', 'allow'] as const).filter((a) => (a === 'run-now' ? tk.canRunNow : allowed.includes(a))).map((a) => all[a]);
+  return (['mark-ready', 'unmark-ready', 'run-now', 'skip', 'allow', 'unassign'] as const).filter((a) => (a === 'run-now' ? tk.canRunNow : allowed.includes(a))).map((a) => all[a]);
 }
 
 export interface Search {

@@ -281,8 +281,8 @@ it("answers a Run control the orchestrator refuses with 409 and the reason", asy
 
 it('runs a Backlog action posted from the dashboard itself, decoding the names, and answers a refusal with 409 and the reason', async () => {
   actions.length = 0;
-  for (const action of ['mark-ready', 'unmark-ready', 'skip']) assert.equal((await post(`/api/projects/lab/tickets/lab-1/${action}`)).status, 200);
-  assert.deepEqual(actions, ['mark-ready lab/lab-1', 'unmark-ready lab/lab-1', 'skip lab/lab-1']);
+  for (const action of ['mark-ready', 'unmark-ready', 'skip', 'unassign']) assert.equal((await post(`/api/projects/lab/tickets/lab-1/${action}`)).status, 200);
+  assert.deepEqual(actions, ['mark-ready lab/lab-1', 'unmark-ready lab/lab-1', 'skip lab/lab-1', 'unassign lab/lab-1']);
   const refused = await post('/api/projects/lab/tickets/lab-1/allow');
   assert.equal(refused.status, 409);
   assert.deepEqual(JSON.parse(refused.body), { error: 'lab-1 is not skipped' });

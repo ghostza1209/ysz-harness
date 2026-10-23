@@ -6,6 +6,7 @@ import type { HostSteps } from '../src/host';
 import type { Project } from '../src/projects';
 import type { AgentResult, SandboxRunner } from '../src/sandbox';
 import { openStore, type RunState, type Store } from '../src/store';
+import type { TicketAction } from '../src/ticketActions';
 
 const projects: Project[] = ['fazwaz', 'PopDeal', 'thaivis'].map((name) => ({ name, repoPath: `/repos/${name}`, baseBranch: 'main', image: 'img' }));
 
@@ -2578,7 +2579,7 @@ describe('Backlog actions', () => {
     assert.equal(o.readyQueue()[0].runNow, false);
   });
 
-  const refused: [string, Partial<BacklogRow>, 'mark-ready' | 'unmark-ready' | 'skip' | 'allow', RegExp][] = [
+  const refused: [string, Partial<BacklogRow>, TicketAction, RegExp][] = [
     ['an epic', { issue_type: 'epic' }, 'mark-ready', /pd1 is an epic/],
     ['a closed Ticket', { status: 'closed' }, 'skip', /pd1 is closed/],
     ['a Ticket ysz holds', { status: 'in_progress', assignee: 'orchestrator' }, 'unmark-ready', /pd1 is held by ysz/],
@@ -2587,6 +2588,8 @@ describe('Backlog actions', () => {
     ['a Ticket not Ready', {}, 'unmark-ready', /pd1 is not Ready/],
     ['a Ticket already skipped', { labels: ['orchestrator:skip'] }, 'skip', /pd1 is already skipped/],
     ['a Ticket not skipped', {}, 'allow', /pd1 is not skipped/],
+    ['a Ticket nobody is assigned', {}, 'unassign', /pd1 has no assignee/],
+    ['a deferred Ticket', { status: 'deferred', assignee: 'yoss' }, 'unassign', /pd1 is deferred/],
   ];
   for (const [what, patch, action, reason] of refused) {
     it(`refuses ${action} on ${what} and writes nothing`, async () => {

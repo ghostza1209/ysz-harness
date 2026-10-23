@@ -457,6 +457,7 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
         'unmark-ready': ['--remove-label', 'ready-for-agent'],
         skip: ['--add-label', 'orchestrator:skip'],
         allow: ['--remove-label', 'orchestrator:skip'],
+        unassign: ['--assignee', '', '--status', 'open'], // releases a human's claim, as bd unclaim does, so the Ticket can queue
       };
       await bd(['-C', project.repoPath, 'update', id, ...flags[action]]); // no --actor: bd records its default actor, the human
     },
