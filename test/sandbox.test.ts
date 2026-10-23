@@ -283,14 +283,16 @@ describe('teeCommand', () => {
 
   it('reports when the command started and ended, and for no other command', async () => {
     const ran: number[][] = [];
-    const teed = teeCommand(handle, 'pnpm install', log, (start, end) => ran.push([start, end]));
+    // The install takes 50 ms, so an end taken before it finished shows.
+    const slow = { ...handle, exec: async (c: string, o?: { onLine?: (line: string) => void }) => (await new Promise((r) => setTimeout(r, 50)), handle.exec(c, o)) };
+    const teed = teeCommand(slow, 'pnpm install', log, (start, end) => ran.push([start, end]));
     await teed.exec('echo hi');
     assert.deepEqual(ran, []);
     const before = Date.now();
     await teed.exec('pnpm install');
     const after = Date.now();
     assert.equal(ran.length, 1);
-    assert.ok(before <= ran[0][0] && ran[0][0] <= ran[0][1] && ran[0][1] <= after);
+    assert.ok(before <= ran[0][0] && ran[0][0] + 45 <= ran[0][1] && ran[0][1] <= after, String(ran));
   });
 });
 

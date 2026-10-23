@@ -33,7 +33,7 @@ export interface AgentReports {
 
 /** Aborting `signal` stops the agent and tears its sandbox down: the call then rejects. */
 type AgentRequest = { project: Project; runId: number; attempt: number; signal: AbortSignal; onUsage?: (usage: AgentUsage) => void;
-  /** Role-relative part name ('implement', 'review', 'breakdown', and 'install' for implement's installCommand); the caller adds the Attempt. Called once, also when the agent failed, unless no sample was taken. */
+  /** Role-relative part name ('implement', 'review', 'breakdown', and 'install' for implement's installCommand); the caller adds the Attempt. Called once per part, also when the agent failed, unless the part has no sample. */
   onFootprint?: (role: string, footprint: Footprint) => void;
 } & Prepared;
 
@@ -100,9 +100,10 @@ export function parseStats(line: string): { cores: number; memory: number; rx: n
  * Polls the agent's sandcastle container (the clone's `php-check-*` containers mount it too, so the name narrows it),
  * one `docker stats` in flight at a time. `readDisk()`, to be called just before teardown, ends the sampling and takes
  * the disk reading once, so du and the teardown count toward neither the time nor the CPU; `finish()` sums up, or gives
- * undefined if no sample was ever taken. Neither throws.
+ * undefined if no sample was ever taken. None of them throws.
  * `installRan(start, end)` splits the install off: the samples inside it make `installFootprint()`, with the disk read
- * once at its end, and `finish()` keeps the rest, its network-in being what the install did not download.
+ * once at its end, and `finish()` keeps the rest, its network-in being what the install did not download; it gives
+ * undefined if every sample fell inside the install.
  */
 export function sampleFootprint(dir: string, dockerBin = 'docker', pollMs = 1000) {
   const repo = join(dir, 'repo');
