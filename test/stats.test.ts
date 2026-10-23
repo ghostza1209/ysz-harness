@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import type { BacklogPoint, RunRow } from '../src/store';
-import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, footprintByRole, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, footprintByRole, footprintCsv, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
 
 const run = (over: Partial<RunRow>): RunRow => ({
   id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, prBase: null, note: null,
@@ -86,6 +86,28 @@ it('gives the median and max of each Footprint figure per Project and role, fold
   assert.deepEqual(implement.median, { seconds: 20, peakMemory: 20_000, cpuAvg: 2, cpuPeak: 4, disk: 20e6, networkIn: 20 });
   assert.deepEqual(implement.max, { seconds: 30, peakMemory: 30_000, cpuAvg: 3, cpuPeak: 6, disk: 30e6, networkIn: 30 });
   assert.deepEqual([checks.median.seconds, checks.max.seconds], [6, 8]);
+});
+
+it('writes one CSV row per Run x Footprint part with raw numbers and the same part\'s tokens, and none for a Run without a Footprint', () => {
+  const fp = (startedAt: number, n: number) => ({ startedAt, seconds: n, peakMemory: n * 1000, cpuAvg: n / 4, cpuPeak: n / 2, disk: n * 1e6, networkIn: n * 10 });
+  const csv = footprintCsv([
+    run({
+      id: 7, project: 'a "b", c', ticketId: 'x-1', state: 'in-review',
+      footprint: { 'attempt1-implement': fp(Date.UTC(2026, 9, 18, 9), 8), 'attempt1-install': fp(Date.UTC(2026, 9, 18, 9, 1), 2), 'attempt1-implement-checks': fp(Date.UTC(2026, 9, 18, 9, 30), 4) },
+      usage: { 'attempt1-implement': { context: 5, tokens: 1234 }, 'attempt1-review': { context: 1, tokens: 99 } },
+    }),
+    run({ id: 8, usage: { 'attempt1-implement': { context: 5, tokens: 500 } } }),
+  ]);
+  assert.equal(
+    csv,
+    [
+      'run,project,ticket,state,part,started,seconds,peak_memory_bytes,cpu_avg_cores,cpu_peak_cores,disk_bytes,network_in_bytes,tokens',
+      '7,"a ""b"", c",x-1,in-review,attempt1-implement,2026-10-18T09:00:00.000Z,8,8000,2,4,8000000,80,1234',
+      '7,"a ""b"", c",x-1,in-review,attempt1-install,2026-10-18T09:01:00.000Z,2,2000,0.5,1,2000000,20,',
+      '7,"a ""b"", c",x-1,in-review,attempt1-implement-checks,2026-10-18T09:30:00.000Z,4,4000,1,2,4000000,40,',
+      '',
+    ].join('\r\n'),
+  );
 });
 
 it("gives each ended Run's agent time in minutes, and none for a live Run", () => {

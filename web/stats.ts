@@ -100,6 +100,20 @@ export function footprintByRole(runs: StatsRun[]) {
     .filter((p) => p.roles.length);
 }
 
+const CSV_HEADER = ['run', 'project', 'ticket', 'state', 'part', 'started', 'seconds', 'peak_memory_bytes', 'cpu_avg_cores', 'cpu_peak_cores', 'disk_bytes', 'network_in_bytes', 'tokens'];
+/** RFC 4180: a field with a comma, quote or line break is quoted, its quotes doubled. */
+const csvField = (v: string | number) => (/[",\r\n]/.test(String(v)) ? `"${String(v).replaceAll('"', '""')}"` : String(v));
+
+/** The Footprint as CSV, CRLF-separated: one row per Run x part, raw numbers; tokens are the usage of the same part, empty without. A Run without a Footprint gives no rows. */
+export function footprintCsv(runs: StatsRun[]) {
+  const rows = runs.flatMap((r) =>
+    Object.entries(r.footprint).map(([part, fp]) => [
+      r.id, r.project, r.ticketId, r.state, part, new Date(fp.startedAt).toISOString(), fp.seconds, fp.peakMemory, fp.cpuAvg, fp.cpuPeak, fp.disk, fp.networkIn, r.usage[part]?.tokens ?? '',
+    ]),
+  );
+  return [CSV_HEADER, ...rows].map((row) => row.map(csvField).join(',')).join('\r\n') + '\r\n';
+}
+
 /** How long each ended Run's agents took: from its start to In review, or to its end. */
 export const agentTimes = (runs: StatsRun[]) =>
   runs.flatMap((r) => (r.endedAt === null ? [] : [{ id: r.id, ticketId: r.ticketId, at: r.startedAt, minutes: (r.endedAt - r.startedAt) / 60_000, outcome: outcomeOf(r.state) }]));

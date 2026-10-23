@@ -3,7 +3,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import type { StatsRun } from '../src/core';
 import type { BacklogPoint } from '../src/store';
 import { span, type Dict } from './i18n';
-import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, FOOTPRINT_FIGURES, footprintByRole, mergeRate, OUTCOMES, reviewWaits, runsPerDay, tokensPerDay, waitingNow, type FootprintFigure, type Outcome, type Range } from './stats';
+import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, FOOTPRINT_FIGURES, footprintByRole, footprintCsv, mergeRate, OUTCOMES, reviewWaits, runsPerDay, tokensPerDay, waitingNow, type FootprintFigure, type Outcome, type Range } from './stats';
 
 /** The History pills' colours, so a state reads the same on both pages. Names stay English, as pills do. */
 const OUTCOME_STYLE: Record<Outcome, { name: string; color: string }> = {
@@ -30,6 +30,15 @@ const bytes = (n: number) => {
 const FIGURE_LABEL = { seconds: 'time', peakMemory: 'memory', cpuAvg: 'cpuAvg', cpuPeak: 'cpuPeak', disk: 'disk', networkIn: 'network' } as const;
 const figure = (f: FootprintFigure, n: number, t: Dict) =>
   f === 'seconds' ? span(n * 1000, t) : f === 'cpuAvg' || f === 'cpuPeak' ? n.toFixed(2) : bytes(n);
+
+/** Hands the browser a CSV as a file download. */
+function download(csv: string) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'footprint.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 function Panel({ title, hint, wide, children }: { title: string; hint: string; wide?: boolean; children: ReactNode }) {
   return (
@@ -63,7 +72,7 @@ function Stats(props: { t: Dict; projects: string[]; project: string; setProject
       .then((d) => setData({ ...d, now: Date.now() }), (e: Error) => setError(e.message));
   }, []);
 
-  const head = (
+  const head = (csv?: StatsRun[]) => (
     <div className="history-head">
       <h2>{t.stats}</h2>
       <span className="grow" />
@@ -80,10 +89,15 @@ function Stats(props: { t: Dict; projects: string[]; project: string; setProject
           <option key={p}>{p}</option>
         ))}
       </select>
+      {csv && (
+        <button className="small" onClick={() => download(footprintCsv(csv))}>
+          {t.downloadFootprint}
+        </button>
+      )}
     </div>
   );
-  if (error) return <section>{head}<div className="banner bad-banner">{t.statsFailed(error)}</div></section>;
-  if (!data) return <section aria-busy>{head}<div className="skeleton" /></section>;
+  if (error) return <section>{head()}<div className="banner bad-banner">{t.statsFailed(error)}</div></section>;
+  if (!data) return <section aria-busy>{head()}<div className="skeleton" /></section>;
 
   const { now } = data;
   const ofProject = data.runs.filter((r) => !project || r.project === project);
@@ -103,7 +117,7 @@ function Stats(props: { t: Dict; projects: string[]; project: string; setProject
 
   return (
     <section>
-      {head}
+      {head(runs)}
       {/* Only the charts by start date empty out: In review now, Review wait and the Backlog go by their own dates. */}
       {runs.length === 0 && <p className="mute">{t.noStats}</p>}
       <div className="stats-grid">
