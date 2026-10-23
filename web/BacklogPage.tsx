@@ -5,8 +5,10 @@ import type { Dict } from './i18n';
 import { Md } from './Md';
 import { ageText, build, stripAge, buttons, groupTickets, keyOf, matches, parseSearch, relations, since, STATES, who, type BacklogAction, type BacklogData, type Button, type Header, type Related, type Ticket } from './backlog';
 
-/** An open panel: loading, its detail, or why the detail failed. */
+/** The open Ticket's detail: loading, loaded, or why it failed. */
 type Entry = { loading: true } | { detail: TicketDetail } | { error: string };
+/** The Ticket in the drawer. */
+type Open = { project: string; id: string; entry: Entry };
 
 /** Makes a div act as a button: focusable, Enter and Space press it. */
 const press = (fn: () => void) => ({
@@ -83,8 +85,8 @@ function Relation({ t, heading, items, go }: { t: Dict; heading: string; items: 
   );
 }
 
-/** A Ticket's opened panel. Description and comments are agent-written Markdown, rendered by `Md`. */
-function Detail({ t, project, row, state, line, reasons, buttons, busy, act, rows, entry, now, go }: { t: Dict; project: string; row: BacklogRow; state: string; line: string; reasons: string[]; buttons: Button[]; busy: boolean; act: (action: BacklogAction) => void; rows: BacklogRow[]; entry: Entry; now: number; go: (project: string, id: string) => void }) {
+/** The drawer beside the list, showing one Ticket. Description and comments are agent-written Markdown, rendered by `Md`. */
+function Detail({ t, project, row, state, line, reasons, buttons, busy, act, rows, entry, now, go, close }: { t: Dict; project: string; row: BacklogRow; state: string; line: string; reasons: string[]; buttons: Button[]; busy: boolean; act: (action: BacklogAction) => void; rows: BacklogRow[]; entry: Entry; now: number; go: (project: string, id: string) => void; close: () => void }) {
   const rel = relations(rows, row);
   const goHere = (id: string) => go(project, id);
   const loaded = 'detail' in entry ? entry.detail : null;
@@ -95,85 +97,87 @@ function Detail({ t, project, row, state, line, reasons, buttons, busy, act, row
     </div>
   );
   return (
-    <div className="bl-detail">
-      <div className="bl-left">
-        <div className="bl-meta">
-          <span className="tag">{project}</span>
-          <Copy text={row.id} />
-          <span className="tag">{row.issue_type}</span>
-          <span className={`tag prio p${row.priority}`}>P{row.priority}</span>
-          <span className="tag">{row.status.replace('_', ' ')}</span>
-          {row.assignee && <span className="tag">@{who(row.assignee)}</span>}
-        </div>
-        <h3 className="bl-dtitle">{row.title}</h3>
-        <div className={`bl-state ${state} ${busy ? 'bl-busy' : ''}`}>
-          {reasons.length ? (
-            <>
-              <b>{t.backlog.markedHead}</b>
-              {reasons.map((r, i) => (
-                // Two blockers can share a title.
-                <div key={i}>{r}</div>
-              ))}
-            </>
-          ) : (
-            line
-          )}
-        </div>
-        {row.labels.length > 0 && (
-          <div className="bl-labels" aria-label={t.backlog.labelsHeading}>
-            {row.labels.map((l) => (
-              <span key={l} className="tag">
-                {l}
-              </span>
-            ))}
-          </div>
-        )}
-        {section(
-          t.backlog.descriptionHeading,
-          'loading' in entry ? (
-            <span className="mute">{t.backlog.loading}</span>
-          ) : 'error' in entry ? (
-            <div className="banner bad-banner" role="alert">
-              {t.backlog.detailFailed(entry.error)}
-            </div>
-          ) : entry.detail.description ? (
-            <Md text={entry.detail.description} />
-          ) : (
-            <span className="mute">{t.backlog.noDescription}</span>
-          ),
-        )}
-        {rel.parent && <Relation t={t} heading={t.backlog.parentHeading} items={[rel.parent]} go={goHere} />}
-        <Relation t={t} heading={t.backlog.blockedByHeading} items={rel.blockedBy} go={goHere} />
-        <Relation t={t} heading={t.backlog.blocksHeading} items={rel.blocks} go={goHere} />
-        <Relation t={t} heading={t.backlog.childrenHeading} items={rel.children} go={goHere} />
-        {loaded &&
-          section(
-            t.backlog.commentsHeading,
-            loaded.comments.length ? (
-              loaded.comments.map((c, i) => (
-                <div key={i} className="bl-comment">
-                  <div className="mute">
-                    <b>{who(c.author)}</b> · {since(c.createdAt, now, t)}
-                  </div>
-                  <Md text={c.text} />
-                </div>
-              ))
-            ) : (
-              <span className="mute">{t.backlog.noComments}</span>
-            ),
-          )}
+    <aside className="bl-detail" aria-label={row.title}>
+      <div className="bl-meta">
+        <span className="tag">{project}</span>
+        <Copy text={row.id} />
+        <span className="tag">{row.issue_type}</span>
+        <span className={`tag prio p${row.priority}`}>P{row.priority}</span>
+        <span className="tag">{row.status.replace('_', ' ')}</span>
+        {row.assignee && <span className="tag">@{who(row.assignee)}</span>}
+        <span className="grow" />
+        <button className="ghost small" aria-label={t.close} onClick={close}>
+          ✕
+        </button>
       </div>
-      {state === 'held' && <aside className="bl-actions">{t.backlog.heldActions}</aside>}
+      <h3 className="bl-dtitle">{row.title}</h3>
+      <div className={`bl-state ${state} ${busy ? 'bl-busy' : ''}`}>
+        {reasons.length ? (
+          <>
+            <b>{t.backlog.markedHead}</b>
+            {reasons.map((r, i) => (
+              // Two blockers can share a title.
+              <div key={i}>{r}</div>
+            ))}
+          </>
+        ) : (
+          line
+        )}
+      </div>
+      {state === 'held' && <div className="bl-actions">{t.backlog.heldActions}</div>}
       {buttons.length > 0 && (
-        <aside className="bl-actions bl-buttons">
+        <div className="bl-buttons">
           {buttons.map((b) => (
             <button key={b.action} className={b.primary ? 'primary' : ''} disabled={busy} onClick={() => act(b.action)}>
               {b.label}
             </button>
           ))}
-        </aside>
+        </div>
       )}
-    </div>
+      {row.labels.length > 0 && (
+        <div className="bl-labels" aria-label={t.backlog.labelsHeading}>
+          {row.labels.map((l) => (
+            <span key={l} className="tag">
+              {l}
+            </span>
+          ))}
+        </div>
+      )}
+      {section(
+        t.backlog.descriptionHeading,
+        'loading' in entry ? (
+          <span className="mute">{t.backlog.loading}</span>
+        ) : 'error' in entry ? (
+          <div className="banner bad-banner" role="alert">
+            {t.backlog.detailFailed(entry.error)}
+          </div>
+        ) : entry.detail.description ? (
+          <Md text={entry.detail.description} />
+        ) : (
+          <span className="mute">{t.backlog.noDescription}</span>
+        ),
+      )}
+      {rel.parent && <Relation t={t} heading={t.backlog.parentHeading} items={[rel.parent]} go={goHere} />}
+      <Relation t={t} heading={t.backlog.blockedByHeading} items={rel.blockedBy} go={goHere} />
+      <Relation t={t} heading={t.backlog.blocksHeading} items={rel.blocks} go={goHere} />
+      <Relation t={t} heading={t.backlog.childrenHeading} items={rel.children} go={goHere} />
+      {loaded &&
+        section(
+          t.backlog.commentsHeading,
+          loaded.comments.length ? (
+            loaded.comments.map((c, i) => (
+              <div key={i} className="bl-comment">
+                <div className="mute">
+                  <b>{who(c.author)}</b> · {since(c.createdAt, now, t)}
+                </div>
+                <Md text={c.text} />
+              </div>
+            ))
+          ) : (
+            <span className="mute">{t.backlog.noComments}</span>
+          ),
+        )}
+    </aside>
   );
 }
 
@@ -203,7 +207,8 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
   const [tab, setTab] = useState<Tab>('all');
   const [query, setQuery] = useState('');
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
-  const [opened, setOpened] = useState<Record<string, Entry>>({});
+  const [open, setOpen] = useState<Open | null>(null);
+  const openKey = open && keyOf(open.project, open.id);
   // The Tickets with an action in flight, by `project/id`.
   const [flying, setFlying] = useState<Record<string, BacklogAction>>({});
 
@@ -246,16 +251,13 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
   const count = (state: Tab) => (state === 'all' ? shown.length : shown.filter((tk) => tk.state === state).length);
   const groups = useMemo(() => model && groupTickets(tab === 'all' ? shown : shown.filter((tk) => tk.state === tab), model), [model, shown, tab]);
 
-  // Epic headers can open too: a Ticket's parent is one.
-  const shownKeys = useMemo(() => new Set(groups?.flatMap((g) => [...g.tickets.map((tk) => keyOf(tk.project, tk.row.id)), ...(g.header?.row.issue_type === 'epic' ? [keyOf(g.project, g.header.row.id)] : [])])), [groups]);
-
-  /** Opens a Ticket's panel and reads its detail once: fresh as of now. */
+  /** Opens a Ticket in the drawer and reads its detail once: fresh as of now. */
   const expand = (project: string, id: string) => {
-    const key = keyOf(project, id);
-    if (opened[key]) return;
-    const mine: Entry = { loading: true };
-    const settle = (e: Entry) => setOpened((o) => (o[key] === mine ? { ...o, [key]: e } : o));
-    setOpened((o) => ({ ...o, [key]: mine }));
+    if (openKey === keyOf(project, id)) return;
+    const mine: Open = { project, id, entry: { loading: true } };
+    // A slower fetch for a Ticket opened before must not land in this one's drawer.
+    const settle = (entry: Entry) => setOpen((o) => (o === mine ? { ...mine, entry } : o));
+    setOpen(mine);
     fetch(`/api/projects/${encodeURIComponent(project)}/tickets/${encodeURIComponent(id)}`)
       .then(async (res) => {
         const body = await res.json().catch(() => ({}));
@@ -267,27 +269,21 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
         (e: Error) => settle({ error: e.message }),
       );
   };
-  const flip = (project: string, id: string) => {
-    const key = keyOf(project, id);
-    if (opened[key]) setOpened(({ [key]: _gone, ...rest }) => rest);
-    else expand(project, id);
-  };
-  /** A dependency was clicked: open it, after clearing whatever filter hides it. */
-  const go = (project: string, id: string) => {
-    if (!shownKeys.has(keyOf(project, id))) {
-      setTab('all');
-      setQuery('');
-      setPicked(new Set());
-    }
-    expand(project, id);
-  };
-  const now = Date.now();
-  const detail = (project: string, h: { row: BacklogRow; state: string; line: string; reasons: string[] }, tk?: Ticket) => {
-    const key = keyOf(project, h.row.id);
-    const entry = opened[key];
-    const doing = flying[key];
-    return entry && <Detail t={t} project={project} row={h.row} state={h.state} line={doing ? t.backlog.inFlight[doing] : h.line} reasons={doing ? [] : h.reasons} buttons={tk ? buttons(tk, t) : []} busy={!!doing} act={(a) => tk && void act(tk, a)} rows={data?.projects.find((p) => p.name === project)?.rows ?? []} entry={entry} now={now} go={go} />;
-  };
+  const flip = (project: string, id: string) => (openKey === keyOf(project, id) ? setOpen(null) : expand(project, id));
+
+  // Esc closes the drawer.
+  useEffect(() => {
+    if (!openKey) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(null);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openKey]);
+
+  // From every Ticket, not just the shown ones: a dependency link can open one the filters hide. An epic is only a header.
+  // Neither has it once it closes, so the drawer goes too.
+  const openTk = openKey ? model?.tickets.find((tk) => keyOf(tk.project, tk.row.id) === openKey) : undefined;
+  const openRow = openTk ?? (openKey ? model?.headers.get(openKey) : undefined);
+  const openDoing = openKey ? flying[openKey] : undefined;
 
   const toggle = (name: string) =>
     setPicked((was) => {
@@ -297,60 +293,63 @@ function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<
     });
 
   return (
-    <section className="bl">
-      {error && (
-        <div className="banner bad-banner" role="alert">
-          {t.backlog.loadFailed(error)}
-        </div>
-      )}
-      {!data || !model || !groups ? (
-        !error && <div className="skeleton" />
-      ) : (
-        <>
-          <Strip t={t} data={data} picked={picked} toggle={toggle} />
-          <div className="bl-toolbar">
-            <div className="bl-tabs" role="group" aria-label={t.backlog.tabsLabel}>
-              {TABS.map((s) => (
-                <button key={s} className={`bl-tab ${tab === s ? 'on' : ''}`} aria-pressed={tab === s} onClick={() => setTab(s)}>
-                  {t.backlog.tabs[s]} <span className="count">{count(s)}</span>
-                </button>
-              ))}
-            </div>
-            <span className="grow" />
-            <input type="search" className="bl-q" aria-label={t.backlog.searchLabel} placeholder={t.backlog.searchPlaceholder} value={query} onChange={(e) => setQuery(e.target.value)} />
+    <div className={openRow ? 'bl-split' : undefined}>
+      <section className="bl">
+        {error && (
+          <div className="banner bad-banner" role="alert">
+            {t.backlog.loadFailed(error)}
           </div>
-          {groups.length === 0 && (
-            <div className="empty">
-              <b>{t.backlog.emptyTitle}</b>
-              <span>{t.backlog.emptyHint}</span>
+        )}
+        {!data || !model || !groups ? (
+          !error && <div className="skeleton" />
+        ) : (
+          <>
+            <Strip t={t} data={data} picked={picked} toggle={toggle} />
+            <div className="bl-toolbar">
+              <div className="bl-tabs" role="group" aria-label={t.backlog.tabsLabel}>
+                {TABS.map((s) => (
+                  <button key={s} className={`bl-tab ${tab === s ? 'on' : ''}`} aria-pressed={tab === s} onClick={() => setTab(s)}>
+                    {t.backlog.tabs[s]} <span className="count">{count(s)}</span>
+                  </button>
+                ))}
+              </div>
+              <span className="grow" />
+              <input type="search" className="bl-q" aria-label={t.backlog.searchLabel} placeholder={t.backlog.searchPlaceholder} value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
-          )}
-          {groups.map((g) => (
-            <div key={g.key} className="bl-group">
-              <GroupHead t={t} project={g.project} header={g.header} closedId={g.closedId} count={g.tickets.length} toggle={g.header?.row.issue_type === 'epic' ? () => flip(g.project, g.header!.row.id) : null} open={!!(g.header && opened[keyOf(g.project, g.header.row.id)])} />
-              {g.header?.row.issue_type === 'epic' && opened[keyOf(g.project, g.header.row.id)] && <div className="bl-item">{detail(g.project, g.header)}</div>}
-              {g.tickets.map((tk) => {
-                const doing = flying[keyOf(tk.project, tk.row.id)];
-                return (
-                  <div key={tk.row.id} className="bl-item">
-                    <div className="bl-row bl-click" aria-expanded={!!opened[keyOf(tk.project, tk.row.id)]} {...press(() => flip(tk.project, tk.row.id))}>
-                      <span className={`tag prio p${tk.row.priority}`}>P{tk.row.priority}</span>
-                      <code className="bl-id">{tk.row.id}</code>
-                      <span className="bl-title" title={tk.row.title}>
-                        {tk.row.title}
-                      </span>
-                      <span className={`bl-line ${tk.state} ${doing ? 'bl-busy' : ''}`}>{doing ? t.backlog.inFlight[doing] : tk.line}</span>
+            {groups.length === 0 && (
+              <div className="empty">
+                <b>{t.backlog.emptyTitle}</b>
+                <span>{t.backlog.emptyHint}</span>
+              </div>
+            )}
+            {groups.map((g) => (
+              <div key={g.key} className="bl-group">
+                <GroupHead t={t} project={g.project} header={g.header} closedId={g.closedId} count={g.tickets.length} toggle={g.header?.row.issue_type === 'epic' ? () => flip(g.project, g.header!.row.id) : null} open={!!g.header && openKey === keyOf(g.project, g.header.row.id)} />
+                {g.tickets.map((tk) => {
+                  const doing = flying[keyOf(tk.project, tk.row.id)];
+                  return (
+                    <div key={tk.row.id} className="bl-item">
+                      <div className="bl-row bl-click" aria-expanded={openKey === keyOf(tk.project, tk.row.id)} {...press(() => flip(tk.project, tk.row.id))}>
+                        <span className={`tag prio p${tk.row.priority}`}>P{tk.row.priority}</span>
+                        <code className="bl-id">{tk.row.id}</code>
+                        <span className="bl-title" title={tk.row.title}>
+                          {tk.row.title}
+                        </span>
+                        <span className={`bl-line ${tk.state} ${doing ? 'bl-busy' : ''}`}>{doing ? t.backlog.inFlight[doing] : tk.line}</span>
+                      </div>
+                      {doing && <div className="bl-bar" />}
                     </div>
-                    {doing && <div className="bl-bar" />}
-                    {detail(tk.project, tk, tk)}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-        </>
+                  );
+                })}
+              </div>
+            ))}
+          </>
+        )}
+      </section>
+      {open && openRow && (
+        <Detail key={openKey} t={t} project={open.project} row={openRow.row} state={openRow.state} line={openDoing ? t.backlog.inFlight[openDoing] : openRow.line} reasons={openDoing ? [] : openRow.reasons} buttons={openTk ? buttons(openTk, t) : []} busy={!!openDoing} act={(a) => openTk && void act(openTk, a)} rows={data?.projects.find((p) => p.name === open.project)?.rows ?? []} entry={open.entry} now={Date.now()} go={expand} close={() => setOpen(null)} />
       )}
-    </section>
+    </div>
   );
 }
 

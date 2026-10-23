@@ -2452,19 +2452,39 @@ ol.waiting {
   cursor: pointer;
 }
 
-.bl-detail {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
-  padding: 12px;
-  border-top: 1px solid var(--line);
-  font-size: 13.5px;
+/* The row whose Ticket is in the drawer. */
+.bl-item:has(> [aria-expanded='true']) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--card));
 }
 
-.bl-left {
+.bl-ghead[aria-expanded='true'] b {
+  color: var(--accent);
+}
+
+/* The list, with the drawer beside it while a Ticket is open. */
+.bl-split {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) min(720px, 45%);
+  gap: 16px;
+  align-items: start;
+}
+
+/* The drawer: stays in view under the sticky topbar and scrolls on its own. */
+.bl-detail {
+  position: sticky;
+  /* The topbar is 57px tall. */
+  top: 73px;
+  display: grid;
+  align-content: start;
   gap: 10px;
-  min-width: 0;
+  max-height: calc(100dvh - 73px - 16px);
+  overflow: auto;
+  padding: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 13.5px;
 }
 
 .bl-meta,
@@ -2668,14 +2688,13 @@ ol.waiting {
 }
 
 .bl-actions {
-  max-width: 220px;
   color: var(--mute);
   font-size: 13px;
 }
 
 .bl-buttons {
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -2745,13 +2764,24 @@ ol.waiting {
   color: var(--bad);
 }
 
+@media (max-width: 900px) {
+  .bl-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Too narrow to share: the drawer covers the page, toasts still on top. */
+  .bl-detail {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    max-height: none;
+    border-radius: 0;
+  }
+}
+
 @media (max-width: 700px) {
   .bl-row {
     grid-template-columns: auto auto minmax(0, 1fr);
-  }
-
-  .bl-detail {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .bl-line {
