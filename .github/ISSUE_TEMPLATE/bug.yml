@@ -15,7 +15,6 @@ body:
     id: run-log
     attributes:
       label: Run log excerpt
-      description: Drag in the file ysz saved for you. It is public once you submit, and you cannot delete it.
     validations:
       accept: ".log,.txt"
       required: false
