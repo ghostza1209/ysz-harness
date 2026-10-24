@@ -1,5 +1,11 @@
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { parseEnv, promisify } from 'node:util';
+import type { RunLogs } from './logs';
+import type { Project } from './projects';
+import type { RunRow } from './store';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,3 +75,55 @@ export function bugLink(fields: Partial<Record<(typeof FIELD_IDS)[number], strin
 
 /** The report for a bug that is not in any Run: the machine's facts only. */
 export const generalReportLink = (facts: Facts) => bugLink(facts);
+
+const MIN_SECRET_LENGTH = 8; // shorter values (7d, true) are settings, not secrets, and would mangle the log
+const EXCERPT_LINES = 50;
+
+/**
+ * Redacts the text ysz puts in a link or file: every value in ysz's own .env (`ysz` is its checkout) and in each
+ * Project's copyToWorktree files becomes `[redacted:<KEY>]`, the longest value first so a secret that contains another
+ * leaves no part behind; the home directory becomes `~`. The files are read per call, never cached; a missing one is skipped.
+ * ponytail: dotenv files only, which every copyToWorktree file is today; a JSON secret file would need its own parser.
+ */
+export function redactor(ysz: string, projects: readonly Project[], home = homedir()): (text: string) => string {
+  return (text) => {
+    const files = [join(ysz, '.env'), ...projects.flatMap((p) => (p.copyToWorktree ?? []).map((f) => join(p.repoPath, f)))];
+    const secrets = new Map<string, string>();
+    for (const file of files) {
+      let env: Record<string, string | undefined>;
+      try {
+        env = parseEnv(readFileSync(file, 'utf8'));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      for (const [key, value] of Object.entries(env)) if (value && value.length >= MIN_SECRET_LENGTH && !secrets.has(value)) secrets.set(value, key);
+    }
+    const longestFirst = [...secrets].sort((a, b) => b[0].length - a[0].length);
+    return longestFirst.reduce((out, [value, key]) => out.split(value).join(`[redacted:${key}]`), text).split(home).join('~');
+  };
+}
+
+/** A log's last `n` lines; a trailing newline is not a line. */
+const lastLines = (text: string, n: number) => text.replace(/\n$/, '').split('\n').slice(-n).join('\n');
+
+/**
+ * The Run's Bug report file, redacted whole: its header and note, the whole host log, then the last 50 lines of each
+ * agent part in stream order. Never the whole Run log: agent output is mostly the Project's private code.
+ */
+export async function runExcerpt(run: Pick<RunRow, 'id' | 'ticketId' | 'state' | 'note'>, logs: RunLogs, redact: (text: string) => string): Promise<{ name: string; text: string }> {
+  const parts = await logs.parts(run.id);
+  let offset = 0;
+  const read = new Map<string, string>();
+  for (const { name, size } of parts) {
+    read.set(name, (await logs.slice(run.id, offset, offset + size)).toString('utf8'));
+    offset += size;
+  }
+  const host = read.get('host');
+  const sections = [
+    `ysz Bug report: ${run.ticketId}, Run ${run.id}\nState: ${run.state}\nNote:\n${run.note || '(none)'}`,
+    ...(host === undefined ? [] : [`--- host ---\n${host.replace(/\n$/, '')}`]),
+    ...parts.filter((p) => p.name !== 'host').map((p) => `--- ${p.name} (last ${EXCERPT_LINES} lines) ---\n${lastLines(read.get(p.name)!, EXCERPT_LINES)}`),
+  ];
+  return { name: `${run.ticketId}-run${run.id}.log`, text: redact(`${sections.join('\n\n')}\n`) };
+}
