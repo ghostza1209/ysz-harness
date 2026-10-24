@@ -298,6 +298,53 @@ describe('host steps against real git', () => {
     assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the merged blocker change/);
   });
 
+  /** A stacked Run on `blocker` whose agent rewrote mm-<blocker>.txt, while the blocker merged into develop by `merge` and develop then rewrote that line too. */
+  const stackedOnMergedConflict = async (blocker: string, id: string, merge: string[]) => {
+    const other = join(root, `other-${blocker}`);
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', `agent/${blocker}`);
+    commit(other, `mm-${blocker}.txt`, 'the blocker line');
+    git(other, 'push', '-q', 'origin', `agent/${blocker}`);
+    const prepared = await host.prepare(project, id, { ...context, inReviewBlocker: { id: blocker, title: 'm', prUrl: 'https://example.test/pull/21' } });
+    commit(join(prepared.dir, 'repo'), `mm-${blocker}.txt`, 'the agent line');
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', ...merge, `agent/${blocker}`);
+    if (merge.includes('--squash')) git(other, 'commit', '-q', '-m', 'the squash commit');
+    commit(other, `mm-${blocker}.txt`, 'the develop line');
+    git(other, 'push', '-q', 'origin', 'develop', `:agent/${blocker}`);
+    git(repo, 'update-ref', '-d', `refs/remotes/origin/agent/${blocker}`);
+    const bin = join(root, `bin-${blocker}`);
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho "$*" >> ${log}/gh.${blocker}\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\n[ "$1" = pr ] && echo https://example.test/pull/22\nexit 0`);
+    return { prepared, bin, tip: (await host.collect(project, prepared)).tip };
+  };
+
+  it('opens the PR onto the base with the branch unchanged when the blocker merged with a merge commit, even if it conflicts there', async () => {
+    const { prepared, bin, tip } = await stackedOnMergedConflict('t-mc', 't-smc', ['--no-ff', '--no-edit']);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.deepEqual(await host.publish(project, ticket('t-smc'), prepared), { url: 'https://example.test/pull/22', base: 'develop' });
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.match(readFileSync(join(log, 'gh.t-mc'), 'utf8'), /^pr create --head agent\/t-smc --base develop /m);
+    assert.equal(git(origin, 'rev-parse', 'agent/t-smc'), tip);
+    assert.equal(git(origin, 'rev-list', '--count', 'develop..agent/t-smc'), '1');
+  });
+
+  it('names the conflicting files when the replay after a squash merge conflicts', async () => {
+    const { prepared, bin } = await stackedOnMergedConflict('t-sq', 't-ssq', ['--squash']);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.publish(project, ticket('t-ssq'), prepared), /^Error: https:\/\/example\.test\/pull\/21 merged meanwhile and agent\/t-ssq conflicts with develop in mm-t-sq\.txt$/);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-ssq'), '');
+  });
+
   it('still returns the PR when linking the stack fails, and logs why', async () => {
     const other = join(root, 'other-stack-fail');
     git(root, 'clone', '-q', '-b', 'develop', origin, other);
