@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { FIELD_IDS, bugLink, gatherFacts, generalReportLink, redactor, runExcerpt, type Exec } from '../src/bugReport';
+import { FIELD_IDS, bugLink, gatherFacts, generalReportLink, redactor, runExcerpt, runReportLink, runTitle, type Exec, type Facts } from '../src/bugReport';
 import { createRunLogs } from '../src/logs';
 import type { Project } from '../src/projects';
 
@@ -25,6 +25,8 @@ const healthy = {
   'claude --version': '2.1.0 (Claude Code)\n',
 };
 
+const facts: Facts = { 'ysz-version': 'abc1234', modified: 'no', os: 'linux x64', node: 'v22', docker: 'Docker 27', bd: 'bd 1', gh: 'gh 2', claude: '2.1' };
+
 describe('bug form and link', () => {
   it('every field the link can fill is an input or textarea in bug.yml, and the template is that file', () => {
     const ids = [...form.matchAll(/- type: (?:input|textarea)\n\s+id: ([\w-]+)/g)].map((m) => m[1]);
@@ -33,6 +35,14 @@ describe('bug form and link', () => {
     assert.deepEqual(keys.sort(), [...FIELD_IDS].sort());
     for (const key of keys) assert.ok(ids.includes(key), `${key} is not an input or textarea id in bug.yml`);
     assert.equal(link.searchParams.get('template'), 'bug.yml');
+  });
+
+  it('a per-Run link fills only ids that bug.yml has, run-state and note among them', () => {
+    const ids = [...form.matchAll(/- type: (?:input|textarea)\n\s+id: ([\w-]+)/g)].map((m) => m[1]);
+    const url = new URL(runReportLink({ state: 'failed', note: 'Attempt 1 failed: the agent made no commits' }, facts, (t) => t));
+    const keys = [...url.searchParams.keys()].filter((k) => k !== 'template' && k !== 'title');
+    assert.ok(keys.includes('run-state') && keys.includes('note'));
+    for (const key of keys) assert.ok(ids.includes(key), `${key} is not an input or textarea id in bug.yml`);
   });
 
   it('the general link has every fact and no title, run-state or note', async () => {
@@ -158,5 +168,85 @@ describe('runExcerpt', () => {
       text,
       'ysz Bug report: abc-1, Run 7\nState: failed\nNote:\ntoken is [redacted:TOKEN]\n\n--- host ---\nhost [redacted:TOKEN]\n\n--- attempt1-implement (last 50 lines) ---\nagent [redacted:TOKEN]\n',
     );
+  });
+});
+
+describe('runTitle', () => {
+  const same = (t: string) => t;
+  const hook = "Hook 'CI=true pnpm install --frozen-lockfile --store-dir /home/agent/.pnpm-store' timed out after 600000ms";
+  const cases: [string, string, string | undefined][] = [
+    ['two Attempts: the first reason, inner prefix dropped', `Attempt 1 failed: the implement agent failed: ${hook}\nAttempt 2 failed: the implement agent failed: ${hook}`, hook],
+    ['stopped without COMPLETE: the tail dropped', 'Attempt 1 failed: the implement agent stopped without signalling COMPLETE: the ticket asks for', 'The implement agent stopped without signalling COMPLETE'],
+    ['a stock reason stays whole', 'Attempt 1 failed: the agent made no commits', 'The agent made no commits'],
+    ['unusable plan stays whole', "Attempt 1 failed: the breakdown agent's plan is unusable: it output no <ticket> tags", "The breakdown agent's plan is unusable: it output no <ticket> tags"],
+    ['needs information: the question, first line only', 'The implement agent needs information:\nWhich branch holds the login API?\n\nMore detail', 'Which branch holds the login API?'],
+    ['interrupted', 'Interrupted by a ysz restart while agent; not counted as an Attempt.', 'Interrupted by a ysz restart while agent'],
+    ['interrupted with a release failure: the suffix is the title', 'Interrupted by a ysz restart while agent-review; not counted as an Attempt.; releasing the Ticket failed: bd exited 1', 'Releasing the Ticket failed: bd exited 1'],
+    ['killed with a PR: no title', 'Killed from the dashboard while agent. (PR https://github.com/o/r/pull/3 was opened)', undefined],
+    ['killed with a release failure: the suffix is the title', 'Killed from the dashboard while host.; releasing the Ticket failed: bd exited 1', 'Releasing the Ticket failed: bd exited 1'],
+    ['both suffixes dropped when the rest has a cause', 'Attempt 1 failed: the implement agent failed: boom\nhanding the Ticket back failed: bd exited 1; releasing the Ticket failed: bd exited 1', 'Boom'],
+    ['an unexpected error is taken whole', 'spawn docker ENOENT; releasing the Ticket failed: bd exited 1', 'Spawn docker ENOENT'],
+    ['a needs-attention host error', 'git push failed: rejected', 'Git push failed: rejected'],
+    ['nothing', '', undefined],
+  ];
+  for (const [name, note, title] of cases) it(name, () => assert.equal(runTitle(note, same), title));
+
+  it('a Thai question is cut to its first 120 code points, then …', () => {
+    assert.equal(runTitle(`The implement agent needs information:\n${'ก'.repeat(200)}`, same), `${'ก'.repeat(120)}…`);
+  });
+
+  it('cuts by code points, not UTF-16 units', () => {
+    assert.equal(runTitle('😀'.repeat(121), same), `${'😀'.repeat(120)}…`);
+    assert.equal(runTitle('😀'.repeat(120), same), '😀'.repeat(120));
+  });
+
+  it('a secret shows as [redacted:KEY] in the title and the note, also when it would straddle the 120 cut', () => {
+    const ysz = mkdtempSync(join(tmpdir(), 'ysz-redact-'));
+    writeFileSync(join(ysz, '.env'), 'KEY=s3cr3t-value-x\n');
+    const redact = redactor(ysz, [], '/home/fake');
+    // the secret starts at code point 110 of the title, so a cut at 120 would land inside the marker
+    const note = `Attempt 1 failed: the implement agent failed: ${'x'.repeat(109)}s3cr3t-value-x tail`;
+    const url = new URL(runReportLink({ state: 'failed', note }, facts, redact));
+    assert.equal(url.searchParams.get('title'), `X${'x'.repeat(108)}[redacted:KEY]…`);
+    assert.equal(url.searchParams.get('note'), `Attempt 1 failed: the implement agent failed: ${'x'.repeat(109)}[redacted:KEY] tail`);
+    assert.ok(!url.href.includes('s3cr3t'));
+  });
+});
+
+describe('runReportLink', () => {
+  const same = (t: string) => t;
+
+  it('a short note goes whole, with the state and the facts', () => {
+    const note = 'Attempt 1 failed: the agent made no commits';
+    const url = new URL(runReportLink({ state: 'failed', note }, facts, same));
+    assert.deepEqual(Object.fromEntries(url.searchParams), { template: 'bug.yml', title: 'The agent made no commits', ...facts, 'run-state': 'failed', note });
+  });
+
+  it('a kill has no title but keeps its note', () => {
+    const url = new URL(runReportLink({ state: 'killed', note: 'Killed from the dashboard while agent.' }, facts, same));
+    assert.equal(url.searchParams.has('title'), false);
+    assert.equal(url.searchParams.get('note'), 'Killed from the dashboard while agent.');
+  });
+
+  it('a Run with no note has no note or title', () => {
+    const url = new URL(runReportLink({ state: 'interrupted', note: null }, facts, same));
+    assert.equal(url.searchParams.has('note') || url.searchParams.has('title'), false);
+    assert.equal(url.searchParams.get('run-state'), 'interrupted');
+  });
+
+  it('a 1,470-char Thai note gives a link of at most 2,000 chars whose note ends with …', () => {
+    const note = `The implement agent needs information:\n${'ก'.repeat(1430)}`;
+    const link = runReportLink({ state: 'needs-attention', note }, facts, same);
+    assert.ok(link.length <= 2000, `${link.length}`);
+    assert.ok(link.length > 2000 - 9, `the cut leaves less than one Thai letter of room, got ${link.length}`);
+    const kept = new URL(link).searchParams.get('note')!;
+    assert.ok(kept.endsWith('…') && kept.length > 10 && kept.length < note.length);
+    assert.ok(note.startsWith(kept.slice(0, -1)));
+  });
+
+  it('when the budget leaves nothing for the note, there is no note=', () => {
+    const link = runReportLink({ state: 'failed', note: `The implement agent needs information:\n${'ก'.repeat(220)}` }, { ...facts, docker: 'd'.repeat(716) }, same);
+    assert.equal(new URL(link).searchParams.has('note'), false);
+    assert.ok(link.length <= 2000);
   });
 });

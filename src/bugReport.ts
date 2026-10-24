@@ -127,3 +127,63 @@ export async function runExcerpt(run: Pick<RunRow, 'id' | 'ticketId' | 'state' |
   ];
   return { name: `${run.ticketId}-run${run.id}.log`, text: redact(`${sections.join('\n\n')}\n`) };
 }
+
+const TITLE_CODE_POINTS = 120;
+const LINK_BUDGET = 2000; // chars of a whole link: the research's safe length for a prefilled issue URL
+/** Where the failure notes in core.ts append their secondary failure (handBack, execute's catch, kill, recover). */
+const SUFFIX = /; releasing the Ticket failed: |\nhanding the Ticket back failed: /;
+const MARKER = /\[redacted:[^\]]*\]/g;
+
+/**
+ * The bug form's title for a Run, from its note: the first cause, without the wording core.ts wraps it in, so each note
+ * shape there is pinned by a test. A kill, or nothing left to say, gives none: only the reporter knows what looked wrong.
+ * A cut never lands inside a `[redacted:KEY]`, which stays whole even when that makes the title a few code points over.
+ */
+export function runTitle(note: string | null, redact: (text: string) => string): string | undefined {
+  if (!note) return undefined;
+  const text = redact(note); // before any parsing or cutting, so a secret cannot be cut past its match
+  const at = text.search(SUFFIX);
+  const body = at < 0 ? text : text.slice(0, at);
+  const suffix = at < 0 ? '' : text.slice(at).replace(/^[;\n]\s*/, ''); // the only ysz or bd failure when the rest is stock text
+  const interrupted = body.match(/^(Interrupted by a ysz restart while [\w-]+); not counted as an Attempt\.$/);
+  const killed = /^Killed from the dashboard while [\w-]+\.(?: \(PR \S+ was opened\))?$/.test(body);
+  const cause = body
+    .replace(/^Attempt 1 failed: ([\s\S]*?)(?:\nAttempt 2 failed: [\s\S]*)?$/, '$1')
+    .replace(/^The \S+ agent needs information:\n/, '')
+    .replace(/^the \S+ agent failed: /, '')
+    .replace(/^(the \S+ agent stopped without signalling COMPLETE):[\s\S]*$/, '$1');
+  const title = (killed || interrupted ? suffix || (interrupted?.[1] ?? '') : cause)
+    .trim()
+    .split('\n')[0]
+    .replace(/\s+/g, ' ')
+    .replace(/^\p{Ll}/u, (c) => c.toUpperCase());
+  if (!title) return undefined;
+  let end = Array.from(title).slice(0, TITLE_CODE_POINTS).join('').length;
+  if (end >= title.length) return title;
+  for (const m of title.matchAll(MARKER)) if (m.index < end && m.index + m[0].length > end) end = m.index + m[0].length;
+  return end >= title.length ? title : `${title.slice(0, end)}…`;
+}
+
+/** The URL-encoded length of `s` as a query value. */
+const encodedLength = (s: string) => new URLSearchParams({ n: s }).toString().length - 2;
+
+/**
+ * The report for a bug in a Run: the facts, the Run's state, a title and the start of its note. The note is redacted
+ * and cut by code points (so no percent escape is split) to what the 2,000-char budget leaves after the rest; when
+ * nothing fits there is no note. One function for the Dashboard and `npm run bug`.
+ */
+export function runReportLink(run: Pick<RunRow, 'state' | 'note'>, facts: Facts, redact: (text: string) => string): string {
+  const title = runTitle(run.note, redact);
+  const fields = { ...facts, 'run-state': run.state };
+  const note = run.note ? redact(run.note) : '';
+  const room = LINK_BUDGET - bugLink(fields, title).length - '&note='.length;
+  if (!note || encodedLength(note) <= room) return bugLink(note ? { ...fields, note } : fields, title);
+  let used = encodedLength('…');
+  const kept: string[] = [];
+  for (const cp of note) {
+    used += encodedLength(cp);
+    if (used > room) break;
+    kept.push(cp);
+  }
+  return bugLink(kept.length ? { ...fields, note: `${kept.join('')}…` } : fields, title);
+}
