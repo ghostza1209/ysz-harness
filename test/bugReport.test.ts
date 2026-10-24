@@ -99,11 +99,11 @@ describe('redactor', () => {
     return redactor(ysz, [project], '/home/fake');
   };
 
-  it('redacts values from ysz .env and a Project copyToWorktree file, keeps a 7-char value, skips a missing file, shows the home path as ~', () => {
-    const redact = setup('CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oauth-1234\nSHORT=abcdefg\n', { '.env': 'DB_PASSWORD=hunter2hunter2\n', 'app.env': 'API_KEY="key with spaces"\n' });
+  it('redacts values from ysz .env and a Project copyToWorktree file, keeps a 7-char value but not an 8-char one, skips a missing file, shows the home path as ~', () => {
+    const redact = setup('CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oauth-1234\nSHORT=abcdefg\nEIGHT=12345678\n', { '.env': 'DB_PASSWORD=hunter2hunter2\n', 'app.env': 'API_KEY="key with spaces"\n' });
     assert.equal(
-      redact('tok sk-ant-oauth-1234 pw hunter2hunter2 k key with spaces short abcdefg at /home/fake/proj'),
-      'tok [redacted:CLAUDE_CODE_OAUTH_TOKEN] pw [redacted:DB_PASSWORD] k [redacted:API_KEY] short abcdefg at ~/proj',
+      redact('tok sk-ant-oauth-1234 pw hunter2hunter2 k key with spaces short abcdefg eight 12345678 at /home/fake/proj'),
+      'tok [redacted:CLAUDE_CODE_OAUTH_TOKEN] pw [redacted:DB_PASSWORD] k [redacted:API_KEY] short abcdefg eight [redacted:EIGHT] at ~/proj',
     );
   });
 
@@ -149,8 +149,14 @@ describe('runExcerpt', () => {
     assert.equal(text, 'ysz Bug report: abc-1, Run 7\nState: failed\nNote:\n(none)\n\n--- attempt1-implement (last 50 lines) ---\nonly\n');
   });
 
-  it('redacts the whole file, header and note included', async () => {
-    const { text } = await runExcerpt({ ...run, note: 'token is s3cr3tvalue' }, logsDir({ '7-host.log': 's3cr3tvalue\n' }), (t) => t.replaceAll('s3cr3tvalue', 'X'));
-    assert.ok(!text.includes('s3cr3tvalue'));
+  it('redacts the whole file, note and every log part included', async () => {
+    const ysz = mkdtempSync(join(tmpdir(), 'ysz-redact-'));
+    writeFileSync(join(ysz, '.env'), 'TOKEN=s3cr3tvalue\n');
+    const logs = logsDir({ '7-host.log': 'host s3cr3tvalue\n', '7-attempt1-implement.log': 'agent s3cr3tvalue\n' });
+    const { text } = await runExcerpt({ ...run, note: 'token is s3cr3tvalue' }, logs, redactor(ysz, [], '/home/fake'));
+    assert.equal(
+      text,
+      'ysz Bug report: abc-1, Run 7\nState: failed\nNote:\ntoken is [redacted:TOKEN]\n\n--- host ---\nhost [redacted:TOKEN]\n\n--- attempt1-implement (last 50 lines) ---\nagent [redacted:TOKEN]\n',
+    );
   });
 });
