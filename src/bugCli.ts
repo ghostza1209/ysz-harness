@@ -31,14 +31,14 @@ export interface BugDeps {
 }
 
 /** True when something accepts a TCP connection on 127.0.0.1:`port`; refused or silent for 1 s is false. */
-export function probePort(port: number, timeout = PROBE_TIMEOUT_MS): Promise<boolean> {
+export function probePort(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = connect({ port, host: '127.0.0.1' });
     const done = (up: boolean) => {
       socket.destroy();
       resolve(up);
     };
-    socket.setTimeout(timeout, () => done(false));
+    socket.setTimeout(PROBE_TIMEOUT_MS, () => done(false));
     socket.once('connect', () => done(true));
     socket.once('error', () => done(false));
   });

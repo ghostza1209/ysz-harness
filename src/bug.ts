@@ -8,6 +8,9 @@ import { gatherFacts } from './bugReport';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 const closed = new Promise<undefined>((resolve) => rl.once('close', () => resolve(undefined)));
+// On a terminal readline holds stdin in raw mode from here on, so Ctrl+C reaches it, not the process: without this it
+// only closes the input and the command carries on to write the file and open the browser.
+rl.on('SIGINT', () => process.exit(130));
 
 const code = await bugCommand(process.argv[2], {
   root,
@@ -22,7 +25,8 @@ const code = await bugCommand(process.argv[2], {
     execFile(cmd, args, () => {});
   },
   interactive: Boolean(process.stdin.isTTY),
-  ask: (prompt) => Promise.race([rl.question(prompt), closed]),
+  // `closed` first: once input has ended question() rejects, and the already settled close must win the race.
+  ask: (prompt) => Promise.race([closed, rl.question(prompt)]),
   out: console.log,
   err: console.error,
 });
