@@ -172,7 +172,6 @@ describe('runExcerpt', () => {
 });
 
 describe('runTitle', () => {
-  const same = (t: string) => t;
   const hook = "Hook 'CI=true pnpm install --frozen-lockfile --store-dir /home/agent/.pnpm-store' timed out after 600000ms";
   const cases: [string, string, string | undefined][] = [
     ['two Attempts: the first reason, inner prefix dropped', `Attempt 1 failed: the implement agent failed: ${hook}\nAttempt 2 failed: the implement agent failed: ${hook}`, hook],
@@ -180,6 +179,7 @@ describe('runTitle', () => {
     ['a stock reason stays whole', 'Attempt 1 failed: the agent made no commits', 'The agent made no commits'],
     ['unusable plan stays whole', "Attempt 1 failed: the breakdown agent's plan is unusable: it output no <ticket> tags", "The breakdown agent's plan is unusable: it output no <ticket> tags"],
     ['needs information: the question, first line only', 'The implement agent needs information:\nWhich branch holds the login API?\n\nMore detail', 'Which branch holds the login API?'],
+    ['the first line loses its trailing whitespace', 'The implement agent needs information:\nWhich branch?  \r\nMore', 'Which branch?'],
     ['interrupted', 'Interrupted by a ysz restart while agent; not counted as an Attempt.', 'Interrupted by a ysz restart while agent'],
     ['interrupted with a release failure: the suffix is the title', 'Interrupted by a ysz restart while agent-review; not counted as an Attempt.; releasing the Ticket failed: bd exited 1', 'Releasing the Ticket failed: bd exited 1'],
     ['killed with a PR: no title', 'Killed from the dashboard while agent. (PR https://github.com/o/r/pull/3 was opened)', undefined],
@@ -189,15 +189,15 @@ describe('runTitle', () => {
     ['a needs-attention host error', 'git push failed: rejected', 'Git push failed: rejected'],
     ['nothing', '', undefined],
   ];
-  for (const [name, note, title] of cases) it(name, () => assert.equal(runTitle(note, same), title));
+  for (const [name, note, title] of cases) it(name, () => assert.equal(runTitle(note), title));
 
   it('a Thai question is cut to its first 120 code points, then …', () => {
-    assert.equal(runTitle(`The implement agent needs information:\n${'ก'.repeat(200)}`, same), `${'ก'.repeat(120)}…`);
+    assert.equal(runTitle(`The implement agent needs information:\n${'ก'.repeat(200)}`), `${'ก'.repeat(120)}…`);
   });
 
   it('cuts by code points, not UTF-16 units', () => {
-    assert.equal(runTitle('😀'.repeat(121), same), `${'😀'.repeat(120)}…`);
-    assert.equal(runTitle('😀'.repeat(120), same), '😀'.repeat(120));
+    assert.equal(runTitle('😀'.repeat(121)), `${'😀'.repeat(120)}…`);
+    assert.equal(runTitle('😀'.repeat(120)), '😀'.repeat(120));
   });
 
   it('a secret shows as [redacted:KEY] in the title and the note, also when it would straddle the 120 cut', () => {
@@ -235,7 +235,7 @@ describe('runReportLink', () => {
   });
 
   it('a 1,470-char Thai note gives a link of at most 2,000 chars whose note ends with …', () => {
-    const note = `The implement agent needs information:\n${'ก'.repeat(1430)}`;
+    const note = `The implement agent needs information:\n${'ก'.repeat(1431)}`;
     const link = runReportLink({ state: 'needs-attention', note }, facts, same);
     assert.ok(link.length <= 2000, `${link.length}`);
     assert.ok(link.length > 2000 - 9, `the cut leaves less than one Thai letter of room, got ${link.length}`);

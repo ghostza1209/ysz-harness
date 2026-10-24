@@ -135,13 +135,12 @@ const SUFFIX = /; releasing the Ticket failed: |\nhanding the Ticket back failed
 const MARKER = /\[redacted:[^\]]*\]/g;
 
 /**
- * The bug form's title for a Run, from its note: the first cause, without the wording core.ts wraps it in, so each note
- * shape there is pinned by a test. A kill, or nothing left to say, gives none: only the reporter knows what looked wrong.
- * A cut never lands inside a `[redacted:KEY]`, which stays whole even when that makes the title a few code points over.
+ * The bug form's title for a Run, from its redacted note: the first cause, without the wording core.ts wraps it in, so
+ * each note shape there is pinned by a test. A kill, or nothing left to say, gives none: only the reporter knows what
+ * looked wrong. A cut never lands inside a `[redacted:KEY]`, which stays whole even when that makes the title a few code
+ * points over.
  */
-export function runTitle(note: string | null, redact: (text: string) => string): string | undefined {
-  if (!note) return undefined;
-  const text = redact(note); // before any parsing or cutting, so a secret cannot be cut past its match
+export function runTitle(text: string): string | undefined {
   const at = text.search(SUFFIX);
   const body = at < 0 ? text : text.slice(0, at);
   const suffix = at < 0 ? '' : text.slice(at).replace(/^[;\n]\s*/, ''); // the only ysz or bd failure when the rest is stock text
@@ -156,6 +155,7 @@ export function runTitle(note: string | null, redact: (text: string) => string):
     .trim()
     .split('\n')[0]
     .replace(/\s+/g, ' ')
+    .trim()
     .replace(/^\p{Ll}/u, (c) => c.toUpperCase());
   if (!title) return undefined;
   let end = Array.from(title).slice(0, TITLE_CODE_POINTS).join('').length;
@@ -173,9 +173,9 @@ const encodedLength = (s: string) => new URLSearchParams({ n: s }).toString().le
  * nothing fits there is no note. One function for the Dashboard and `npm run bug`.
  */
 export function runReportLink(run: Pick<RunRow, 'state' | 'note'>, facts: Facts, redact: (text: string) => string): string {
-  const title = runTitle(run.note, redact);
+  const note = run.note ? redact(run.note) : ''; // before any parsing or cutting, so a secret cannot be cut past its match
+  const title = runTitle(note);
   const fields = { ...facts, 'run-state': run.state };
-  const note = run.note ? redact(run.note) : '';
   const room = LINK_BUDGET - bugLink(fields, title).length - '&note='.length;
   if (!note || encodedLength(note) <= room) return bugLink(note ? { ...fields, note } : fields, title);
   let used = encodedLength('…');
