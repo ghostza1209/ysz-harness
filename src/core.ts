@@ -56,6 +56,8 @@ export interface Orchestrator {
    * ones (newest first), and every ended Run that still has its clone, whatever the limit, with their size measured so far.
    */
   runs(limit?: number): { live: RunRow[]; history: RunRow[]; archived: RunRow[]; cloned: RunRow[]; clonedBytes: number };
+  /** One Run by id, whatever its age or state; undefined when there is none. */
+  run(runId: number): RunRow | undefined;
   /** What the Stats page graphs: every Run, archived ones too, and every change of each Project's Backlog and Ready counts. */
   stats(): { runs: StatsRun[]; backlog: BacklogPoint[] };
   /** Ready Tickets of all Projects in pick order. */
@@ -677,6 +679,8 @@ export function createOrchestrator(deps: {
       const cloned = store.cloned();
       return { live: store.liveRuns(), history: store.history(limit), archived: store.archived(limit), cloned, clonedBytes: cloned.reduce((n, r) => n + (r.cloneBytes ?? 0), 0) };
     },
+
+    run: (runId) => store.getRun(runId),
 
     async kill(runId) {
       const run = store.getRun(runId);

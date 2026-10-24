@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { after, before, it } from 'node:test';
 import type { Orchestrator } from '../src/core';
 import { createRunLogs, type RunLogs } from '../src/logs';
-import { createHttpServer } from '../src/server';
+import { createHttpServer, type BugReports } from '../src/server';
+import type { RunRow } from '../src/store';
 
 const POLL_MS = 20;
 const logDir = mkdtempSync(join(tmpdir(), 'server-logs-'));
@@ -17,6 +18,11 @@ const runLimits: (number | undefined)[] = [];
 const orchestrator = {
   slots: () => ({}),
   readyQueue: () => [{ project: 'lab', id: 'lab-1' }],
+  // Run 31 failed, 32 merged, 33 live; any other id is unknown.
+  run: (id: number) => {
+    const state = ({ 31: 'failed', 32: 'merged', 33: 'agent' } as Record<number, string>)[id];
+    return state ? ({ id, state } as RunRow) : undefined;
+  },
   runs: (limit?: number) => (runLimits.push(limit), { live: liveIds.map((id) => ({ id })), history: [] }),
   projectStatuses: () => [],
   stats: () => ({ runs: [], backlog: [] }),
@@ -52,7 +58,13 @@ const realLogs = createRunLogs(logDir);
 let sizeCalls = 0;
 const logs: RunLogs = { ...realLogs, size: (id) => (sizeCalls++, realLogs.size(id)) };
 const TOKEN = 'a'.repeat(64);
-const server = createHttpServer(orchestrator, '/nonexistent', logs, TOKEN, POLL_MS);
+/** Stands in for the builder main.ts passes, which needs the real .env files. */
+const bugs: BugReports = {
+  file: async (run) => ({ name: `lab-1-run${run.id}.log`, text: `excerpt of run ${run.id}\n` }),
+  runLink: async (run) => `https://example.test/new?run=${run.id}`,
+  generalLink: async () => 'https://example.test/new?general=1',
+};
+const server = createHttpServer(orchestrator, '/nonexistent', logs, TOKEN, bugs, POLL_MS);
 let port: number;
 
 before(() => new Promise<void>((done) => server.listen(0, '127.0.0.1', () => {
@@ -149,7 +161,7 @@ it('serves the Stats data as JSON at /api/stats', async () => {
 });
 
 it('will not start without a token, which would let every request through', () => {
-  assert.throws(() => createHttpServer(orchestrator, '/nonexistent', logs, ''));
+  assert.throws(() => createHttpServer(orchestrator, '/nonexistent', logs, '', bugs));
 });
 
 it('trades the token in the URL for the cookie and drops it from the address bar', async () => {
@@ -335,4 +347,38 @@ it('refuses a Backlog action from another origin, with no origin, or by GET, and
   assert.equal((await get(path)).status, 405);
   assert.equal((await send(path, { origin: `http://localhost:${port}`, cookie: '' }, 'POST')).status, 401);
   assert.deepEqual(actions, []);
+});
+
+it('answers a failed Run\'s bug report as an attachment named after its Ticket and Run', async () => {
+  const res = await get('/api/runs/31/bug-report');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-type'], 'text/plain; charset=utf-8');
+  assert.equal(res.headers['content-disposition'], 'attachment; filename="lab-1-run31.log"');
+  assert.equal(res.headers['x-content-type-options'], 'nosniff');
+  assert.equal(res.body, 'excerpt of run 31\n');
+});
+
+it('redirects to the builder\'s pre-filled link, for a Run and for a general report', async () => {
+  const run = await get('/api/runs/31/bug-form');
+  assert.deepEqual([run.status, run.headers.location], [302, 'https://example.test/new?run=31']);
+  const general = await get('/api/bug-form');
+  assert.deepEqual([general.status, general.headers.location], [302, 'https://example.test/new?general=1']);
+});
+
+it('refuses a bug report for an unknown Run (404), a merged one and a live one (409 with the reason)', async () => {
+  for (const route of ['bug-report', 'bug-form']) {
+    assert.equal((await get(`/api/runs/99/${route}`)).status, 404);
+    const merged = await get(`/api/runs/32/${route}`);
+    assert.equal(merged.status, 409);
+    assert.match(JSON.parse(merged.body).error, /reached its goal/);
+    const live = await get(`/api/runs/33/${route}`);
+    assert.equal(live.status, 409);
+    assert.match(JSON.parse(live.body).error, /Kill it first/);
+  }
+});
+
+it('answers 401 to every bug route without the cookie', async () => {
+  for (const path of ['/api/runs/31/bug-report', '/api/runs/31/bug-form', '/api/bug-form', '/api/runs/32/bug-report', '/api/runs/33/bug-form', '/api/runs/99/bug-report']) {
+    assert.equal((await send(path, { cookie: '' })).status, 401, path);
+  }
 });

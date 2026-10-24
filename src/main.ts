@@ -2,12 +2,13 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
+import { gatherFacts, generalReportLink, redactor, runExcerpt, runReportLink } from './bugReport';
 import { createOrchestrator } from './core';
 import { createHostSteps } from './host';
 import { appendRunLog, createRunLogs } from './logs';
 import { projects } from './projects';
 import { createSandboxRunner, MODEL } from './sandbox';
-import { createHttpServer } from './server';
+import { createHttpServer, type BugReports } from './server';
 import { openStore } from './store';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -62,6 +63,15 @@ try {
   writeFileSync(tokenPath, token, { mode: 0o600 });
 }
 
-createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`), token).listen(port, '127.0.0.1', () => {
+// Redaction reads every Project's copyToWorktree files as they are when the report is made, so the Projects are a function.
+const runLogs = createRunLogs(`${root}data/logs`);
+const currentProjects = () => projects;
+const bugs: BugReports = {
+  file: (run) => runExcerpt(run, runLogs, redactor(root, currentProjects())),
+  runLink: async (run) => runReportLink(run, await gatherFacts(root), redactor(root, currentProjects())),
+  generalLink: async () => generalReportLink(await gatherFacts(root)),
+};
+
+createHttpServer(orchestrator, `${root}dist`, runLogs, token, bugs).listen(port, '127.0.0.1', () => {
   console.log(`ysz on http://localhost:${port}/?token=${token}`);
 });

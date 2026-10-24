@@ -1369,6 +1369,30 @@ input:focus-visible {
   gap: 2px;
 }
 
+/* A Bug report's popover: the ⋯ menu's, wider, with its steps as a list. */
+.bug-steps {
+  width: 340px;
+  padding: 12px;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.bug-steps ol {
+  margin: 0;
+  padding-inline-start: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.theme svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
 .more-menu button {
   border: none;
   text-align: start;
