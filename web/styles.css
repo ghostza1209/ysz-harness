@@ -1369,8 +1369,8 @@ input:focus-visible {
   gap: 2px;
 }
 
-/* A Bug report's popover: the ⋯ menu's, wider, with its steps as a list. */
-.bug-steps {
+/* A Bug report's popover: the ⋯ menu's, wider, with its steps as a list. Both classes, so its gap beats .more-menu:popover-open's. */
+.more-menu.bug-steps {
   width: 340px;
   padding: 12px;
   gap: 8px;
