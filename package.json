@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "vite build && tsx src/main.ts",
+    "bug": "tsx src/bug.ts",
     "dashboard": "open \"http://localhost:${PORT:-4000}/?token=$(cat data/dashboard-token)\"",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "test:contract": "node --import tsx --test test/beads.contract.ts",

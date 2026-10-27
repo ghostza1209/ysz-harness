@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { openStore } from '../src/store';
+import { openStore, readRuns } from '../src/store';
 
 it('keeps the Runs of a version-1 database and adds the clone column to them', () => {
   const dir = mkdtempSync(join(tmpdir(), 'store-'));
@@ -209,6 +209,26 @@ it('migrates a version-10 database: its Runs have an empty Footprint, and one sa
     const fp = { startedAt: 7, seconds: 60, peakMemory: 100, cpuAvg: 0.5, cpuPeak: 2, disk: 300, networkIn: 40 };
     store.setFootprint(row.id, 'attempt1-implement', fp);
     assert.deepEqual(openStore(path).getRun(row.id)?.footprint, { 'attempt1-implement': fp });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('readRuns returns the Runs openStore wrote, oldest first, and a missing path has none and creates nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'store-'));
+  try {
+    const path = join(dir, 'data/orchestrator.db');
+    assert.deepEqual(readRuns(path), []);
+    assert.equal(existsSync(join(dir, 'data')), false);
+
+    const store = openStore(path);
+    const a = store.insertRun({ project: 'p', ticketId: 'x-1', title: 'one', state: 'agent', startedAt: 5 });
+    const b = store.insertRun({ project: 'p', ticketId: 'x-2', title: 'two', state: 'claimed', startedAt: 6 });
+    store.updateRun(a, { state: 'failed', note: 'boom', endedAt: 9 });
+    const runs = readRuns(path);
+    assert.deepEqual(runs.map((r) => [r.id, r.ticketId, r.state, r.note, r.endedAt]), [[a, 'x-1', 'failed', 'boom', 9], [b, 'x-2', 'claimed', null, null]]);
+    assert.deepEqual(runs[0], store.getRun(a));
+    store.updateRun(b, { state: 'host' }); // the reader left the store writable
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

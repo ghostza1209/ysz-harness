@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -8,6 +8,8 @@ export type RunState =
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
 const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];
+/** Rollback-journal mode: a writer waits this long for a reader's lock (`npm run bug` reads while ysz runs) instead of failing at once. */
+const BUSY_TIMEOUT_MS = 5_000;
 /** Runs the user can still act on: the slot holders and the ones waiting on a Retry or Kill. */
 const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 
@@ -121,10 +123,43 @@ export interface Store {
   backlogHistory(): BacklogPoint[];
 }
 
+const toRow = (r: Record<string, unknown>): RunRow => ({
+  id: r.id as number,
+  project: r.project as string,
+  ticketId: r.ticket_id as string,
+  title: r.title as string,
+  state: r.state as RunState,
+  attempt: r.attempt as number,
+  prUrl: r.pr_url as string | null,
+  prBase: r.pr_base as string | null,
+  note: r.note as string | null,
+  startedAt: r.started_at as number,
+  endedAt: r.ended_at as number | null,
+  cloneDir: r.clone_dir as string | null,
+  cloneBytes: r.clone_bytes as number | null,
+  archivedAt: r.archived_at as number | null,
+  model: r.model as string | null,
+  usage: JSON.parse((r.usage as string | null) ?? '{}'),
+  footprint: JSON.parse((r.footprint as string | null) ?? '{}'),
+  prClosedAt: r.pr_closed_at as number | null,
+  reports: r.reports ? JSON.parse(r.reports as string) : null,
+});
+
+/** The Runs of the store at `path`, oldest first, read without writing: no table created, no migration, so ysz need not run. A missing file has none. */
+export function readRuns(path: string): RunRow[] {
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path, { readOnly: true, timeout: BUSY_TIMEOUT_MS });
+  try {
+    return db.prepare('SELECT * FROM runs ORDER BY id').all().map(toRow);
+  } finally {
+    db.close();
+  }
+}
+
 /** `:memory:` or a file path; the parent directory is created. */
 export function openStore(path: string): Store {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
+  const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS });
   // The walking skeleton's runs table never held a real Run, so a pre-1 database is simply rebuilt.
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 1) {
     db.exec('DROP TABLE IF EXISTS runs; PRAGMA user_version = 1');
@@ -192,27 +227,6 @@ export function openStore(path: string): Store {
   const lastCounts = db.prepare('SELECT backlog, ready FROM backlog WHERE project = ? ORDER BY at DESC LIMIT 1');
   const addCounts = db.prepare('INSERT INTO backlog (project, at, backlog, ready) VALUES (?, ?, ?, ?)');
   const counts = db.prepare('SELECT project, at, backlog, ready FROM backlog ORDER BY at, rowid');
-  const toRow = (r: Record<string, unknown>): RunRow => ({
-    id: r.id as number,
-    project: r.project as string,
-    ticketId: r.ticket_id as string,
-    title: r.title as string,
-    state: r.state as RunState,
-    attempt: r.attempt as number,
-    prUrl: r.pr_url as string | null,
-    prBase: r.pr_base as string | null,
-    note: r.note as string | null,
-    startedAt: r.started_at as number,
-    endedAt: r.ended_at as number | null,
-    cloneDir: r.clone_dir as string | null,
-    cloneBytes: r.clone_bytes as number | null,
-    archivedAt: r.archived_at as number | null,
-    model: r.model as string | null,
-    usage: JSON.parse((r.usage as string | null) ?? '{}'),
-    footprint: JSON.parse((r.footprint as string | null) ?? '{}'),
-    prClosedAt: r.pr_closed_at as number | null,
-    reports: r.reports ? JSON.parse(r.reports as string) : null,
-  });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),
     updateRun(id, patch) {

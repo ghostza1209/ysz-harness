@@ -1,0 +1,61 @@
+name: Bug report
+description: A bug in ysz itself
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Search the [existing bug reports](https://github.com/ghostza1209/ysz-harness/issues?q=is%3Aissue%20label%3Abug) first, closed ones too. A bug already fixed on master shows only as a closed issue, which means you need to pull.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What went wrong?
+    validations:
+      required: true
+  - type: upload
+    id: run-log
+    attributes:
+      label: Run log excerpt
+    validations:
+      accept: ".log,.txt"
+      required: false
+  - type: input
+    id: run-state
+    attributes:
+      label: Run state
+  - type: textarea
+    id: note
+    attributes:
+      label: Run note
+      render: text
+  - type: input
+    id: ysz-version
+    attributes:
+      label: ysz version
+  - type: input
+    id: modified
+    attributes:
+      label: Modified checkout
+  - type: input
+    id: os
+    attributes:
+      label: OS
+  - type: input
+    id: node
+    attributes:
+      label: Node
+  - type: input
+    id: docker
+    attributes:
+      label: Docker
+  - type: input
+    id: bd
+    attributes:
+      label: bd
+  - type: input
+    id: gh
+    attributes:
+      label: gh
+  - type: input
+    id: claude
+    attributes:
+      label: Claude
