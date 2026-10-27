@@ -7,6 +7,7 @@ import { muted, openedPrs, play, setMuted, stageCue } from './sound';
 import type { Range } from './stats';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
+import { reportable } from '../src/reportable';
 
 export interface State {
   slots: { used: number; total: number };
@@ -412,6 +413,58 @@ function More({ id, busy, children }: { id: number; busy?: string | null; childr
   );
 }
 
+const BUG_ICON = (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <ellipse cx="8" cy="9.5" rx="3.5" ry="4.5" />
+    <path d="M8 5.5V14M4.5 9.5H2M14 9.5h-2.5M5.5 6 3.5 4M10.5 6l2-2M5 13l-2 1.5M11 13l2 1.5" />
+  </svg>
+);
+
+/**
+ * A bug button opening a popover that walks the reporter through a Bug report: for a Run, step 1 downloads its excerpt
+ * file and step 2 opens the pre-filled form; without a Run, only step 2, for a bug that is in no Run. Plain links to the
+ * server's routes, so nothing is popup-blocked and step 2 does not wait for step 1.
+ */
+function ReportBug({ run }: { run?: RunRow }) {
+  const t = useT();
+  const id = run ? `bug-${run.id}` : 'bug-general';
+  const base = run ? `/api/runs/${run.id}` : '/api';
+  return (
+    <>
+      {run ? (
+        <button className="act" popoverTarget={id} style={{ anchorName: `--${id}` }}>
+          {BUG_ICON}
+          {t.report}
+        </button>
+      ) : (
+        <button className="ghost theme" popoverTarget={id} style={{ anchorName: `--${id}` }} aria-label={t.reportGeneral} title={t.reportGeneral}>
+          {BUG_ICON}
+        </button>
+      )}
+      <div className="more-menu bug-steps" id={id} popover="auto" style={{ positionAnchor: `--${id}` }}>
+        <b>{run ? t.reportRunHeading(run.ticketId) : t.reportGeneralHeading}</b>
+        <span className="mute">{run ? t.reportRunHelp : t.reportGeneralHelp}</span>
+        <ol>
+          {run && (
+            <li>
+              <a className="act" download href={`${base}/bug-report`}>
+                {t.reportDownload(`${run.ticketId}-run${run.id}.log`)}
+              </a>
+            </li>
+          )}
+          <li>
+            <a className="act" href={`${base}/bug-form`} target="_blank" rel="noreferrer">
+              {t.reportOpenForm} <span className="arrow">↗</span>
+            </a>
+            {run && <span className="mute"> {t.reportDragFile}</span>}
+          </li>
+        </ol>
+        <span className="mute">{run ? t.reportRunPublic : t.reportGeneralPublic}</span>
+      </div>
+    </>
+  );
+}
+
 function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
   return (
     <div className="empty">
@@ -694,6 +747,7 @@ export function App() {
             {t.requeue}
           </button>
         )}
+        {reportable(r.state).ok && <ReportBug run={r} />}
         <More id={r.id} busy={busy.has(`/api/runs/${r.id}/cleanup`) ? t.cleaningUp : busy.has(`/api/runs/${r.id}/delete`) ? t.deleting : null}>
           {r.cloneDir && (
             <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
@@ -770,6 +824,7 @@ export function App() {
           </button>
           <SoundToggle />
           <ThemeToggle />
+          <ReportBug />
           <button className="ghost theme" onClick={() => setDemo(sampleState(Date.now()))} aria-label={t.startTour} title={t.startTour}>
             ?
           </button>
@@ -884,6 +939,7 @@ export function App() {
                           </button>
                         )}
                         <span className="grow" />
+                        {reportable(r.state).ok && <ReportBug run={r} />}
                         {r.state === 'needs-attention' && (
                           <button {...pending(r, 'retry', 'primary')} onClick={() => void act(r, 'retry', t.retrying)}>
                             {t.retryHostStep}
