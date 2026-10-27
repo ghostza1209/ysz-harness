@@ -61,7 +61,8 @@ export interface TicketContext {
   ticket: Record<string, unknown>;
   parent: Record<string, unknown> | null;
   closedBlockers: { id: string; title: string; closeReason: string }[];
-  inReviewBlocker: { id: string; title: string; prUrl?: string } | null;
+  /** `branch` is the one its In review Run was cut on, which the Orchestrator fills in; absent, it was `agent/<id>`. */
+  inReviewBlocker: { id: string; title: string; prUrl?: string; branch?: string } | null;
   /** The Project's open Friction in ysz's queue, which an agent refers to by id instead of reporting it as new. The Orchestrator fills it in before each Attempt. */
   openFriction: { id: string; title: string }[];
   /** Only for a Spec: its children, closed ones included, which its breakdown plans around (ADR 0009). */

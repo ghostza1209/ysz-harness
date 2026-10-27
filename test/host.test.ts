@@ -414,6 +414,55 @@ describe('host steps against real git', () => {
     assert.equal((await host.publish(project, ticket('t-e9'), child)).base, 'epic/e-9');
   });
 
+  it('keeps an epic already on origin on its branch there once the epic gains a Jira key', async () => {
+    const other = join(root, 'other-keyed-epic');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'epic/e-9k');
+    commit(other, 'merged-child-k.txt', 'merged');
+    git(other, 'push', '-q', 'origin', 'epic/e-9k');
+
+    const child = await host.prepare(project, 'e-9k.1', { ...context, parent: { id: 'e-9k', labels: ['epic-branch', 'OP-40'] } });
+    assert.deepEqual([child.epic, child.land, child.branch], ['epic/e-9k', undefined, 'OP-40-e-9k.1']);
+    assert.equal(git(join(child.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+
+    git(other, 'switch', '-q', '-c', 'OP-41-e-9o');
+    git(other, 'push', '-q', 'origin', 'OP-41-e-9o');
+    const keyedOnOrigin = await host.prepare(project, 'e-9o.1', { ...context, parent: { id: 'e-9o', labels: ['epic-branch', 'OP-42'] } });
+    assert.deepEqual([keyedOnOrigin.epic, keyedOnOrigin.land], ['OP-41-e-9o', undefined]);
+  });
+
+  it("names the epic branch by the epic's Jira key, keeps it once cut whatever key comes later, and opens the epic's PR from it", async () => {
+    const keyed = (id: string, key?: string) => ({ ...context, parent: { id, labels: ['epic-branch', ...(key ? [key] : [])] } });
+    const first = await host.prepare(project, 'e-k.1', keyed('e-k', 'OP-30'));
+    assert.deepEqual([first.epic, first.land, first.branch], ['OP-30-e-k', true, 'OP-30-e-k.1']);
+    commit(join(first.dir, 'repo'), 'k1.txt', 'k1');
+    const tip = await host.land(project, first);
+    // The Project repo now holds the child's own OP-30-e-k.1 too, which is no branch of epic e-k.
+    const second = await host.prepare(project, 'e-k.2', keyed('e-k', 'OP-31'));
+    assert.deepEqual([second.epic, second.land], ['OP-30-e-k', true]);
+    assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), tip);
+
+    const pr = await withEpicGh('[]', () => host.publishEpic(project, { id: 'e-k', title: 'the epic' }, 'OP-31'));
+    assert.equal(pr.url, 'https://example.test/pull/20');
+    assert.equal(git(origin, 'rev-parse', 'OP-30-e-k'), tip);
+    assert.deepEqual(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').slice(2, 4), ['--head', 'OP-30-e-k']);
+
+    const unkeyed = await host.prepare(project, 'e-g.1', keyed('e-g'));
+    assert.equal(unkeyed.epic, 'epic/e-g');
+    commit(join(unkeyed.dir, 'repo'), 'g1.txt', 'g1');
+    await host.land(project, unkeyed);
+    assert.equal((await host.prepare(project, 'e-g.2', keyed('e-g', 'OP-32'))).epic, 'epic/e-g');
+    await withEpicGh('[]', () => host.publishEpic(project, { id: 'e-g', title: 'keyed late' }, 'OP-32'));
+    assert.deepEqual(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').slice(2, 4), ['--head', 'epic/e-g']);
+  });
+
+  it('refuses to clone a child of an epic that has two branches, rather than pick one', async () => {
+    const develop = git(repo, 'rev-parse', 'develop');
+    git(repo, 'branch', 'epic/e-two', develop);
+    git(repo, 'branch', 'OP-50-e-two', develop);
+    await assert.rejects(host.prepare(project, 'e-two.1', epicChild('e-two')), /epic e-two has more than one branch: .*epic\/e-two.*OP-50-e-two|OP-50-e-two.*epic\/e-two/);
+  });
+
   it("names the epic branch with the Project's prefix, and keeps a Ticket whose parent lacks the label on baseBranch", async () => {
     const custom = await host.prepare({ ...project, epicBranchPrefix: 'train/' }, 't-e3', epicChild('e-2'));
     assert.equal(custom.epic, 'train/e-2');
@@ -529,6 +578,30 @@ describe('host steps against real git', () => {
     }
     assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'feat(api): OP-7 run the checks');
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
+  });
+
+  it("names the branch by the Ticket's Jira key, its own or else its parent's, and pushes it under that name (ADR 0010)", async () => {
+    const own = await host.prepare(project, 't-k1', { ...context, ticket: { id: 't-k1', external_ref: 'jira-OP-7' }, parent: { id: 't-kp', labels: ['OP-9'] } });
+    assert.equal(own.branch, 'OP-7-t-k1');
+    assert.equal(git(join(own.dir, 'repo'), 'branch', '--show-current'), 'OP-7-t-k1');
+    commit(join(own.dir, 'repo'), 'k1.txt', 'k1');
+    await host.publish(project, ticket('t-k1'), own);
+    assert.equal(git(origin, 'rev-parse', 'OP-7-t-k1'), git(join(own.dir, 'repo'), 'rev-parse', 'HEAD'));
+
+    const inherited = await host.prepare(project, 't-k2', { ...context, ticket: { id: 't-k2' }, parent: { id: 't-kp', labels: ['OP-9'] } });
+    assert.equal(inherited.branch, 'OP-9-t-k2');
+  });
+
+  it('stacks on the branch the context names for its In review blocker', async () => {
+    const other = join(root, 'other-keyed-stack');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'OP-4-t-kb');
+    commit(other, 'keyed-blocker.txt', 'the keyed blocker change');
+    git(other, 'push', '-q', 'origin', 'OP-4-t-kb');
+
+    const prepared = await host.prepare(project, 't-ks', { ...context, inReviewBlocker: { id: 't-kb', title: 'the blocker', prUrl: 'https://example.test/pull/7', branch: 'OP-4-t-kb' } });
+    assert.deepEqual(prepared.stack, { branch: 'OP-4-t-kb', prUrl: 'https://example.test/pull/7' });
+    assert.equal(git(join(prepared.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
   });
 
   it('lists the given Follow-up titles in a ## Follow-ups section at the end of the PR body, and leaves it out when there are none', async () => {

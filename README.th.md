@@ -11,11 +11,11 @@
 ## Run ทำงานอย่างไร
 
 1. ติด label `ready-for-agent` ให้ bead ที่เปิดอยู่ใน repo ของ Project
-2. เมื่อมี slot ว่าง (สูงสุด 1 Run ต่อ Project) ysz จะ claim Ticket และ clone repo ไว้บน branch `agent/<ticket-id>`
+2. เมื่อมี slot ว่าง (สูงสุด 1 Run ต่อ Project) ysz จะ claim Ticket และ clone repo ไว้บน branch `<jira-key>-<ticket-id>` (เช่น `OP-2424-laravel-h5q`) หรือ `agent/<ticket-id>` ถ้าทั้ง Ticket และ parent ไม่มี Jira key ดู [ADR 0010](docs/adr/0010-run-branches-are-named-by-jira-key.md)
 3. **Implement agent** ทำ Ticket ใน sandbox จากนั้น **Review agent** รีวิวและแก้งาน ถ้า Attempt แรกล้มจะลองใหม่อีกครั้งเดียว
 4. ฝั่ง host push branch แล้วเปิด PR เข้า `baseBranch` ของ Project ตัว bead จะได้คอมเมนต์ลิงก์ PR และ label `in-review`
-   Ticket ที่ blocker ตัวเดียวที่ยังไม่ปิดอยู่ใน `In review` ไม่ต้องรอ merge: Run จะ clone จาก branch `agent/<id>` ของ blocker แล้วเปิด stacked PR ต่อบน branch นั้น (`gh stack link` ต้องติดตั้ง extension `gh-stack`) ดู [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md)
-   Ticket ที่ epic แม่ติด label `epic-branch` จะ clone จาก `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) ใน repo ของ Project แทน และไม่มี PR ของตัวเอง แต่จะ land ลง branch นั้น คือ branch ถูก fast-forward แล้ว bead ปิด เมื่อ child ปิดครบ ysz จะ push branch แล้วเปิด PR เดียวของ epic เข้า `baseBranch` และปิด epic ให้เมื่อ PR นั้น merge ดู [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md) ส่วน epic ที่มี branch บน origin อยู่แล้วยังใช้ child PR ตาม [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
+   Ticket ที่ blocker ตัวเดียวที่ยังไม่ปิดอยู่ใน `In review` ไม่ต้องรอ merge: Run จะ clone จาก branch ของ blocker แล้วเปิด stacked PR ต่อบน branch นั้น (`gh stack link` ต้องติดตั้ง extension `gh-stack`) ดู [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md)
+   Ticket ที่ epic แม่ติด label `epic-branch` จะ clone จาก `<jira-key>-<epic-id>` หรือ `epic/<epic-id>` (ตาม `epicBranchPrefix` ของ Project) ถ้า epic ไม่มี Jira key ใน repo ของ Project แทน และไม่มี PR ของตัวเอง แต่จะ land ลง branch นั้น คือ branch ถูก fast-forward แล้ว bead ปิด เมื่อ child ปิดครบ ysz จะ push branch แล้วเปิด PR เดียวของ epic เข้า `baseBranch` และปิด epic ให้เมื่อ PR นั้น merge ดู [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md) ส่วน epic ที่มี branch บน origin อยู่แล้วยังใช้ child PR ตาม [ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)
 5. ถ้า agent ต้องการข้อมูลเพิ่ม bead จะถูกส่งคืนพร้อมคอมเมนต์คำถามและ label `needs-info`
 
 epic ที่ติด label `ready-for-agent` เรียกว่า **Spec** Run ของ Spec ไม่มี Review agent และไม่เปิด PR: breakdown agent จะแตก Spec เป็น child Ticket แล้ว ysz สร้างไว้ใต้ epic โดยติด `ready-for-agent` ให้เลย Ticket เหล่านี้จะเข้าคิวใน poll ถัดไป และ ysz จะเอา label ออกจาก epic ถ้าแก้ Spec ที่แตกไปแล้ว ให้ติด label ใหม่ การแตกรอบนั้นจะวางแผนเฉพาะส่วนที่ child ยังไม่ครอบคลุม ดู [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md) และ [ADR 0009](docs/adr/0009-a-changed-spec-is-broken-down-again-when-relabelled.md)
@@ -55,7 +55,7 @@ npm start          # build Dashboard แล้วเริ่ม ysz (PORT ค�
 | กัน Ticket ไม่ให้ ysz หยิบ | กด **Skip ysz** ที่แถวของ Ticket ในแท็บ Backlog (หรือ `bd update <id> --add-label orchestrator:skip`) |
 | ให้ Ticket ที่ Mark Ready แล้วแต่มีคน assign อยู่เข้าคิว | กด **Unassign** ที่แถวของ Ticket ในแท็บ Backlog: ล้าง assignee และคืน claim ของคุณเองเป็น open ส่วน claim ที่คนอื่นถืออยู่ bd จะไม่ยอม (หรือ `bd update <id> --assignee "" --status open`) |
 | ให้ ysz แตก Spec เป็น Ticket | `bd update <epic-id> --add-label ready-for-agent` บน epic เมื่อ Spec เขียนเสร็จแล้ว และติดใหม่อีกครั้งหลังแก้ Spec |
-| ได้ PR เดียวสำหรับทั้ง epic | `bd update <epic-id> --add-label epic-branch` ก่อน child เริ่มรัน แล้ว ysz จะเปิด PR `epic/<epic-id>` → `baseBranch` ให้เมื่อ child ปิดครบ |
+| ได้ PR เดียวสำหรับทั้ง epic | `bd update <epic-id> --add-label epic-branch` ก่อน child เริ่มรัน แล้ว ysz จะเปิด PR จาก branch ของ epic → `baseBranch` ให้เมื่อ child ปิดครบ |
 | หยุดหยิบงานจาก Project | คลิกปุ่มชื่อ Project ด้านบนของ Dashboard (คลิกอีกครั้งเพื่อทำต่อ) |
 | หยุด Run ที่กำลังทำ | กด **Kill** บนการ์ด Ticket จะได้ label `orchestrator:skip` |
 | ทำต่อ Run ที่ค้างที่ host step | กด **Retry host step** บนการ์ด |

@@ -32,10 +32,11 @@ export interface HostSteps {
   /** Run the Project's preflight command in its repo. Throws if it fails or times out; passes when the Project has none. */
   preflight(project: Project): Promise<void>;
   /**
-   * A fresh clone on `agent/<ticket-id>` with the Ticket context in place, at the just-fetched origin/<baseBranch>,
-   * at the In review blocker's `agent/<id>` when the context names one with its PR, or else at the epic branch when the
-   * parent epic is labelled `epic-branch`. An epic branch on origin (ADR 0006) is fetched; one origin lacks is the
-   * Project repo's own (ADR 0008), cut from origin/<baseBranch> if missing, and the Run lands on it: then a stack throws.
+   * A fresh clone on the Ticket's branch (`ticketBranch`) with the Ticket context in place, at the just-fetched
+   * origin/<baseBranch>, at the In review blocker's branch when the context names one with its PR, or else at the epic
+   * branch (`epicBranch`) when the parent epic is labelled `epic-branch`. An epic branch on origin (ADR 0006) is fetched;
+   * one origin lacks is the Project repo's own (ADR 0008), cut from origin/<baseBranch> if missing, and the Run lands on
+   * it: then a stack throws.
    */
   prepare(project: Project, ticketId: string, context: TicketContext, signal?: AbortSignal): Promise<Prepared>;
   /**
@@ -237,12 +238,32 @@ export function prTitleAndBody(output: string, key: string, ticketTitle: string)
 /** The branch a Run's clone was made on, which its PR targets. */
 const onto = (project: Project, prepared: Prepared) => prepared.stack?.branch ?? prepared.epic ?? project.baseBranch;
 
-/** ADR 0006: the branch the children of an epic labelled `epic-branch` share. */
-export const epicBranchOf = (project: Project, epicId: string) => `${project.epicBranchPrefix ?? 'epic/'}${epicId}`;
+/** ADR 0010: the branch a Ticket or epic named by `key` (see `ticketKey`) is cut on: `<key>-<id>`, or `unkeyed` without a Jira key. */
+const keyedBranch = (id: string, key: string, unkeyed = `agent/${id}`) => (key === id ? unkeyed : `${key}-${id}`);
 
-function epicBranch(project: Project, { parent }: TicketContext): string | undefined {
-  const labels = parent?.labels;
-  if (Array.isArray(labels) && labels.includes('epic-branch')) return epicBranchOf(project, String(parent!.id));
+/** ADR 0006: the branch the children of an epic labelled `epic-branch` share, when the epic has no Jira key. */
+const epicBranchOf = (project: Project, epicId: string) => `${project.epicBranchPrefix ?? 'epic/'}${epicId}`;
+
+/** ADR 0010: whether `branch` is a name epic `epicId`'s branch may have been cut under: `<key>-<id>` for any Jira key, or the Project's prefix and id. */
+export function isEpicBranch(project: Project, epicId: string, branch: string): boolean {
+  const id = epicId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return branch === epicBranchOf(project, epicId) || new RegExp(`^${JIRA_KEY.source.slice(1, -1)}-${id}$`).test(branch);
+}
+
+/**
+ * ADR 0010: the branch epic `epicId` was cut on, in the Project repo or on origin, else `fresh`: a branch keeps its name
+ * once cut, whatever Jira key the epic gets later. Throws when the epic has two. `onOrigin` tells ADR 0006's from 0008's.
+ */
+async function epicBranch(project: Project, epicId: string, fresh: string, text: ReturnType<typeof within>['text']): Promise<{ branch: string; onOrigin: boolean }> {
+  const repo = project.repoPath;
+  const local = (await text('git', ['for-each-ref', '--format=%(refname:lstrip=2)', `refs/heads/${epicBranchOf(project, epicId)}`, `refs/heads/*-${epicId}`], repo)).split('\n');
+  const remote = (await text('git', ['ls-remote', '--heads', 'origin', epicBranchOf(project, epicId), `*-${epicId}`], repo))
+    .split('\n')
+    .map((line) => line.replace(/^\S+\trefs\/heads\//, ''));
+  const found = [...new Set([...local, ...remote])].filter((branch) => isEpicBranch(project, epicId, branch));
+  if (found.length > 1) throw new Error(`epic ${epicId} has more than one branch: ${found.join(', ')}`);
+  const branch = found[0] ?? fresh;
+  return { branch, onOrigin: remote.includes(branch) };
 }
 
 /** Refuse commits that must never leave the clone: none at all, the Ticket file, or a copyToWorktree secret. */
@@ -311,13 +332,19 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const { run, text } = within(signal);
       const repo = project.repoPath;
       const blocker = context.inReviewBlocker;
-      const stack = blocker?.prUrl ? { branch: `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
-      const epic = epicBranch(project, context);
+      // A blocker whose Run predates its recorded branch was cut on agent/<id>.
+      const stack = blocker?.prUrl ? { branch: blocker.branch ?? `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
+      const { parent } = context;
+      const epicId = Array.isArray(parent?.labels) && parent.labels.includes('epic-branch') ? String(parent.id) : undefined;
+      const epicKey = epicId && ticketKey(epicId, { ...context, ticket: parent!, parent: null });
+      const epicCut = epicId ? await epicBranch(project, epicId, keyedBranch(epicId, epicKey!, epicBranchOf(project, epicId)), text) : undefined;
+      const epic = epicCut?.branch;
       // An epic already on origin began before ADR 0008, so its children keep opening PRs onto it (ADR 0006).
-      const land = !!epic && !(await text('git', ['ls-remote', '--heads', 'origin', `refs/heads/${epic}`], repo));
+      const land = !!epicCut && !epicCut.onOrigin;
       if (land && stack) throw new Error(`${ticketId} lands on ${epic}, so it cannot stack on ${stack.prUrl}: it waits for that PR to merge`);
       const base = stack?.branch ?? epic ?? project.baseBranch;
-      const branch = `agent/${ticketId}`;
+      const key = ticketKey(ticketId, context);
+      const branch = keyedBranch(ticketId, key);
       const baseRef = land ? `refs/heads/${epic}` : `refs/remotes/origin/${base}`;
 
       if (!land) await run('git', ['fetch', 'origin', base], repo);
@@ -357,7 +384,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
         await rm(dir, { recursive: true, force: true });
         throw err;
       }
-      return { branch, dir, base: sha, key: ticketKey(ticketId, context), ...(stack && { stack }), ...(epic && { epic }), ...(land && { land: true as const }) };
+      return { branch, dir, base: sha, key, ...(stack && { stack }), ...(epic && { epic }), ...(land && { land: true as const }) };
     },
 
     async writeTicket({ dir }, context) {
@@ -436,7 +463,8 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
     async publishEpic(project, epic, key, { reviewSkipped, signal, log: step = () => {} } = {}) {
       const { run, text } = within(signal);
       const repo = project.repoPath;
-      const branch = epicBranchOf(project, epic.id);
+      // No branch at all: an epic begun before ADR 0008 whose merged PR's branch origin has deleted.
+      const { branch } = await epicBranch(project, epic.id, epicBranchOf(project, epic.id), text);
       const base = project.baseBranch;
       const env = await ghEnv(project);
       const local = await text('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], repo).catch(() => '');

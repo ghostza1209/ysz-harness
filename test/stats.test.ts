@@ -4,7 +4,7 @@ import type { BacklogPoint, RunRow } from '../src/store';
 import { agentTimes, backlogOverTime, daysOf, firstAttemptPass, footprintByRole, footprintCsv, mergeRate, outcomeOf, reviewWaits, runsPerDay, tokensPerDay, waitingNow } from '../web/stats';
 
 const run = (over: Partial<RunRow>): RunRow => ({
-  id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, prBase: null, note: null,
+  id: 1, project: 'a', ticketId: 't', title: 't', state: 'merged', attempt: 1, prUrl: null, branch: null, prBase: null, note: null,
   startedAt: 0, endedAt: null, cloneDir: null, cloneBytes: null, archivedAt: null, model: null, usage: {}, footprint: {}, prClosedAt: null, reports: null, ...over,
 });
 /** Local time on a day of October 2026. */

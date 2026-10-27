@@ -1,5 +1,5 @@
 import type { BacklogRow, BeadsGateway, Ticket, TicketContext, TicketDetail } from './beads';
-import { epicBranchOf, ticketKey, type HostSteps, type Prepared } from './host';
+import { isEpicBranch, ticketKey, type HostSteps, type Prepared } from './host';
 import type { Project } from './projects';
 import type { AgentReports, AgentResult, SandboxRunner } from './sandbox';
 import type { AgentUsage, BacklogPoint, Footprint, Reports, RunRow, RunState, Store } from './store';
@@ -390,22 +390,24 @@ export function createOrchestrator(deps: {
       }
       if (ticket.epicPr) {
         // ADR 0008: no Attempt, only the host steps. The PR body owns up to each child that landed unreviewed.
-        const branch = epicBranchOf(project, ticket.id);
-        const skipped = store.allRuns().filter((r) => r.project === project.name && r.state === 'landed' && r.prBase === branch && r.note);
+        const skipped = store.allRuns().filter((r) => r.project === project.name && r.state === 'landed' && r.prBase && isEpicBranch(project, ticket.id, r.prBase) && r.note);
         const reviewSkipped = skipped.map((r) => `${r.ticketId}: ${r.note!.replace(/^review skipped: /, '')}`).join('; ') || undefined;
         await finish(runId, control, { project, ticket, epicKey: ticketKey(ticket.id, context), reviewSkipped, followUps: [], prUrl: null });
         return;
       }
-      // A closed blocker whose PR merged into another Run's agent/<id> branch, while that Run's own PR was still In review,
+      // A closed blocker whose PR merged into another Run's branch, while that Run's own PR was still In review,
       // has its code only on that branch, so the Run stacks there too. Follow Runs that merged into one that merged in turn.
-      const newest = new Map(store.allRuns().filter((r) => r.project === project.name).map((r) => [r.ticketId, r]));
+      const runs = store.allRuns().filter((r) => r.project === project.name);
+      const newest = new Map(runs.map((r) => [r.ticketId, r]));
+      // A Run from before its branch was recorded was cut on agent/<id>; for those, the Ticket's newest Run holds it.
+      const cutOn = new Map(runs.map((r) => [r.branch ?? `agent/${r.ticketId}`, r]));
       const holders = new Map<string, RunRow>();
       for (const { id } of context.closedBlockers) {
         const seen = new Set<string>();
         let run = newest.get(id);
-        while (run?.state === 'merged' && run.prBase?.startsWith('agent/') && !seen.has(run.ticketId)) {
+        while (run?.state === 'merged' && run.prBase && cutOn.has(run.prBase) && !seen.has(run.ticketId)) {
           seen.add(run.ticketId);
-          const onto = newest.get(run.prBase.slice('agent/'.length));
+          const onto = cutOn.get(run.prBase);
           // GitHub retargets a PR only when its base branch is deleted, so one merged after that branch's own PR lands where nothing merges on.
           if (onto?.state === 'merged' && run.prClosedAt && onto.prClosedAt && run.prClosedAt > onto.prClosedAt) {
             throw new Error(`${run.ticketId} merged into ${run.prBase} after ${onto.ticketId} had merged, so its code is on no branch to start from`);
@@ -422,11 +424,12 @@ export function createOrchestrator(deps: {
         context.inReviewBlocker = { id: run.ticketId, title: run.title, prUrl: run.prUrl! };
       }
       const blocker = context.inReviewBlocker;
-      if (blocker && !blocker.prUrl) {
-        // The Run stacks on the blocker's PR, which only its In review Run knows.
-        const prUrl = store.inReview().find((r) => r.project === project.name && r.ticketId === blocker.id)?.prUrl;
+      if (blocker) {
+        // The Run stacks on the blocker's PR and branch, which only its In review Run knows.
+        const held = store.inReview().find((r) => r.project === project.name && r.ticketId === blocker.id);
+        const prUrl = blocker.prUrl ?? held?.prUrl;
         if (!prUrl) throw new Error(`blocker ${blocker.id} is In review, but no In review Run has its PR to stack on`);
-        context.inReviewBlocker = { ...blocker, prUrl };
+        context.inReviewBlocker = { ...blocker, prUrl, ...(held?.branch && { branch: held.branch }) };
       }
 
       /** What the Run's agents reported so far, across Attempts. */
@@ -476,7 +479,7 @@ export function createOrchestrator(deps: {
         });
         signal.throwIfAborted();
         const prepared = await host.prepare(project, ticket.id, { ...context, openFriction }, signal);
-        store.updateRun(runId, { cloneDir: prepared.dir }); // even if killed meanwhile: Clean up must find the clone
+        store.updateRun(runId, { cloneDir: prepared.dir, branch: prepared.branch }); // even if killed meanwhile: Clean up must find the clone
         const req = { project, runId, attempt: n, signal, ...prepared };
         const usage = (role: string) => (u: AgentUsage) => store.setUsage(runId, `attempt${n}-${role}`, u);
         store.updateRun(runId, { state: 'agent' });

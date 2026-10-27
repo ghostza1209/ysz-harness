@@ -37,6 +37,8 @@ export interface RunRow {
   /** Attempts started so far: 0 until the agent starts. */
   attempt: number;
   prUrl: string | null;
+  /** ADR 0010: the branch the Run's clone was cut on, which its PR is opened from. Null before its clone, for a Spec's or an epic's PR Run, and for Runs from before it was recorded: those were cut on `agent/<ticket-id>`. */
+  branch: string | null;
   /** The branch the PR targets when it is not the Project's baseBranch: an epic branch or a stacked-on blocker's. Null otherwise, and for Runs from before it was recorded. */
   prBase: string | null;
   /** Why a Run failed. */
@@ -67,10 +69,10 @@ export interface Reports {
   friction: { id: string; title: string; seenAgain: boolean }[];
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'branch' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', branch: 'branch', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
 };
 
 /** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
@@ -171,6 +173,9 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 11) {
     db.exec('ALTER TABLE runs ADD COLUMN footprint TEXT; PRAGMA user_version = 11');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 12) {
+    db.exec('ALTER TABLE runs ADD COLUMN branch TEXT; PRAGMA user_version = 12');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
@@ -200,6 +205,7 @@ export function openStore(path: string): Store {
     state: r.state as RunState,
     attempt: r.attempt as number,
     prUrl: r.pr_url as string | null,
+    branch: r.branch as string | null,
     prBase: r.pr_base as string | null,
     note: r.note as string | null,
     startedAt: r.started_at as number,

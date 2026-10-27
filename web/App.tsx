@@ -644,7 +644,7 @@ export function App() {
           {!inEpic && <span className="tag">{r.project}</span>}
           <Copy text={r.ticketId} />
           {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
-          {r.prBase && !(inEpic && r.prBase === `epic/${epicOf(r.ticketId)}`) && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
+          {r.prBase && !(inEpic && [`/${epicOf(r.ticketId)}`, `-${epicOf(r.ticketId)}`].some((end) => r.prBase!.endsWith(end))) && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
         </div>
         <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
           {r.title}
@@ -864,8 +864,7 @@ export function App() {
                       <div className="title">{r.title}</div>
                       <Stages state={r.state} />
                       <div className="row where">
-                        {/* Branch name as HostSteps.prepare in host.ts makes it. */}
-                        <Copy text={`agent/${r.ticketId}`} />
+                        {r.branch && <Copy text={r.branch} />}
                         {r.cloneDir ? <Copy text={r.cloneDir} /> : <span className="mute">{t.cloning}</span>}
                       </div>
                       <div className="mute">

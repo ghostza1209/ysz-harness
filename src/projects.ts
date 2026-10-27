@@ -5,7 +5,7 @@ export interface Project {
   name: string;
   repoPath: string;
   baseBranch: string;
-  /** ADR 0006: the children of an epic labelled `epic-branch` open their PRs onto `<prefix><epic-id>`. Default `epic/`. */
+  /** ADR 0006: the branch the children of an epic labelled `epic-branch` share is `<prefix><epic-id>` when the epic has no Jira key (ADR 0010). Default `epic/`. */
   epicBranchPrefix?: string;
   /** Sandbox image (built by `npm run images`). A Project without one is not onboarded: its Tickets are never claimed. */
   image?: string;

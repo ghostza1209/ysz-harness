@@ -107,6 +107,8 @@ let failingPreflights: Set<string>;
 let preflights: string[];
 /** Whether prepare makes clones that land on epic/e-1 (ADR 0008), and the error the next land fails with. */
 let landing: boolean;
+/** The branch prepare cuts for a Ticket. */
+let branchFor: (ticketId: string) => string;
 let landError: Error | undefined;
 /** The fields showContext adds to each Ticket's bead, by id. */
 let beadFields: Record<string, Record<string, unknown>>;
@@ -280,7 +282,7 @@ const fakeHost: HostSteps = {
     preparedContexts.push(context);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId, ...(landing && { epic: 'epic/e-1', land: true as const }) };
+    return { branch: branchFor(ticketId), dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId, ...(landing && { epic: 'epic/e-1', land: true as const }) };
   },
   async writeTicket(_prepared, context) {
     if (writeTicketError) throw writeTicketError;
@@ -388,6 +390,7 @@ beforeEach(() => {
   failingPreflights = new Set();
   preflights = [];
   landing = false;
+  branchFor = (ticketId) => `agent/${ticketId}`;
   landError = undefined;
   beadFields = {};
   clonesOnDisk = [];
@@ -786,6 +789,15 @@ describe('infrastructure gates', () => {
 });
 
 describe('a happy-path Run', () => {
+  it('records the branch prepare cut on the Run', async () => {
+    branchFor = (ticketId) => `OP-1-${ticketId}`;
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.branch]), [['tv1', 'OP-1-tv1']]);
+  });
+
   it('ends in-review: pushes via the host, marks the bead in review, removes the clone', async () => {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -959,28 +971,28 @@ describe('a Spec', () => {
 });
 
 describe('a Run stacked on an In review blocker', () => {
-  const inReviewRun = (project: string, ticketId: string, prUrl: string) =>
-    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl });
+  const inReviewRun = (project: string, ticketId: string, prUrl: string, branch: string | null = null) =>
+    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl, branch });
 
-  it("hands prepare the blocker with its Project's In review PR", async () => {
-    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1');
-    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+  it("hands prepare the blocker with its Project's In review PR and the branch that Run was cut on", async () => {
+    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1', 'OP-1-tv0');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2', 'OP-2-tv0');
     inReviewBlocker = { id: 'tv0', title: 'the blocker' };
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
     await o.whenIdle();
-    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2' });
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2', branch: 'OP-2-tv0' });
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
   });
 
   it("stacks on the In review branch a closed blocker's PR merged into, which alone holds its code", async () => {
     // thaivis app-2bl: .16 stacked on .13 and merged into agent/app-2bl.13 while .13's own PR was still In review.
-    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975');
+    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975', 'OP-3-tv13');
     inReviewBlocker = { id: 'tv13', title: 'the blocker' };
     queues = { thaivis: [ticket('tv16', 2, '2026-01-01T00:00:00Z')] };
     publish = async () => 'https://example.test/thaivis/pull/1979';
-    publishBase = 'agent/tv13';
+    publishBase = 'OP-3-tv13';
     const o = await polled();
     await o.tick();
     await o.whenIdle();
@@ -993,7 +1005,7 @@ describe('a Run stacked on an In review blocker', () => {
     await o.poll();
     await o.tick();
     await o.whenIdle();
-    assert.deepEqual(preparedContexts[1].inReviewBlocker, { id: 'tv13', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/1975' });
+    assert.deepEqual(preparedContexts[1].inReviewBlocker, { id: 'tv13', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/1975', branch: 'OP-3-tv13' });
   });
 
   const mergedRun = (ticketId: string, prBase: string, prClosedAt: number | null = null) =>
@@ -1737,12 +1749,14 @@ describe('an epic on its own branch (ADR 0008)', () => {
     landedRun('e-1.2', 'epic/e-1', null);
     landedRun('e-2.1', 'epic/e-2', 'review skipped: elsewhere');
     landedRun('e-1.3', 'epic/e-1', 'review skipped: the review agent stopped without signalling COMPLETE');
+    landedRun('e-1.4', 'OP-9-e-1', 'review skipped: cut under its Jira key');
+    landedRun('e-10.1', 'OP-9-e-10', 'review skipped: another epic');
     queues = { thaivis: [epicPr('e-1')] };
     const o = await polled();
     await o.tick();
     await o.whenIdle();
 
-    assert.deepEqual(hostSteps, ['publishEpic e-1 as e-1, review skipped: e-1.1: the review agent failed: boom; e-1.3: the review agent stopped without signalling COMPLETE']);
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as e-1, review skipped: e-1.1: the review agent failed: boom; e-1.3: the review agent stopped without signalling COMPLETE; e-1.4: cut under its Jira key']);
   });
 
   it("resumes an epic's PR after a restart without a clone, and parks it when it fails again", async () => {

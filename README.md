@@ -11,11 +11,11 @@
 ## How a Run works
 
 1. You label an open bead `ready-for-agent` in a Project's repo.
-2. When a slot is free (at most one Run per Project), ysz claims the Ticket and clones the repo on `agent/<ticket-id>`.
+2. When a slot is free (at most one Run per Project), ysz claims the Ticket and clones the repo on `<jira-key>-<ticket-id>` (e.g. `OP-2424-laravel-h5q`), or `agent/<ticket-id>` when neither the Ticket nor its parent has a Jira key. See [ADR 0010](docs/adr/0010-run-branches-are-named-by-jira-key.md).
 3. The **Implement agent** works the Ticket in a sandbox; the **Review agent** then reviews and corrects it. A failed Attempt is retried once.
 4. The host pushes the branch and opens a PR against the Project's `baseBranch`. The bead gets a comment with the link and the `in-review` label.
-   A Ticket whose only unclosed blocker is `In review` does not wait for that merge: its Run clones the blocker's `agent/<id>` branch and opens a stacked PR onto it (`gh stack link`, needs the `gh-stack` extension). See [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md).
-   A Ticket whose parent epic is labelled `epic-branch` clones `epic/<epic-id>` (the Project's `epicBranchPrefix`) in the Project repo instead and, with no PR of its own, lands on it: the branch fast-forwards and the bead closes. Once every child is closed, ysz pushes the branch and opens the epic's one PR onto `baseBranch`, then closes the epic when it merges. See [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md); an epic already on origin keeps child PRs ([ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)).
+   A Ticket whose only unclosed blocker is `In review` does not wait for that merge: its Run clones the blocker's branch and opens a stacked PR onto it (`gh stack link`, needs the `gh-stack` extension). See [ADR 0005](docs/adr/0005-in-review-unblocks-dependents-as-stacked-prs.md).
+   A Ticket whose parent epic is labelled `epic-branch` clones `<jira-key>-<epic-id>`, or `epic/<epic-id>` (the Project's `epicBranchPrefix`) when the epic has no Jira key, in the Project repo instead and, with no PR of its own, lands on it: the branch fast-forwards and the bead closes. Once every child is closed, ysz pushes the branch and opens the epic's one PR onto `baseBranch`, then closes the epic when it merges. See [ADR 0008](docs/adr/0008-epic-children-land-on-a-local-epic-branch.md); an epic already on origin keeps child PRs ([ADR 0006](docs/adr/0006-epic-branch-collects-an-epics-prs.md)).
 5. If the agent needs information, the bead is handed back with a comment and the `needs-info` label.
 
 An epic labelled `ready-for-agent` is a **Spec**. Its Run has no Review agent and no PR: a breakdown agent splits it into child Tickets, which ysz creates under the epic already labelled `ready-for-agent`. They join the queue on the next poll, and ysz takes the label off the epic. After changing a broken-down Spec, label it again: the breakdown plans only what its children do not cover yet. See [ADR 0007](docs/adr/0007-ysz-breaks-a-childless-spec-down.md) and [ADR 0009](docs/adr/0009-a-changed-spec-is-broken-down-again-when-relabelled.md).
@@ -55,7 +55,7 @@ Open the URL it prints (`http://localhost:4000/?token=…`). The token is kept i
 | Keep a Ticket away from ysz | **Skip ysz** on its row in the Backlog tab (or `bd update <id> --add-label orchestrator:skip`) |
 | Queue a Marked Ready Ticket someone is assigned | **Unassign** on its row in the Backlog tab: clears the assignee and puts your own claim back to open; bd refuses someone else's live claim (or `bd update <id> --assignee "" --status open`) |
 | Have ysz split a Spec into Tickets | `bd update <epic-id> --add-label ready-for-agent` on an epic once the Spec is final, and again after changing it |
-| Get one PR for a whole epic | `bd update <epic-id> --add-label epic-branch` before its children run; ysz opens `epic/<epic-id>` → `baseBranch` once they are all closed |
+| Get one PR for a whole epic | `bd update <epic-id> --add-label epic-branch` before its children run; ysz opens the epic's branch → `baseBranch` once they are all closed |
 | Stop picking from a Project | Click the Project's pill at the top of the Dashboard (click again to resume) |
 | Stop a live Run | **Kill** on its card: the Ticket gets `orchestrator:skip` |
 | Resume a Run stuck in a host step | **Retry host step** on its card |
