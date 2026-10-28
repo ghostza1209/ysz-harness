@@ -26,6 +26,22 @@ const press = (fn: () => void) => ({
 const TABS = [...STATES, 'all'] as const;
 type Tab = (typeof TABS)[number];
 
+/** Where the filters are remembered, so they survive a trip to another page. */
+const FILTERS_KEY = 'backlogFilters';
+type Filters = { tab: Tab; query: string; picked: string[] };
+function savedFilters(): Filters {
+  try {
+    const f = JSON.parse(localStorage.getItem(FILTERS_KEY) ?? '{}');
+    return {
+      tab: TABS.includes(f.tab) ? f.tab : 'all',
+      query: typeof f.query === 'string' ? f.query : '',
+      picked: Array.isArray(f.picked) ? f.picked : [],
+    };
+  } catch {
+    return { tab: 'all', query: '', picked: [] };
+  }
+}
+
 /** Re-renders once a second, so the data ages tick. */
 function useNow() {
   const [now, setNow] = useState(Date.now());
@@ -241,9 +257,15 @@ function GroupHead({ t, project, header, closedId, count, toggle, open }: { t: D
 function Backlog({ t, stages, refreshMs, post }: { t: Dict; stages: ReadonlyMap<string, string>; refreshMs: number; post: (url: string, done: string) => Promise<void> }) {
   const [data, setData] = useState<BacklogData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('all');
-  const [query, setQuery] = useState('');
-  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
+  const [initial] = useState(savedFilters);
+  const [tab, setTab] = useState<Tab>(initial.tab);
+  const [query, setQuery] = useState(initial.query);
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set(initial.picked));
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILTERS_KEY, JSON.stringify({ tab, query, picked: [...picked] }));
+    } catch {}
+  }, [tab, query, picked]);
   const [open, setOpen] = useState<Open | null>(null);
   const openKey = open && keyOf(open.project, open.id);
   // null keeps the CSS default width.
