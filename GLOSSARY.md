@@ -79,3 +79,5 @@ _Avoid_: feedback, issue, TODO.
 
 **Friction**: Something in ysz or a Project's sandbox that got in an agent's way during a Run: a check that cannot run, a missing tool, a misleading check hint or prompt. It is fixed in ysz, never in the Project's code, so it becomes a Ticket in ysz's own queue, marked with the Project it came from, for the human to triage.
 _Avoid_: feedback, issue, harness gap.
+
+**Bug report**: A report of a bug in ysz itself that the human files on ysz's GitHub repo, from a Run or not. Never a Ticket in any queue: unlike Friction, which an agent records during a Run into ysz's own queue, a Bug report is the human's, made by hand, upstream and public.
