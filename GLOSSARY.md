@@ -23,9 +23,9 @@ _Avoid_: external ref, Jira id.
 **Backlog**: Every Ticket of a Project that is not closed, whether Ready or not. Ready Tickets are part of it.
 _Avoid_: issues, beads list.
 
-**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed except at most one In review, with no children, open or closed, not claimed, and not opted out of ysz.
+**Ready Ticket**: A Ticket the human has marked as fit for an agent to finish alone, whose blockers are all closed, at most one of them with a pull request not merged yet, with no children, open or closed, not claimed, and not opted out of ysz.
 
-**Spec**: An epic the human has marked as fit for an agent, which ysz breaks down into child Tickets, each Ready by construction, instead of opening a PR. ysz picks it like a Ready Ticket once every blocker is closed, and each breakdown plans only what its children, if any, do not cover yet. A breakdown takes the mark off, so after changing a Spec the human marks it again. It stays a Spec after it is broken down. Once its children are all closed, a Spec changed since its last breakdown goes back to the human instead of closing or getting its Epic PR.
+**Spec**: An epic the human has marked as fit for an agent, which ysz breaks down into child Tickets, each Ready by construction, instead of opening a PR. ysz picks it like a Ready Ticket once every blocker is closed, and each breakdown plans only what its children, if any, do not cover yet. An epic whose children the human wrote is not a Spec, whatever it is marked with: ysz never breaks it down, and its mark waits for nothing. A breakdown takes the mark off, so after changing a Spec the human marks it again. It stays a Spec after it is broken down. Once its children are all closed, a Spec changed since its last breakdown goes back to the human instead of closing or getting its Epic PR.
 _Avoid_: PRD, plan, top-up, re-break.
 
 **ysz**: The single central service that chooses which Ready Ticket from which Project to work on next and launches agents for it.
@@ -53,16 +53,22 @@ _Avoid_: UI, web app.
 **Stats**: The Dashboard's page of graphs about past Runs, from archived ones too, and how each Project's Backlog and Ready Tickets grew and shrank over time.
 _Avoid_: statistics, analytics, report.
 
-**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
+**In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then or until the Run is Cleared. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
-**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, and so is its parent once every child of it is closed, if the parent is not an epic on its own branch and is either a Spec ysz has broken down or a non-epic Ticket marked fit for an agent.
+**Pipeline**: The checks GitHub runs on a Run's pull request. It has failed once any of its checks failed or timed out; a cancelled check is not finished yet, and a skipped or neutral one passed.
+_Avoid_: CI, check (alone: Smoke check, Check service and Check hint are about the sandbox).
+
+**Cleared**: An In review Run whose Pipeline has not failed: it finished without a failure, or none showed up within a short time of the pull request opening. Its Ticket is then closed before the human merges, and so is its parent as for Merged. The Run stays In review. A Pipeline that fails afterwards puts the Ticket back In review, with a parent it closed, and the Run is Cleared again once the Pipeline passes.
+_Avoid_: passed, done.
+
+**Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, if the Run was not Cleared already, and so is its parent once every child of it is closed, if the parent is not an epic on its own branch and is either a Spec ysz has broken down, or a Ticket marked fit for an agent that is not a Spec (a non-epic one, or an epic whose children the human wrote).
 
 **Landed**: A Run's end once ysz has put its Ticket's work on the branch of its parent epic, an epic on its own branch, with no pull request of its own. The Ticket is then closed, and the human first sees that work in the Epic PR.
 _Avoid_: merged (for this)
 
 **Epic PR**: The one pull request an epic on its own branch gets onto the base branch. Once every child of the epic is closed, ysz picks the epic like a Ready Ticket and opens it in a Run with no Attempt. The epic closes when it is Merged.
 
-**PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again.
+**PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again, even if the Run was Cleared and the Ticket closed.
 _Avoid_: closed, rejected.
 
 **Review wait**: How long a Run spends In review before it is Merged or PR closed: the human's time, never the Review agent's.

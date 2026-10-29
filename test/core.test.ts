@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import type { BacklogRow, BeadsGateway, PlannedTicket, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
-import type { HostSteps } from '../src/host';
+import type { HostSteps, Pipeline } from '../src/host';
 import type { Project } from '../src/projects';
 import type { AgentResult, SandboxRunner } from '../src/sandbox';
 import { openStore, type RunState, type Store } from '../src/store';
@@ -42,6 +42,9 @@ let failError: Error | undefined;
 let prepareError: Error | undefined;
 /** What gh reports for each PR url, or the error it fails with; beads the human changed by hand ("project/id"), and the error the next PR-outcome bead write fails with. */
 let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
+/** How each PR's Pipeline stands (pending when unset) and when it opened (long ago when unset). */
+let pipelines: Record<string, Pipeline>;
+let prOpenedAt: Record<string, number>;
 let touchedByHand: Set<string>;
 let outcomeError: Error | undefined;
 /** Each live Run's "<state> <attempt>" as every prepare starts. */
@@ -195,6 +198,18 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     if (markError) throw markError;
     writes.push(`markInReview ${project.name}/${id} ${prUrl}`);
   },
+  async cleared(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`cleared ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async uncleared(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`uncleared ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
   async merged(project, id, prUrl) {
     if (outcomeError) throw outcomeError;
     if (touchedByHand.has(`${project.name}/${id}`)) return false;
@@ -325,7 +340,7 @@ const fakeHost: HostSteps = {
   async prState(_project, prUrl) {
     const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
     if (state instanceof Error) throw state;
-    return { state, closedAt: state === 'OPEN' ? null : CLOSED_AT };
+    return { state, openedAt: prOpenedAt[prUrl] ?? now - 60 * 60_000, closedAt: state === 'OPEN' ? null : CLOSED_AT, pipeline: pipelines[prUrl] ?? 'pending' };
   },
 };
 
@@ -348,6 +363,8 @@ beforeEach(() => {
   prepareError = undefined;
   preparedWhile = [];
   prStates = {};
+  pipelines = {};
+  prOpenedAt = {};
   touchedByHand = new Set();
   outcomeError = undefined;
   killError = undefined;
@@ -984,6 +1001,28 @@ describe('a Run stacked on an In review blocker', () => {
     await o.whenIdle();
     assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2', branch: 'OP-2-tv0' });
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it('stacks on the PR of a Cleared blocker: closed, with its code only on its own branch', async () => {
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2', 'OP-2-tv0');
+    closedBlockers = [{ id: 'tv0', title: 'the blocker', closeReason: 'PR open' }];
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2', branch: 'OP-2-tv0' });
+  });
+
+  it('keeps a Ticket from being Ready while two of its blockers have a PR not merged yet, since a PR has one base', async () => {
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    inReviewRun('thaivis', 'tv9', 'https://example.test/thaivis/pull/3');
+    queues = {
+      thaivis: [
+        { ...ticket('two', 2, '2026-01-01T00:00:00Z'), blockedBy: ['tv0', 'tv9'] },
+        { ...ticket('one', 2, '2026-01-01T00:00:01Z'), blockedBy: ['tv0', 'merged-long-ago'] },
+      ],
+    };
+    assert.deepEqual(order(await polled()), ['one']);
   });
 
   it("stacks on the In review branch a closed blocker's PR merged into, which alone holds its code", async () => {
@@ -2925,6 +2964,119 @@ describe('watching in-review PRs', () => {
     assert.deepEqual(writes, []);
     assert.deepEqual(states(o), [['tv1', 'merged', now + 1000, CLOSED_AT]]);
     assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`, '1: Ticket left alone: changed by hand since the PR opened']);
+  });
+
+  describe('Clearing (ADR 0012)', () => {
+    const runStates = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.ticketId, r.state, r.clearedAt === null ? null : 'cleared']);
+
+    it('Clears an In review Run once its Pipeline passed, closing its bead once and keeping the Run In review', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+      assert.deepEqual(runLog, ['1: Cleared: Pipeline passed']);
+    });
+
+    it('does not Clear a Run while its Pipeline is pending or failed', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      const o = await polled();
+      for (const pipeline of ['pending', 'failed'] as const) {
+        pipelines[PR_URL] = pipeline;
+        assert.deepEqual(await o.watchReviews(), []);
+      }
+      assert.deepEqual(writes, []);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+    });
+
+    it('Clears a PR with no check only once it has been open for 2 minutes', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'none';
+      prOpenedAt[PR_URL] = now - 119_000;
+      const o = await polled();
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, []);
+      prOpenedAt[PR_URL] = now - 120_000;
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runLog, ['1: Cleared: no Pipeline']);
+    });
+
+    it('puts a Cleared Run back In review when its Pipeline fails, and Clears it again once the Pipeline passes', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      pipelines[PR_URL] = 'failed';
+      await o.watchReviews();
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+      pipelines[PR_URL] = 'passed';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`, `uncleared thaivis/tv1 ${PR_URL}`, `cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+    });
+
+    it('ends a Cleared Run Merged, or PR closed, as any In review Run, whatever its Pipeline says by then', async () => {
+      const other = 'https://github.com/thaivis/app/pull/8';
+      inReview('tv1', PR_URL);
+      inReview('tv2', other);
+      prStates[PR_URL] = 'OPEN';
+      prStates[other] = 'OPEN';
+      pipelines[PR_URL] = pipelines[other] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      writes.length = 0;
+      prStates[PR_URL] = 'MERGED';
+      prStates[other] = 'CLOSED';
+      pipelines[PR_URL] = pipelines[other] = 'failed';
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`merged thaivis/tv1 ${PR_URL}`, `prClosed thaivis/tv2 ${other}`]);
+    });
+
+    it('keeps a Cleared Run Cleared while its Pipeline reruns', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      pipelines[PR_URL] = 'pending';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+    });
+
+    it('leaves a bead the human changed since the Run was Cleared when its Pipeline fails, and still puts the Run back In review', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      touchedByHand.add('thaivis/tv1');
+      pipelines[PR_URL] = 'failed';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+      assert.deepEqual(runLog.at(-1), '1: Ticket left alone: changed by hand since it was Cleared');
+    });
+
+    it('leaves a bead the human changed since the Run was Cleared, and does not try again', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      touchedByHand.add('thaivis/tv1');
+      const o = await polled();
+      await o.watchReviews();
+      await o.watchReviews();
+      assert.deepEqual(writes, []);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+      assert.deepEqual(runLog, ['1: Cleared: Pipeline passed', '1: Ticket left alone: changed by hand since the PR opened']);
+    });
   });
 
   it('keeps a Run in review when gh fails, and still checks the other Runs', async () => {

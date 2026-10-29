@@ -18,6 +18,8 @@ export interface Ticket {
   createdAt: string;
   /** A Spec: its Run breaks it down into child Tickets instead of implementing it (ADR 0007). */
   spec?: true;
+  /** The ids of the Tickets that block it, closed ones too: the Orchestrator counts those whose PR is not merged yet (ADR 0012). Absent when none. */
+  blockedBy?: string[];
   /** An epic on its own branch whose children are all closed: its Run opens the epic's PR (ADR 0008). */
   epicPr?: true;
 }
@@ -80,9 +82,10 @@ export interface BeadsGateway {
   /**
    * Ready Tickets of one Project: ready-for-agent, not orchestrator:skip, not an epic, unassigned, no children at all,
    * and every blocker closed except at most one In review. Also returns its Backlog rows, from the same bd call.
-   * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, children or
-   * not (ADR 0009). So do epics marked `epicPr`: open, unassigned and labelled epic-branch, not ready-for-agent,
-   * orchestrator:skip or needs-info, with every child closed. A child of an open epic-branch epic never counts an In review
+   * Specs come with them, marked `spec`: open epics labelled ready-for-agent like a Ticket, every blocker closed, with no
+   * children or with a baseline, so one whose children the human wrote is none (ADR 0011). So do epics marked `epicPr`: open,
+   * unassigned and labelled epic-branch, not orchestrator:skip or needs-info, with every child closed, and not
+   * ready-for-agent, unless it has no baseline: then the label waits for no breakdown. A child of an open epic-branch epic never counts an In review
    * blocker as Ready: it lands on the epic branch.
    */
   listReady(project: Project): Promise<{ tickets: Ticket[]; rows: BacklogRow[] }>;
@@ -129,9 +132,21 @@ export interface BeadsGateway {
   /** PR opened: comment its link, then label in-review. The bead stays in_progress, assigned to the Orchestrator. */
   markInReview(project: Project, id: string, prUrl: string): Promise<void>;
   /**
+   * The in-review Ticket's Run is Cleared (ADR 0012): close it with the PR link as the reason, and its parent with it
+   * when that is done (see closeChild). It keeps its in-review label, which marks it as waiting for the merge. false,
+   * writing nothing, when the human changed the bead since (no longer in_progress and the Orchestrator's).
+   */
+  cleared(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
+   * A Cleared Run's Pipeline failed: reopen the parent that closed with the Ticket, then put the Ticket back In review
+   * (in_progress, the Orchestrator's) and comment why. false, writing nothing, when the bead is no longer closed and
+   * labelled in-review.
+   */
+  uncleared(project: Project, id: string, prUrl: string): Promise<boolean>;
+  /**
    * The in-review Ticket's PR merged: drop in-review, then close it with the PR link as the reason, and its parent with it
-   * when that is done (see closeChild). false, writing nothing, when the human changed the bead since (no longer
-   * in_progress and the Orchestrator's).
+   * when that is done (see closeChild). A Cleared Ticket is closed already: it only loses in-review. false, writing
+   * nothing, when the human changed the bead since (no longer in_progress and the Orchestrator's, nor closed and in-review).
    */
   merged(project: Project, id: string, prUrl: string): Promise<boolean>;
   /**
@@ -141,7 +156,8 @@ export interface BeadsGateway {
   landed(project: Project, id: string, branch: string, tip: string): Promise<boolean>;
   /**
    * The in-review Ticket's PR closed unmerged: comment why, then label needs-info, drop ready-for-agent and in-review,
-   * and release the claim. false, writing nothing, when the human changed the bead since.
+   * and release the claim. A Cleared Ticket is reopened by it, and the parent that closed with it. false, writing
+   * nothing, when the human changed the bead since.
    */
   prClosed(project: Project, id: string, prUrl: string): Promise<boolean>;
   /**
@@ -188,6 +204,7 @@ interface Bead {
   parent?: string;
   dependencies?: { depends_on_id: string; type: string }[];
   comment_count?: number;
+  metadata?: Record<string, string>;
 }
 
 /** The bd metadata key on a Spec that holds its baseline: what its last breakdown covered (ADR 0009). */
@@ -195,6 +212,12 @@ const BASELINE = 'ysz.baseline';
 /** A hash of a Spec's text: its description, design and acceptance criteria. The JSON array keeps text from moving between fields unnoticed. */
 const baselineOf = (spec: Record<string, any>) =>
   createHash('sha256').update(JSON.stringify([spec.description ?? '', spec.design ?? '', spec.acceptance_criteria ?? ''])).digest('hex');
+/** The start of the reason a Cleared Ticket is closed with, which tells it from one the human closed (ADR 0012). */
+const CLEARED = 'PR open, Pipeline not failed: ';
+/** A bead closed by `cleared`, still labelled in-review: it waits for the merge. */
+const isCleared = (issue: Record<string, any>) => issue.status === 'closed' && !!issue.labels?.includes('in-review') && !!issue.close_reason?.startsWith(CLEARED);
+/** The start of the reason closeChild gives a parent it closed. */
+const CHILDREN_CLOSED = 'Every child closed, the last by ';
 const CHANGED_COMMENT =
   'This Spec changed since its last breakdown read it, so its children may not cover all of it. Label it ready-for-agent to have what they do not cover yet broken down.';
 
@@ -241,10 +264,22 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     const issue = await show(project, [id]);
     return issue.status === 'in_progress' && issue.assignee === ORCHESTRATOR ? issue : null;
   };
+  /** The bead a Run waits on the human for: In review (held), or Cleared (closed by `cleared`, still labelled in-review). null once the human changed it. */
+  const awaiting = async (project: Project, id: string) => {
+    const issue = await show(project, [id]);
+    const held = issue.status === 'in_progress' && issue.assignee === ORCHESTRATOR;
+    return held || isCleared(issue) ? { issue, cleared: !held } : null;
+  };
+  /** Reopen the parent that closeChild closed with its children; one the human closed has another reason and is left. */
+  const reopenParent = async (project: Project, child: Record<string, any>) => {
+    if (!child.parent) return;
+    const parent = await show(project, [child.parent]);
+    if (parent.status === 'closed' && parent.close_reason?.startsWith(CHILDREN_CLOSED)) await write(project, ['reopen', parent.id, '--reason', `${child.id} is open again`]);
+  };
   /**
    * Close a held child, then its parent once every child of it is closed, if the parent is not on its own branch and is
-   * either a Spec whose text still matches its baseline and that waits for no breakdown, or a non-epic parent labelled
-   * ready-for-agent. An epic with no baseline was never broken down by ysz and is left as it is. A Spec changed since its
+   * either a Spec whose text still matches its baseline and that waits for no breakdown, or any other parent labelled
+   * ready-for-agent: a non-epic one, or an epic with no baseline, whose children the human wrote (ADR 0011). A Spec changed since its
    * baseline goes back to the human before the child closes, so no poll sees every child closed while it still looks
    * ready for its Epic PR (ADR 0009). `by` names what closed the child, in the parent's reason.
    */
@@ -266,14 +301,14 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       await write(project, ['update', parent.id, '--add-label', 'needs-info']);
     }
     await close(child.id, reason);
-    const done = !labels.includes('epic-branch') && (epic ? matches && !labels.includes('ready-for-agent') : labels.includes('ready-for-agent'));
-    if (parent.status !== 'closed' && done && (await closedBut())) await close(parent.id, `Every child closed, the last by ${by}`);
+    const done = !labels.includes('epic-branch') && (epic && baseline ? matches && !labels.includes('ready-for-agent') : labels.includes('ready-for-agent'));
+    if (parent.status !== 'closed' && done && (await closedBut())) await close(parent.id, `${CHILDREN_CLOSED}${by}`);
   };
 
   return {
     async listReady(project) {
       const [out, unclosed, closed] = await Promise.all([
-        bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '--exclude-type', 'epic', '-u', '-n', '0', '--json']),
+        bd(['--readonly', '-C', project.repoPath, 'ready', '-l', 'ready-for-agent', '--exclude-label', 'orchestrator:skip', '--exclude-label', 'in-review', '--exclude-type', 'epic', '-u', '-n', '0', '--json']),
         bd(['--readonly', '-C', project.repoPath, 'list', '-s', 'open,in_progress,blocked,deferred', '-n', '0', '--json', '--brief']),
         // bd ready ignores parent-child links. A parent is never Ready, even once its children close: they did its work.
         // ponytail: lists every closed bead each poll (~0.6s, mostly bd startup, at 38-134 closed); filter on parent if the history grows large.
@@ -286,22 +321,27 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       // bd ready counts an In review blocker as open; a Ticket whose only unclosed blocker is one stacks on its PR.
       // Not a child of an epic on its own branch: that lands on the epic branch, which must already hold its blockers.
       const stacked = beads.filter((b) => {
-        if (b.status !== 'open' || b.issue_type === 'epic' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip')) return false;
+        if (b.status !== 'open' || b.issue_type === 'epic' || b.assignee || !b.labels?.includes('ready-for-agent') || b.labels.includes('orchestrator:skip') || b.labels.includes('in-review')) return false;
         if (b.parent && byId.get(b.parent)?.labels?.includes('epic-branch')) return false;
         const blockers = (b.dependencies ?? []).filter((d) => d.type === 'blocks').flatMap((d) => byId.get(d.depends_on_id) ?? []);
         return blockers.length === 1 && isInReview(blockers[0]);
       });
-      const issues: { id: string; title: string; priority: number; created_at: string }[] = [...JSON.parse(out), ...stacked];
-      const tickets: Ticket[] = issues.filter((i) => !parents.has(i.id)).map((i) => ({ id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at }));
+      const issues: Pick<Bead, 'id' | 'title' | 'priority' | 'created_at' | 'dependencies'>[] = [...JSON.parse(out), ...stacked];
+      const tickets: Ticket[] = issues.filter((i) => !parents.has(i.id)).map((i) => {
+        const blockedBy = (i.dependencies ?? []).filter((d) => d.type === 'blocks').map((d) => d.depends_on_id);
+        return { id: i.id, title: i.title, priority: i.priority, createdAt: i.created_at, ...(blockedBy.length ? { blockedBy } : {}) };
+      });
+      // An epic with children and no baseline has children the human wrote: ysz never broke it down, so it is no Spec (ADR 0011).
       const specs = beads.filter(
         (b) =>
           b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('ready-for-agent') && !b.labels.includes('orchestrator:skip') &&
+          (!parents.has(b.id) || !!b.metadata?.[BASELINE]) &&
           (b.dependencies ?? []).every((d) => d.type !== 'blocks' || !byId.has(d.depends_on_id)),
       );
       for (const b of specs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, spec: true });
       const epicPrs = beads.filter(
         (b) =>
-          b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('epic-branch') && !b.labels.includes('ready-for-agent') &&
+          b.status === 'open' && b.issue_type === 'epic' && !b.assignee && !!b.labels?.includes('epic-branch') && (!b.labels.includes('ready-for-agent') || !b.metadata?.[BASELINE]) &&
           !b.labels.includes('orchestrator:skip') && !b.labels.includes('needs-info') && parents.has(b.id) && !unclosedParents.has(b.id),
       );
       for (const b of epicPrs) tickets.push({ id: b.id, title: b.title, priority: b.priority, createdAt: b.created_at, epicPr: true });
@@ -469,9 +509,32 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
       await write(project, ['update', id, '--add-label', 'in-review']);
     },
 
-    async merged(project, id, prUrl) {
+    async cleared(project, id, prUrl) {
       const issue = await held(project, id);
       if (!issue) return false;
+      await closeChild(project, issue, `${CLEARED}${prUrl}`, prUrl);
+      return true;
+    },
+
+    async uncleared(project, id, prUrl) {
+      const issue = await show(project, [id]);
+      if (!isCleared(issue)) return false;
+      // The parent first: a failure after it leaves the Ticket Cleared, so the next call reopens it too.
+      await reopenParent(project, issue);
+      await write(project, ['update', id, '--status', 'in_progress', '--assignee', ORCHESTRATOR]);
+      await write(project, ['comment', id, `Pipeline failed: ${prUrl}`]);
+      return true;
+    },
+
+    async merged(project, id, prUrl) {
+      const found = await awaiting(project, id);
+      if (!found) return false;
+      if (found.cleared) {
+        await write(project, ['comment', id, `PR merged: ${prUrl}`]);
+        await write(project, ['update', id, '--remove-label', 'in-review']);
+        return true;
+      }
+      const { issue } = found;
       // The label goes first: if the close then fails, the next call still finds the bead held and closes it.
       await write(project, ['update', id, '--remove-label', 'in-review']);
       await closeChild(project, issue, `PR merged: ${prUrl}`, prUrl);
@@ -486,7 +549,9 @@ export function createBeadsGateway({ bin = 'bd', yszRepo, timeoutMs = 30_000 }: 
     },
 
     async prClosed(project, id, prUrl) {
-      if (!(await held(project, id))) return false;
+      const found = await awaiting(project, id);
+      if (!found) return false;
+      if (found.cleared) await reopenParent(project, found.issue);
       // Two writes like fail(); the second is atomic and releases the claim, so a failure before it leaves the Ticket held.
       await write(project, ['comment', id, `PR closed unmerged: ${prUrl}`]);
       await write(project, ['update', id, '--add-label', 'needs-info', '--remove-label', 'ready-for-agent', '--remove-label', 'in-review', '--assignee', '', '--status', 'open']);

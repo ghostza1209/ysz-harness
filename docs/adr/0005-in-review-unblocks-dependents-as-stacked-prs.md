@@ -1,5 +1,7 @@
 # An In review Ticket unblocks its dependents, which open stacked PRs on its branch
 
+> Superseded in part by [ADR 0012](0012-a-cleared-run-closes-its-ticket-before-the-merge.md): a Ticket's bead now closes once its PR is open and its Pipeline has not failed, not only when the PR is Merged. The one-base limit and the stacking stay.
+
 A Ticket's bead closes only when its PR is Merged. Until then it blocks every Ticket that depends on it, and a chain like PopDeal-41f (22 Tickets behind `.1` and `.2`) stalls for as long as the human takes to merge each PR. So a Ticket now counts as Ready when at most one of its blockers is In review and the rest are closed. The In review blocker's bead still stays `in_progress` until its PR is Merged or PR closed, so `watchReviews` closes it or hands it back as before.
 
 A dependent's clone starts at the blocker's `agent/<id>` branch rather than `origin/<baseBranch>`. Its PR targets that branch, and ysz links the two PRs with `gh stack link` into a GitHub stacked PR (GA 2026-10-06), so each PR's diff shows only its own Ticket. Merging and keeping the stack current stay with the human. When the blocker merges, GitHub retargets the dependent's PR onto the base. When the stack falls behind the base, the human presses Rebase stack.

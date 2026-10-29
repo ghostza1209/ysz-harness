@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createHostSteps, prTitleAndBody, ticketKey } from '../src/host';
+import { createHostSteps, pipelineOf, prTitleAndBody, ticketKey } from '../src/host';
 import type { Project } from '../src/projects';
 
 /** git reads a case variant of objects/info/alternates only where the disk ignores case, as macOS does and Linux does not. */
@@ -580,15 +580,15 @@ describe('host steps against real git', () => {
     assert.equal((await withEpicGh(mergedPr, () => host.publishEpic(project, { id: 'e-m', title: 'reopened' }, 'e-m'))).url, 'https://example.test/pull/20');
   });
 
-  it("reads a PR's state and when it closed as the Project's gh account", async () => {
+  it("reads a PR's state, when it opened and closed and how its Pipeline stands as the Project's gh account", async () => {
     const bin = join(root, 'bin-pr-view');
     mkdirSync(bin, { recursive: true });
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","closedAt":"2026-10-16T07:05:01Z"}'`);
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","createdAt":"2026-10-16T06:00:00Z","closedAt":"2026-10-16T07:05:01Z","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}'`);
     const path = process.env.PATH;
     process.env.PATH = `${bin}:${path}`;
     try {
-      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', closedAt: Date.UTC(2026, 9, 16, 7, 5, 1) });
-      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,closedAt');
+      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', openedAt: Date.UTC(2026, 9, 16, 6, 0, 0), closedAt: Date.UTC(2026, 9, 16, 7, 5, 1), pipeline: 'passed' });
+      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,createdAt,closedAt,statusCheckRollup');
     } finally {
       process.env.PATH = path;
     }
@@ -945,5 +945,28 @@ describe('PR title', () => {
   it('names the key once in that fallback when the Ticket title already starts with it', () => {
     assert.equal(prTitleAndBody('## Summary', 'OP-2567', 'OP-2567: Gmail sync attaches').title, 'chore: OP-2567 Gmail sync attaches');
     assert.equal(prTitleAndBody('## Summary', 'OP-25', 'OP-2567 is unrelated').title, 'chore: OP-25 OP-2567 is unrelated');
+  });
+});
+
+describe('pipelineOf', () => {
+  const run = (status: string, conclusion = '') => ({ status, conclusion });
+
+  it('has no Pipeline when GitHub lists no check', () => {
+    assert.equal(pipelineOf([]), 'none');
+  });
+
+  it('fails on any failed or timed out check, whatever else is unfinished', () => {
+    assert.equal(pipelineOf([run('IN_PROGRESS'), run('COMPLETED', 'TIMED_OUT')]), 'failed');
+    assert.equal(pipelineOf([run('COMPLETED', 'FAILURE')]), 'failed');
+    assert.equal(pipelineOf([{ state: 'ERROR' }]), 'failed');
+  });
+
+  it('is pending while one check is unfinished and none failed, and while a check is queued, running or cancelled, or a commit status pending', () => {
+    assert.equal(pipelineOf([run('COMPLETED', 'SUCCESS'), run('IN_PROGRESS')]), 'pending');
+    for (const check of [run('QUEUED'), run('IN_PROGRESS'), run('COMPLETED', 'CANCELLED'), { state: 'PENDING' }]) assert.equal(pipelineOf([check]), 'pending');
+  });
+
+  it('passes when every check succeeded, was skipped or neutral', () => {
+    assert.equal(pipelineOf([run('COMPLETED', 'SUCCESS'), run('COMPLETED', 'SKIPPED'), run('COMPLETED', 'NEUTRAL'), { state: 'SUCCESS' }]), 'passed');
   });
 });

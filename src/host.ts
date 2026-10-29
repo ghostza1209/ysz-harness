@@ -85,8 +85,33 @@ export interface HostSteps {
   listClones(): Promise<string[]>;
   /** A clone's disk use in bytes, by du, which does not follow links out of it. */
   cloneSize(clone: Pick<Prepared, 'dir'>): Promise<number>;
-  /** The PR's state on GitHub and when it merged or closed (null while open), asked as the Project's gh account. */
-  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; closedAt: number | null }>;
+  /**
+   * The PR's state on GitHub, when it opened, when it merged or closed (null while open) and how its Pipeline stands
+   * (ADR 0012), asked as the Project's gh account.
+   */
+  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; openedAt: number; closedAt: number | null; pipeline: Pipeline }>;
+}
+
+/** How a PR's Pipeline stands: failed once any check failed, pending while one is unfinished, none when GitHub lists no check. */
+export type Pipeline = 'none' | 'pending' | 'failed' | 'passed';
+
+/** One entry of `gh pr view --json statusCheckRollup`: a check run, or a commit status. */
+interface Check {
+  status?: string;
+  conclusion?: string;
+  state?: string;
+}
+
+const FAILED = ['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE', 'ERROR'];
+const UNFINISHED = ['CANCELLED', 'ACTION_REQUIRED', 'PENDING', 'EXPECTED'];
+
+/** A cancelled check is not finished (a newer run replaces it); a skipped or neutral one passed. */
+export function pipelineOf(checks: Check[]): Pipeline {
+  if (!checks.length) return 'none';
+  const outcome = (c: Check) => c.conclusion || c.state || c.status || '';
+  if (checks.some((c) => FAILED.includes(outcome(c)))) return 'failed';
+  const unfinished = (c: Check) => (c.status !== undefined && c.status !== 'COMPLETED') || UNFINISHED.includes(outcome(c));
+  return checks.some(unfinished) ? 'pending' : 'passed';
 }
 
 /** Under /Users, which Docker Desktop shares, and outside every repo's working tree. */
@@ -504,9 +529,9 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
 
     async prState(project, prUrl) {
       // GitHub sets closedAt on a merge too, to the merge time.
-      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,closedAt'], project.repoPath, { env: await ghEnv(project) });
-      const { state, closedAt } = JSON.parse(out);
-      return { state, closedAt: closedAt ? Date.parse(closedAt) : null };
+      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,createdAt,closedAt,statusCheckRollup'], project.repoPath, { env: await ghEnv(project) });
+      const { state, createdAt, closedAt, statusCheckRollup } = JSON.parse(out);
+      return { state, openedAt: Date.parse(createdAt), closedAt: closedAt ? Date.parse(closedAt) : null, pipeline: pipelineOf(statusCheckRollup ?? []) };
     },
 
     async removeClone({ dir }) {

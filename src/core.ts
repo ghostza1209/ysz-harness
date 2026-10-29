@@ -8,6 +8,9 @@ import { refusal, type TicketAction } from './ticketActions';
 /** Runs at once, across all Projects. Each Project also runs at most one. */
 export const SLOTS_TOTAL = 2;
 
+/** How long a PR with no check listed is open before its Run is Cleared: GitHub lists checks a few seconds late (ADR 0012). */
+const NO_PIPELINE_AFTER_MS = 2 * 60_000;
+
 /** A Spec Run's note when its agent planned no Tickets, by how the breakdown left the Spec (ADR 0009). */
 const NOTHING_LEFT = {
   released: 'Nothing left to break down',
@@ -234,7 +237,10 @@ export function createOrchestrator(deps: {
     applied.set(p.name, gen);
     const snapshot = snapshots.get(p.name)!;
     if ('value' in listed) {
-      const { tickets, rows } = listed.value;
+      const { rows } = listed.value;
+      // ADR 0012: a PR has one base, so a Ticket waits while two of its blockers have a PR not merged yet.
+      const unmerged = new Set(store.inReview().filter((r) => r.project === p.name).map((r) => r.ticketId));
+      const tickets = listed.value.tickets.filter((t) => (t.blockedBy ?? []).filter((id) => unmerged.has(id)).length < 2);
       snapshot.tickets = tickets;
       snapshot.rows = rows;
       snapshot.updatedAt = clock.now();
@@ -397,8 +403,8 @@ export function createOrchestrator(deps: {
         await finish(runId, control, { project, ticket, epicKey: ticketKey(ticket.id, context), reviewSkipped, followUps: [], prUrl: null });
         return;
       }
-      // A closed blocker whose PR merged into another Run's branch, while that Run's own PR was still In review,
-      // has its code only on that branch, so the Run stacks there too. Follow Runs that merged into one that merged in turn.
+      // A closed blocker that is Cleared, or whose PR merged into another Run's branch while that Run's own PR was still
+      // In review, has its code only on that branch, so the Run stacks there too. Follow Runs that merged into one that merged in turn.
       const runs = store.allRuns().filter((r) => r.project === project.name);
       const newest = new Map(runs.map((r) => [r.ticketId, r]));
       // A Run from before its branch was recorded was cut on agent/<id>; for those, the Ticket's newest Run holds it.
@@ -416,10 +422,11 @@ export function createOrchestrator(deps: {
           }
           run = onto;
         }
-        if (seen.size && run?.state === 'in-review' && run.prUrl) holders.set(run.ticketId, run);
+        // Seen or not: a Cleared blocker is closed with its code only on the branch of its own In review Run.
+        if (run?.state === 'in-review' && run.prUrl) holders.set(run.ticketId, run);
       }
       const stackIds = new Set([...(context.inReviewBlocker ? [context.inReviewBlocker.id] : []), ...holders.keys()]);
-      // ponytail: fails and skips the Ticket until a restart, where ADR 0005 has two In review blockers wait; make listReady see Runs if it recurs.
+      // refresh() keeps a Ticket with two unmerged blockers from being Ready; this catches the chains it cannot see (a blocker that merged into another's branch).
       if (stackIds.size > 1) throw new Error(`the Run would stack on ${[...stackIds].join(' and ')}, but a PR has one base`);
       if (!context.inReviewBlocker && holders.size) {
         const [run] = holders.values();
@@ -843,7 +850,23 @@ export function createOrchestrator(deps: {
           continue;
         }
         try {
-          const { state, closedAt } = await host.prState(project, run.prUrl);
+          const { state, openedAt, closedAt, pipeline } = await host.prState(project, run.prUrl);
+          if (state === 'OPEN') {
+            // ADR 0012: a Pipeline with no check at all is only believed once GitHub has had time to list its checks.
+            const shouldClear = pipeline === 'passed' || (pipeline === 'none' && clock.now() - openedAt >= NO_PIPELINE_AFTER_MS);
+            if (!run.clearedAt && shouldClear) {
+              const written = await beads.cleared(project, run.ticketId, run.prUrl);
+              store.updateRun(run.id, { clearedAt: clock.now() });
+              logRun(run.id, `Cleared: ${pipeline === 'none' ? 'no Pipeline' : 'Pipeline passed'}`);
+              if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
+            } else if (run.clearedAt && pipeline === 'failed') {
+              const written = await beads.uncleared(project, run.ticketId, run.prUrl);
+              store.updateRun(run.id, { clearedAt: null });
+              logRun(run.id, 'Pipeline failed: back In review');
+              if (!written) logRun(run.id, 'Ticket left alone: changed by hand since it was Cleared');
+            }
+            continue;
+          }
           if (state !== 'MERGED' && state !== 'CLOSED') continue;
           const merged = state === 'MERGED';
           // Bead first: if its write fails the Run stays in-review, so the next call tries again.

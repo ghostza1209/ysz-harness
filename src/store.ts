@@ -61,6 +61,8 @@ export interface RunRow {
   footprint: Record<string, Footprint>;
   /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
   prClosedAt: number | null;
+  /** When the Run was Cleared and its Ticket closed before the merge (ADR 0012); null while its Ticket is not. */
+  clearedAt: number | null;
   /** What the Run's agents reported and ysz recorded as Tickets; null when nothing was. Not a live view of bd. */
   reports: Reports | null;
 }
@@ -71,10 +73,10 @@ export interface Reports {
   friction: { id: string; title: string; seenAgain: boolean }[];
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'branch' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt'>>;
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'branch' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt' | 'clearedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', branch: 'branch', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', branch: 'branch', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at', clearedAt: 'cleared_at',
 };
 
 /** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
@@ -145,6 +147,7 @@ const toRow = (r: Record<string, unknown>): RunRow => ({
   usage: JSON.parse((r.usage as string | null) ?? '{}'),
   footprint: JSON.parse((r.footprint as string | null) ?? '{}'),
   prClosedAt: r.pr_closed_at as number | null,
+  clearedAt: r.cleared_at as number | null,
   reports: r.reports ? JSON.parse(r.reports as string) : null,
 });
 
@@ -211,6 +214,9 @@ export function openStore(path: string): Store {
   }
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 12) {
     db.exec('ALTER TABLE runs ADD COLUMN branch TEXT; PRAGMA user_version = 12');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 13) {
+    db.exec('ALTER TABLE runs ADD COLUMN cleared_at INTEGER; PRAGMA user_version = 13');
   }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);

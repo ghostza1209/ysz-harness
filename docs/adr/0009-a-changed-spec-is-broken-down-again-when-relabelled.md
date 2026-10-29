@@ -1,5 +1,7 @@
 # A changed Spec is broken down again when the human labels it again
 
+> Superseded in part by [ADR 0011](0011-an-epic-with-hand-written-children-is-not-a-spec.md): only an epic ysz broke down before is broken down again. An epic whose children the human wrote is no Spec.
+
 ADR 0007 broke a Spec down only while it had no children. The human changed laravel-qfx after its breakdown, adding its `In-Reply-To` rules, and ysz could not see it: an epic with children was no longer a Spec. The human wrote the missing child by hand. For the six minutes before that, every child was closed, so the epic was ready to get its Epic PR without that work. Now `ready-for-agent` on an epic asks for a breakdown of whatever its children do not cover yet, whether it has children or not. A breakdown takes the label off in the same write that releases the Spec. That write also records a baseline as bd metadata on the epic: a hash of the description, design and acceptance criteria the agent read. After changing a Spec, the human labels it again. The breakdown agent sees every child, closed or not, with its body and close reason, and plans only what is missing. With no children, that is the whole Spec, as before. A plan with no Tickets is now a usable breakdown. It records the new baseline, and closes the Spec if all its children are closed.
 
 ## Consequences
