@@ -298,6 +298,49 @@ describe('host steps against real git', () => {
     assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the merged blocker change/);
   });
 
+  it("cuts a retried Attempt from the base when its blocker's PR merged and its branch was deleted since the Run began", async () => {
+    // ysz-harness Run 104: Attempt 1 stacked on the blocker; the human merged that PR meanwhile; Attempt 2 prepared from the same stale context.
+    const other = join(root, 'other-stack-gone');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-g');
+    commit(other, 'blocker-g.txt', 'the merged blocker change');
+    git(other, 'push', '-q', 'origin', 'agent/t-g');
+    const blocker = { id: 't-g', title: 'g', prUrl: 'https://example.test/pull/31', branch: 'agent/t-g' };
+    await host.prepare(project, 't-sg1', { ...context, inReviewBlocker: blocker }); // Attempt 1 finds the branch
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', '--squash', 'agent/t-g');
+    git(other, 'commit', '-q', '-m', 'the squash commit');
+    git(other, 'push', '-q', 'origin', 'develop', ':agent/t-g');
+
+    const bin = join(root, 'bin-stack-gone');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const prepared = await host.prepare(project, 't-sg2', { ...context, inReviewBlocker: blocker }); // Attempt 2
+
+      assert.equal(prepared.stack, undefined);
+      assert.equal(git(join(prepared.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'develop'));
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  it("still fails a retried Attempt whose blocker's branch is gone but whose PR did not merge", async () => {
+    const blocker = { id: 't-x', title: 'x', prUrl: 'https://example.test/pull/32', branch: 'agent/t-x' }; // never pushed: a PR closed unmerged, its branch deleted
+    const bin = join(root, 'bin-stack-closed');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\n[ "$2" = view ] && { echo '{"state":"CLOSED","baseRefName":"develop"}'; exit 0; }\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.prepare(project, 't-sx', { ...context, inReviewBlocker: blocker }), /couldn't find remote ref agent\/t-x/);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
   /** A stacked Run on `blocker` whose agent rewrote mm-<blocker>.txt, while the blocker merged into develop by `merge` and develop then rewrote that line too. */
   const stackedOnMergedConflict = async (blocker: string, id: string, merge: string[]) => {
     const other = join(root, `other-${blocker}`);

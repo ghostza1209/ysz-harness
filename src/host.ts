@@ -358,7 +358,7 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const repo = project.repoPath;
       const blocker = context.inReviewBlocker;
       // A blocker whose Run predates its recorded branch was cut on agent/<id>.
-      const stack = blocker?.prUrl ? { branch: blocker.branch ?? `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
+      let stack = blocker?.prUrl ? { branch: blocker.branch ?? `agent/${blocker.id}`, prUrl: blocker.prUrl } : undefined;
       const { parent } = context;
       const epicId = Array.isArray(parent?.labels) && parent.labels.includes('epic-branch') ? String(parent.id) : undefined;
       const epicKey = epicId && ticketKey(epicId, { ...context, ticket: parent!, parent: null });
@@ -367,17 +367,26 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       // An epic already on origin began before ADR 0008, so its children keep opening PRs onto it (ADR 0006).
       const land = !!epicCut && !epicCut.onOrigin;
       if (land && stack) throw new Error(`${ticketId} lands on ${epic}, so it cannot stack on ${stack.prUrl}: it waits for that PR to merge`);
-      const base = stack?.branch ?? epic ?? project.baseBranch;
+      let base = stack?.branch ?? epic ?? project.baseBranch;
       const key = ticketKey(ticketId, context);
       const branch = keyedBranch(ticketId, key);
-      const baseRef = land ? `refs/heads/${epic}` : `refs/remotes/origin/${base}`;
 
-      if (!land) await run('git', ['fetch', 'origin', base], repo);
-      else if (!(await text('git', ['rev-parse', '--verify', '--quiet', baseRef], repo).catch(() => ''))) {
+      if (!land) {
+        await run('git', ['fetch', 'origin', base], repo).catch(async (err) => {
+          // A retried Attempt reaches here with the context the Run began on: its blocker's PR may have merged since, and
+          // GitHub deleted the branch. Its code is then where the PR merged, so cut from there, unstacked.
+          const pr = stack && JSON.parse(await text('gh', ['pr', 'view', stack.prUrl, '--json', 'state,baseRefName'], repo, { env: await ghEnv(project) }).catch(() => 'null'));
+          if (pr?.state !== 'MERGED') throw err;
+          stack = undefined;
+          base = pr.baseRefName;
+          await run('git', ['fetch', 'origin', base], repo);
+        });
+      } else if (!(await text('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${epic}`], repo).catch(() => ''))) {
         // The epic's first child cuts its branch from the base, in the Project repo only: it reaches origin with the epic's PR.
         await run('git', ['fetch', 'origin', project.baseBranch], repo);
         await run('git', ['branch', '--no-track', epic!, `refs/remotes/origin/${project.baseBranch}`], repo);
       }
+      const baseRef = land ? `refs/heads/${epic}` : `refs/remotes/origin/${base}`;
       const sha = await text('git', ['rev-parse', '--verify', `${baseRef}^{commit}`], repo);
       const url = await text('git', ['remote', 'get-url', 'origin'], repo);
 
