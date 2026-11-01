@@ -8,11 +8,24 @@ The implementation is every commit since `{{BASE}}`: see it with `git log {{BASE
 
 ## Workflow
 
-1. **Understand**: read the Ticket, the repo's `CLAUDE.md`/`AGENTS.md`, and the whole diff before judging it.
+1. **Understand**: read the Ticket, the repo's `CLAUDE.md`/`AGENTS.md`, and the whole diff before judging it. Then read the code it touches: the callers of every changed function, the functions it calls, and their tests. When a signature, return value or behavior changes, grep every caller. Find the load the repo expects (README, deploy config): one person running a script, or many users and processes at once.
 2. **Check against the Ticket**: does the diff meet every acceptance criterion? Is anything the Ticket asks for missing, or anything it does not ask for added?
-3. **Check the code**: correctness bugs, unhandled edge cases and error paths, security problems, tests that cannot fail (they assert on mocks or restate the code), dead code, and breaks of the repo's own conventions.
+3. **Check the code**, most important first:
+   1. **Bug**: a wrong result, a crash, an unhandled error path, a missed edge case (empty, zero, last item, rounding, time zones), a caller the change broke, a fix applied in one caller while the shared function stays broken.
+   2. **Risk**: security holes (injection, weak randomness, secrets, missing checks on input from users), data loss (errors swallowed, writes in the wrong order, no transaction).
+   3. **Scale**: fine for one user, wrong at the expected load: check-then-write races, the same work done by every process, memory or lists that only grow, a query per item, O(n^2) on big input, per-process state that must be shared.
+   4. **Missing test**: risky new logic (a branch, a parser, money, security, data writes, a bug fix) with no test that fails when it breaks, or a test that cannot fail (it asserts on mocks or restates the code). One good test, not coverage.
+   5. **Speed**: a big slowdown.
+   6. **Lean**: dead code, unused options, speculative features; a helper the repo already has; what the standard library or platform already does, or a new dependency for a few lines; an abstraction with one implementation, config nobody sets; near-copies that must change together; one function doing several unrelated jobs.
+   7. **Conventions**: breaks of the repo's own conventions.
+
+   Each problem needs a concrete case: this input or situation leads to this wrong result. No case, no problem. Re-read the lines to confirm it: the caller exists, the value can really be empty, the code really is unused. A `shortcut:` comment that names its limit is a decision, not a problem, unless the expected load already crosses it. No style taste and no vague worries. Leave small speed-ups and shorter forms alone.
+
+   Fix what this change caused, a caller it broke included. A problem already in code the diff did not touch is a follow-up, not a fix. The Ticket wins: never delete or shrink what its acceptance criteria ask for.
+
+   This checklist is adapted from ponytail-review (MIT, © 2026 DietrichGebert, github.com/DietrichGebert/ponytail).
 4. **Verify**: check only what the diff changed (`git diff --name-only {{BASE}}...HEAD`, plus your own fixes): lint and test those files, not the whole repo, and type-check only the packages they sit in. {{CHECK_HINT}} Fix what fails. If a check cannot run in this sandbox, say so in the commit message instead of skipping it silently.
-5. **Fix**: correct each real problem you found with the smallest change, and commit it. Several fix commits are fine; the message says what was wrong. Each subject is a Conventional Commit naming the Ticket as `{{KEY}}`: `type(scope): {{KEY}} subject`, e.g. `fix(chat): {{KEY}} skip the badge for an empty sender`. Add a scope only when the fix sits in one clear module, and never mark a breaking change with an exclamation mark or `BREAKING CHANGE`. Do not rewrite or squash the implementation's commits, and do not leave commented-out code or TODO comments.
+5. **Fix**: correct each real problem you found with the smallest change, and commit it. Prefer a fix that deletes code; never add layers, frameworks or config the problem does not need. Several fix commits are fine; the message says what was wrong. Each subject is a Conventional Commit naming the Ticket as `{{KEY}}`: `type(scope): {{KEY}} subject`, e.g. `fix(chat): {{KEY}} skip the badge for an empty sender`. Add a scope only when the fix sits in one clear module, and never mark a breaking change with an exclamation mark or `BREAKING CHANGE`. Do not rewrite or squash the implementation's commits, and do not leave commented-out code or TODO comments.
 6. **Stop**: output the completion signal below and do no further work. If the work was already right, make no commit.
 
 ## Reporting friction
