@@ -336,7 +336,7 @@ async function openPr(
     writeFileSync(join(tmp, 'body.md'), `${reviewSkipped ? `> review skipped: ${reviewSkipped}\n\n` : ''}${body}${followUpsSection}`);
     // The SSH key that pushed may belong to another account than gh's active one, which then cannot see the repo.
     step(`Opening the PR against ${base}${project.ghUser ? ` as ${project.ghUser}` : ''}`);
-    const out = await text('gh', ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md')], repo, { env });
+    const out = await text('gh', ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body-file', join(tmp, 'body.md'), ...(project.draftPr ? ['--draft'] : [])], repo, { env });
     return out.split('\n').pop()!;
   } finally {
     rmSync(tmp, { recursive: true, force: true });

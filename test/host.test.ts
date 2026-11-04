@@ -653,6 +653,16 @@ describe('host steps against real git', () => {
     }
   });
 
+  it('opens the PR as a draft only in a Project that sets draftPr', async () => {
+    for (const [draftPr, expected] of [[true, true], [undefined, false]] as const) {
+      const id = `t-draft-${draftPr ?? 'unset'}`;
+      const prepared = await host.prepare(project, id, context);
+      commit(join(prepared.dir, 'repo'), 'c.txt', id);
+      await withEpicGh('[]', () => host.publish({ ...project, draftPr }, ticket(id), prepared));
+      assert.equal(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').includes('--draft'), expected);
+    }
+  });
+
   it('titles the PR as a Conventional Commit naming the Ticket by its Jira key, and keeps the rest as the body', async () => {
     const prepared = await host.prepare(project, 't-16', { ...context, ticket: { id: 't-16', external_ref: 'jira-OP-7' } });
     commit(join(prepared.dir, 'repo'), 'd.txt', 'd');

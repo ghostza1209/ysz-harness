@@ -18,6 +18,8 @@ export interface Project {
   checkContainer?: { composeProject: string; service: string };
   /** `gh` account that opens the Project's PRs; omitted means gh's active account. Logged in accounts: `gh auth status`. */
   ghUser?: string;
+  /** Open the Project's PRs as drafts; the human marks them ready. Omitted means ready for review. */
+  draftPr?: boolean;
   /** Gitignored files copied from the repo into each Run's worktree; missing ones are skipped. */
   copyToWorktree?: string[];
   /** Runs inside the implement sandbox before the agent starts, to install dependencies; review reuses its node_modules. */
