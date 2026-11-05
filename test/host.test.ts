@@ -224,6 +224,21 @@ describe('host steps against real git', () => {
     assert.equal(git(repo, 'rev-parse', 'agent/t-hf'), humanTip);
   });
 
+  it('takes the PR that already exists for the branch when gh refuses to open another', async () => {
+    const prepared = await host.prepare(project, 't-px', context);
+    commit(join(prepared.dir, 'repo'), 'px.txt', 'px\n');
+    const bin = join(root, 'bin-pr-exists');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho 'a pull request for branch "agent/t-px" into branch "develop" already exists:' >&2\necho https://example.test/pull/719 >&2\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.deepEqual(await host.publish(project, ticket('t-px'), prepared), { url: 'https://example.test/pull/719', base: 'develop' });
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
   it('collects: counts the agent commits over base and brings them into the Project repo without pushing', async () => {
     const prepared = await host.prepare(project, 't-13', context);
     const clone = join(prepared.dir, 'repo');
