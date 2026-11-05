@@ -61,20 +61,9 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 <!-- END BEADS INTEGRATION -->
 
 
-## Build & Test
+## Where things are
 
-_Add your build and test commands here_
-
-```bash
-# Example:
-# npm install
-# npm test
-```
-
-## Architecture Overview
-
-_Add a brief overview of your project architecture_
-
-## Conventions & Patterns
-
-_Add your project-specific conventions here_
+- Run the orchestrator with `npm run start` (serves the Dashboard on :4000; token in `data/dashboard-token`). It has no SIGTERM handler: before killing it, check `docker ps` for a running sandbox and `data/logs` for a Run still writing.
+- Logs: `data/ysz-console.log` (orchestrator), `data/logs/<run id>-{host,attempt<n>-implement,attempt<n>-review}.log` (one Run). The Push & PR step is `publish` in `src/host.ts`; its card error is the failed command's stderr plus stdout.
+- Projects (repo path, base branch, `ghUser`, `draftPr`) are configured in `src/projects.ts`; a Run clones into `~/.cache/ysz-harness/clones/` and `publish` pushes from the Project's own repo, so that repo's local git hooks run.
+- Domain terms are in `GLOSSARY.md`, decisions in `docs/adr/`.

@@ -120,6 +120,9 @@ const CLONES_DIR = join(homedir(), '.cache/ysz-harness/clones');
 /** Most of a PR's git log and diff that goes into the PR-body prompt. */
 const PROMPT_GIT_CHARS = 100_000;
 
+/** Most of a failed command's stdout kept in its error: the end, where a lint or test run prints its verdict. */
+const FAILED_STDOUT_CHARS = 20_000;
+
 async function run(
   cmd: string,
   args: string[],
@@ -133,8 +136,10 @@ async function run(
     return (await pending).stdout;
   } catch (err) {
     if (signal?.aborted) throw err; // an abort is the caller's own doing, not a failure to describe
-    const e = err as { killed?: boolean; stderr?: Buffer; message: string };
-    throw new Error(e.killed ? `${cmd} ${args[0]} timed out after ${timeout}ms` : `${cmd} ${args[0]} failed: ${e.stderr?.toString().trim() || e.message}`);
+    const e = err as { killed?: boolean; stdout?: Buffer; stderr?: Buffer; message: string };
+    // A git hook prints its findings on stdout, which git does not forward to stderr: without them a failed push names only the hook.
+    const out = e.stdout?.toString().trim();
+    throw new Error(e.killed ? `${cmd} ${args[0]} timed out after ${timeout}ms` : `${cmd} ${args[0]} failed: ${e.stderr?.toString().trim() || e.message}${out ? `\n${out.slice(-FAILED_STDOUT_CHARS)}` : ''}`);
   }
 }
 

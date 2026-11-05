@@ -84,6 +84,9 @@ describe('host steps against real git', () => {
     await host.preflight(withPreflight(0));
     assert.equal(readFileSync(probe, 'utf8').trim(), repo);
     await assert.rejects(host.preflight(withPreflight(1)), /sh -c failed/);
+    // A pre-push hook's findings come on stdout; the error must carry them after stderr.
+    const hook = { ...project, preflight: ['sh', '-c', 'echo "3:5 error no-explicit-any"; echo "pre-push failed" >&2; exit 1'] };
+    await assert.rejects(host.preflight(hook), /^Error: sh -c failed: pre-push failed\n3:5 error no-explicit-any$/);
     await host.preflight(project);
   });
 
