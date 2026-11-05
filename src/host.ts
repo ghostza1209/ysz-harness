@@ -454,6 +454,12 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       // The sha, not origin/<base>: a stacked-on blocker that merged meanwhile has its branch deleted and pruned.
       let from = prepared.base;
       await fetchBack(project, prepared, tip, signal);
+      // A human may have pushed to the branch since the Run's tip: build on theirs, as a push of the older tip is rejected and
+      // the pre-push hooks would check code they already fixed. No such branch on origin yet (the first push) or no network: push says.
+      const onOrigin = await run('git', ['fetch', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], repo).then(() => true, () => false);
+      if (onOrigin && (await run('git', ['merge-base', '--is-ancestor', branch, `origin/${branch}`], repo).then(() => true, () => false))) {
+        await run('git', ['update-ref', `refs/heads/${branch}`, `refs/remotes/origin/${branch}`], repo);
+      }
       if (merged) {
         await run('git', ['fetch', 'origin', base], repo);
         const onBase = await text('git', ['rev-parse', '--verify', `origin/${base}^{commit}`], repo);

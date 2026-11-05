@@ -208,6 +208,22 @@ describe('host steps against real git', () => {
     assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the agent change/);
   });
 
+  it('pushes on top of commits a human added to the branch on origin since the Run, instead of being rejected', async () => {
+    const prepared = await host.prepare(project, 't-hf', context);
+    commit(join(prepared.dir, 'repo'), 'hf.txt', 'the agent change\n');
+    await host.publish(project, ticket('t-hf'), prepared);
+    const other = join(root, 'other-human-fix');
+    git(root, 'clone', '-q', '-b', 'agent/t-hf', origin, other);
+    commit(other, 'fix.txt', 'the human fix\n');
+    git(other, 'push', '-q', 'origin', 'agent/t-hf');
+    const humanTip = git(other, 'rev-parse', 'HEAD');
+
+    await host.publish(project, ticket('t-hf'), prepared);
+
+    assert.equal(git(origin, 'rev-parse', 'agent/t-hf'), humanTip);
+    assert.equal(git(repo, 'rev-parse', 'agent/t-hf'), humanTip);
+  });
+
   it('collects: counts the agent commits over base and brings them into the Project repo without pushing', async () => {
     const prepared = await host.prepare(project, 't-13', context);
     const clone = join(prepared.dir, 'repo');
