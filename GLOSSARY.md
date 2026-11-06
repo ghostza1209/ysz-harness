@@ -2,7 +2,7 @@
 
 **Project**: A codebase ysz works on (e.g. fazwaz, PopDeal, thaivis), known by a name that never changes, and worked in its local repo. Each Project keeps its own Ticket queue.
 
-**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from. Adding a Project, from the Dashboard or otherwise, does not make it onboarded: it is onboarded once its Smoke check and host checks pass, or when the human vouches for it by hand. Editing an onboarded Project leaves it onboarded.
+**Onboarding**: Making a new Project one ysz can work: from then on, its Ready Tickets can be claimed and their Runs can check their own work. A Project is onboarded or not; there is no partial state ysz picks from. Adding a Project, from the Dashboard or otherwise, does not make it onboarded: it is onboarded once its Smoke check and host checks pass, or when the human vouches for it by hand. For a Project that opted in to the QA agent, its QA accounts must also exist. Editing an onboarded Project leaves it onboarded.
 _Avoid_: sandcastle setup, adding a repo.
 
 **Smoke check**: An agent-free trial of a Project's sandbox: its install and a bounded check run on a fresh clone. ysz and the Dashboard onboard a Project only after it passes, but passing is not Onboarding by itself.
@@ -34,7 +34,7 @@ _Avoid_: orchestrator.
 **Run**: ysz's effort to finish one Ticket, made of one or two Attempts, ending once its pull request is Merged or PR closed, once it Landed, or in handing the Ticket back to the human. A Run never merges a pull request: the human does, and the Run only learns of it.
 _Avoid_: job, session.
 
-**Attempt**: One pass at a Run's Ticket in fresh isolated sandboxes: an agent implements the Ticket, then a second agent reviews and corrects that work. A Run retries with a second Attempt at most once.
+**Attempt**: One pass at a Run's Ticket in fresh isolated sandboxes: an agent implements the Ticket, a second agent reviews and corrects that work, then, in a Project that opted in, a third agent runs the app to check it. A Run retries with a second Attempt at most once.
 _Avoid_: retry run, try.
 
 **Clone**: A Run's disposable copy of its Project's repo on the host, fresh for each Attempt, that its sandboxes work in. It stays on disk only while it serves someone: the live Run, or the human inspecting a failed or killed Run until a later Run of the same Ticket reaches In review or Landed.
@@ -47,6 +47,15 @@ _Avoid_: worktree, checkout, job.
 **Review agent**: The agent that reviews and corrects the Implement agent's work later in the same Attempt, before any pull request exists.
 _Avoid_: code review, review (alone).
 
+**QA agent**: The agent that runs a Project's app after the Review agent, in the same Attempt, and checks the Ticket's work in it: it drives the app against the Ticket's acceptance criteria and runs the Project's own regression suite, fixing what it can. It runs only in a Project that opted in, and has nothing to do when the work changes nothing a user sees. A failure it cannot fix does not stop the Run; it is written on the Ticket, and the Run is then not Cleared. What it saw is left in the QA report.
+_Avoid_: tester, QA (alone).
+
+**QA account**: A login the QA agent uses in a Project's app, one per role the app has, made on the host during Onboarding in the local backend, never in production. An existing one is reused, never duplicated; the agent can only pick among the roles that have one.
+_Avoid_: test user, automation user.
+
+**QA report**: The one page the QA agent leaves in the Run log: for each acceptance criterion of the Ticket, whether it held, with screenshots of what the agent saw. The human may publish it as a Claude artifact; ysz never does.
+_Avoid_: test report, evidence.
+
 **Dashboard**: The web page where the human watches and steers ysz: Runs, Ready Tickets, Run logs, pausing Projects. Only the human may use it, never an agent.
 _Avoid_: UI, web app.
 
@@ -55,10 +64,10 @@ _Avoid_: statistics, analytics, report.
 
 **In review**: A Run waiting on the human once its pull request is open. Not an end: the Run ends when the human merges or closes that pull request, and its Ticket stays unclosed until then or until the Run is Cleared. It no longer holds back the Tickets it blocks. Always the human's review, never the Review agent's.
 
-**Pipeline**: The checks GitHub runs on a Run's pull request. It has failed once any of its checks failed or timed out; a cancelled check is not finished yet, and a skipped or neutral one passed.
+**Pipeline**: The checks GitHub runs on a Run's pull request. It has failed once any of its checks failed or timed out; a cancelled check is not finished yet, and a skipped or neutral one passed. While a Run has an open Generated PR, its Pipeline is the Generated PR's, because the pull request alone fails the Project's generated-files check; once the Generated PR is merged, it is the pull request's again.
 _Avoid_: CI, check (alone: Smoke check, Check service and Check hint are about the sandbox).
 
-**Cleared**: An In review Run whose Pipeline has not failed: it finished without a failure, or none showed up within a short time of the pull request opening. Its Ticket is then closed before the human merges, and so is its parent as for Merged. The Run stays In review. A Pipeline that fails afterwards puts the Ticket back In review, with a parent it closed, and the Run is Cleared again once the Pipeline passes.
+**Cleared**: An In review Run whose Pipeline has not failed: it finished without a failure, or none showed up within a short time of the pull request opening, and, in a Project that opted in to the QA agent, whose QA agent ran and left no failure unfixed. A Run whose QA agent left a failure unfixed, or could not run, is never Cleared: its Ticket stays open until the pull request is Merged or closed. Its Ticket is then closed before the human merges, and so is its parent as for Merged. The Run stays In review. A Pipeline that fails afterwards puts the Ticket back In review, with a parent it closed, and the Run is Cleared again once the Pipeline passes.
 _Avoid_: passed, done.
 
 **Merged**: A Run's end once the human merges its pull request. The Ticket is then closed, if the Run was not Cleared already, and so is its parent once every child of it is closed, if the parent is not an epic on its own branch and is either a Spec ysz has broken down, or a Ticket marked fit for an agent that is not a Spec (a non-epic one, or an epic whose children the human wrote).
@@ -67,6 +76,9 @@ _Avoid_: passed, done.
 _Avoid_: merged (for this)
 
 **Epic PR**: The one pull request an epic on its own branch gets onto the base branch. Once every child of the epic is closed, ysz picks the epic like a Ready Ticket and opens it in a Run with no Attempt. The epic closes when it is Merged.
+
+**Generated PR**: The second pull request of a Run, opened only in a Project that opted in and only when the Run's generated files changed by more than a fixed number of lines. It holds those files alone and targets the branch of the Run's pull request, which holds everything else, so the human reads the hand-written change apart from the generated one. The human merges it into that branch first, and only then can the pull request pass the Project's checks and merge. It has no say in how the Run ends: the Run ends on its pull request, and ysz never closes a Generated PR. When it cannot be made, the Run opens one pull request that holds the generated files too.
+_Avoid_: second PR, codegen PR.
 
 **PR closed**: A Run's end once the human closes its pull request without merging. The Ticket goes back to the human to rework before it can be Ready again, even if the Run was Cleared and the Ticket closed.
 _Avoid_: closed, rejected.
