@@ -2,7 +2,10 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
+import { parseStats } from './dockerStats';
+import type { Footprint } from './store';
 
 const execFileAsync = promisify(execFile);
 /** A command line, not a payload: anything bigger is not a PHP check. */
@@ -13,6 +16,8 @@ export interface CheckServer {
   url: string;
   token: string;
   close(): Promise<void>;
+  /** What all the commands took from the host, for after close(); undefined if none ran. A command too brief to sample still adds its time. */
+  footprint(): Promise<Footprint | undefined>;
 }
 
 /**
@@ -25,7 +30,8 @@ export async function startCheckServer({
   clone,
   dockerBin = 'docker',
   timeoutMs = 600_000,
-}: { composeProject: string; service: string; clone: string; dockerBin?: string; timeoutMs?: number }): Promise<CheckServer> {
+  pollMs = 1000,
+}: { composeProject: string; service: string; clone: string; dockerBin?: string; timeoutMs?: number; pollMs?: number }): Promise<CheckServer> {
   const token = randomBytes(32).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
   const authorized = (header = '') => {
@@ -36,6 +42,48 @@ export async function startCheckServer({
   /** The name of the container now running, if any. */
   let running: string | undefined;
   const remove = (name: string) => execFileAsync(dockerBin, ['rm', '-f', name], { timeout: 60_000 }).catch(() => {});
+  // Footprint over every command: sums where containers are separate, extremes where they are not.
+  const total = { startedAt: 0, ms: 0, samples: 0, cores: 0, cpuPeak: 0, peakMemory: 0, networkIn: 0, layer: 0 };
+  /**
+   * Polls one container, one `docker stats` in flight at a time, until stop(). The container goes at exit (--rm), so the
+   * last reading before it is what counts. stop() is idempotent and does not throw.
+   */
+  const measure = (name: string) => {
+    const startedAt = Date.now();
+    total.startedAt ||= startedAt;
+    const abort = new AbortController();
+    const docker = (...args: string[]) => execFileAsync(dockerBin, args, { timeout: 30_000, signal: abort.signal }).then((r) => r.stdout.trim());
+    let rx = 0;
+    const polling = (async () => {
+      while (!abort.signal.aborted) {
+        const [stats, layer] = await Promise.all([
+          docker('stats', '--no-stream', '--format', '{{json .}}', name).then(parseStats, () => undefined),
+          docker('inspect', '--size', '--format', '{{.SizeRw}}', name).then(Number, () => 0),
+        ]);
+        if (stats) {
+          total.samples++;
+          total.cores += stats.cores;
+          total.cpuPeak = Math.max(total.cpuPeak, stats.cores);
+          total.peakMemory = Math.max(total.peakMemory, stats.memory);
+          rx = stats.rx;
+        }
+        total.layer = Math.max(total.layer, layer || 0);
+        await sleep(pollMs, undefined, { signal: abort.signal }).catch(() => {});
+      }
+    })();
+    let stopped: Promise<void> | undefined;
+    return () =>
+      (stopped ??= (async () => {
+        const endedAt = Date.now();
+        abort.abort();
+        await polling;
+        total.ms += endedAt - startedAt;
+        total.networkIn += rx;
+      })());
+  };
+  const stops: Promise<void>[] = [];
+  let stopRunning: (() => Promise<void>) | undefined;
+
   const fail = (res: ServerResponse, status: number, message = '') => {
     res.statusCode = status;
     res.end(message);
@@ -84,6 +132,7 @@ export async function startCheckServer({
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       started = true;
+      stopRunning = measure(name);
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', trailer: 'x-exit-code' });
       child.stdout.pipe(res, { end: false });
       child.stderr.pipe(res, { end: false });
@@ -106,6 +155,8 @@ export async function startCheckServer({
       if (res.headersSent) res.destroy();
       else fail(res, 500, `php-check: ${err instanceof Error ? err.message : String(err)}\n`);
     } finally {
+      if (stopRunning) stops.push(stopRunning());
+      stopRunning = undefined;
       running = undefined;
     }
   });
@@ -122,6 +173,23 @@ export async function startCheckServer({
         server.closeAllConnections();
       });
       if (left) await remove(left);
+      // A command cut by this close still counts what was sampled; its handler may still be waiting for the container to go.
+      if (stopRunning) stops.push(stopRunning());
+    },
+    async footprint() {
+      await Promise.all(stops);
+      if (!total.startedAt) return undefined;
+      // The clone with node_modules, plus the largest writable layer a command left.
+      const cloneSize = await execFileAsync('du', ['-sk', clone], { timeout: 120_000 }).then((r) => Number(r.stdout.split('\t')[0]) * 1024, () => 0);
+      return {
+        startedAt: total.startedAt,
+        seconds: Math.round(total.ms / 1000),
+        peakMemory: total.peakMemory,
+        cpuAvg: total.samples ? total.cores / total.samples : 0,
+        cpuPeak: total.cpuPeak,
+        disk: cloneSize + total.layer,
+        networkIn: total.networkIn,
+      };
     },
   };
 }

@@ -6,6 +6,12 @@ import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import type { Orchestrator } from './core';
 import type { RunLogs } from './logs';
+import { reportable } from './reportable';
+import type { RunRow } from './store';
+import type { TicketAction } from './ticketActions';
+
+/** An id the Backlog does not hold: 404, where any other refusal is 409. */
+class NotFound extends Error {}
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -13,6 +19,14 @@ const TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
 };
+
+/** What the Report routes need redaction for, which only main.ts has: ysz's .env and every Project's copyToWorktree files. Built on click, never in /api/state. */
+export interface BugReports {
+  /** The Run's excerpt file, as `runExcerpt` makes it. */
+  file(run: RunRow): Promise<{ name: string; text: string }>;
+  runLink(run: RunRow): Promise<string>;
+  generalLink(): Promise<string>;
+}
 
 /** The most of a Run's log a live tail sends at once, on connect and per poll. Agent output is untrusted and unbounded. */
 const TAIL_BYTES = 16 * 1024;
@@ -70,11 +84,15 @@ const COOKIE_MAX_AGE = 365 * 24 * 60 * 60;
 /** The most ended (and archived) Runs one /api/state may ask for. */
 const MAX_HISTORY = 500;
 
-/** JSON state at /api/state (`?limit=N` ended Runs), and what the Stats page graphs at /api/stats; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume} and /api/projects/:name/run-now/:ticketId; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
-export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, pollMs = 1000): Server {
+/** JSON state at /api/state (`?limit=N` ended Runs), what the Stats page graphs at /api/stats, each Project's Backlog rows with the Ready queue at /api/backlog, and a Backlog Ticket's description and comments at GET /api/projects/:name/tickets/:id; a Run's log at /api/runs/:id/log (full) and /api/runs/:id/log/stream (SSE tail); the Bug report at GET /api/runs/:id/bug-report (the excerpt file), /api/runs/:id/bug-form and /api/bug-form (302 to the pre-filled GitHub form); POST /api/runs/:id/{kill,retry,requeue,cleanup,delete,archive,unarchive}, /api/projects/:name/{pause,resume}, /api/projects/:name/run-now/:ticketId and /api/projects/:name/tickets/:id/{mark-ready,unmark-ready,skip,allow,unassign}; everything else is the built SPA from `staticDir`. Every /api route needs the cookie that `/?token=<token>` sets. */
+export function createHttpServer(orchestrator: Orchestrator, staticDir: string, logs: RunLogs, token: string, bugs: BugReports, pollMs = 1000): Server {
   // An empty token would match a missing cookie.
   if (!token) throw new Error('the Dashboard needs a token');
   const expected = Buffer.from(token);
+  /** Throws NotFound unless `id` is one of the Project's Backlog rows: that keeps closed Tickets out and an id starting with `-` away from bd. */
+  const inBacklog = (project: string, id: string) => {
+    if (!orchestrator.backlog().some((p) => p.name === project && p.rows?.some((r) => r.id === id))) throw new NotFound(`${id} is not in ${project}'s Backlog`);
+  };
   const isToken = (got = '') => Buffer.byteLength(got) === expected.length && timingSafeEqual(Buffer.from(got), expected);
   return createServer(async (req, res) => {
     // Block DNS rebinding: a page on evil.com resolved to 127.0.0.1 still sends Host: evil.com.
@@ -130,6 +148,70 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       return;
     }
 
+    if (path === '/api/backlog') {
+      // One request reads both, so a row's Ready state and its queue place come from the same snapshot.
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ projects: orchestrator.backlog(), ready: orchestrator.readyQueue() }));
+      return;
+    }
+
+    const detail = /^\/api\/projects\/([^/]+)\/tickets\/([^/]+)$/.exec(path);
+    if (detail) {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.end();
+        return;
+      }
+      res.setHeader('content-type', 'application/json');
+      try {
+        const [project, id] = [decodeURIComponent(detail[1]), decodeURIComponent(detail[2])];
+        inBacklog(project, id);
+        res.end(JSON.stringify(await orchestrator.ticketDetail(project, id)));
+      } catch (err) {
+        res.statusCode = err instanceof NotFound ? 404 : err instanceof URIError ? 400 : 502;
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      }
+      return;
+    }
+
+    const bug = /^\/api\/runs\/(\d+)\/(bug-report|bug-form)$/.exec(path) ?? (path === '/api/bug-form' ? ([path, '', 'general'] as const) : null);
+    if (bug) {
+      if (req.method !== 'GET') {
+        res.statusCode = 405;
+        res.end();
+        return;
+      }
+      const fail = (status: number, error: string) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error }));
+      };
+      let run: RunRow | undefined;
+      if (bug[2] !== 'general') {
+        run = orchestrator.run(Number(bug[1]));
+        if (!run) return fail(404, `Run ${bug[1]} does not exist`);
+        const verdict = reportable(run.state);
+        if (!verdict.ok) return fail(409, verdict.kind === 'live' ? `Run ${run.id} is live: Kill it first` : `Run ${run.id} reached its goal: report a bug in ysz from the top bar instead`);
+      }
+      try {
+        if (bug[2] === 'bug-report') {
+          const { name, text } = await bugs.file(run!);
+          // Redacted agent output: plain text that the browser must not sniff into HTML, saved under the Run's own name.
+          res.writeHead(200, {
+            'content-type': 'text/plain; charset=utf-8',
+            'content-disposition': `attachment; filename="${name.replace(/[^\w.-]/g, '_')}"`,
+            'x-content-type-options': 'nosniff',
+          });
+          res.end(text);
+        } else {
+          res.writeHead(302, { location: run ? await bugs.runLink(run) : await bugs.generalLink() });
+          res.end();
+        }
+      } catch (err) {
+        fail(500, err instanceof Error ? err.message : String(err));
+      }
+      return;
+    }
+
     const post = ((): (() => unknown) | undefined => {
       const run = /^\/api\/runs\/(\d+)\/(kill|retry|requeue|cleanup|delete|archive|unarchive)$/.exec(path);
       if (run) {
@@ -148,6 +230,14 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
       if (pause) return () => orchestrator.setPaused(decodeURIComponent(pause[1]), pause[2] === 'pause');
       const runNow = /^\/api\/projects\/([^/]+)\/run-now\/([^/]+)$/.exec(path);
       if (runNow) return () => orchestrator.runNow(decodeURIComponent(runNow[1]), decodeURIComponent(runNow[2]));
+      const action = /^\/api\/projects\/([^/]+)\/tickets\/([^/]+)\/(mark-ready|unmark-ready|skip|allow|unassign)$/.exec(path);
+      if (action) {
+        return () => {
+          const [project, id] = [decodeURIComponent(action[1]), decodeURIComponent(action[2])];
+          inBacklog(project, id);
+          return orchestrator.ticketAction(project, id, action[3] as TicketAction);
+        };
+      }
     })();
     if (post) {
       // The Host check above lets a form posted from any web page through, so only this page's own Origin may act.
@@ -161,7 +251,7 @@ export function createHttpServer(orchestrator: Orchestrator, staticDir: string, 
         await post();
         res.end('{}');
       } catch (err) {
-        res.statusCode = 409;
+        res.statusCode = err instanceof NotFound ? 404 : 409;
         res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       }
       return;

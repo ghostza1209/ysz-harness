@@ -1,18 +1,23 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
-import type { BeadsGateway, Ticket, TicketContext } from '../src/beads';
+import type { BacklogRow, BeadsGateway, PlannedTicket, Ticket, TicketContext } from '../src/beads';
 import { createOrchestrator } from '../src/core';
-import type { HostSteps } from '../src/host';
+import type { HostSteps, Pipeline } from '../src/host';
 import type { Project } from '../src/projects';
 import type { AgentResult, SandboxRunner } from '../src/sandbox';
 import { openStore, type RunState, type Store } from '../src/store';
+import type { TicketAction } from '../src/ticketActions';
 
 const projects: Project[] = ['fazwaz', 'PopDeal', 'thaivis'].map((name) => ({ name, repoPath: `/repos/${name}`, baseBranch: 'main', image: 'img' }));
 
 /** Each Project's bd queue, or the error its bd call fails with. */
 type Queues = Record<string, Ticket[] | Error>;
-/** Each Project's count of unclosed beads, as its poll reports it; 0 if unset. */
-let backlogs: Record<string, number>;
+/** Each Project's unclosed beads, as its poll reports them; none if unset. */
+let backlogs: Record<string, BacklogRow[]>;
+
+function row(id: string): BacklogRow {
+  return { id, title: `title of ${id}`, status: 'open', issue_type: 'task', priority: 2, assignee: null, labels: [], parent: null, dependencies: [], comment_count: 0, created_at: '2026-01-01T00:00:00Z' };
+}
 
 function ticket(id: string, priority: number, createdAt: string): Ticket {
   return { id, title: `title of ${id}`, priority, createdAt };
@@ -21,6 +26,10 @@ function ticket(id: string, priority: number, createdAt: string): Ticket {
 const PR_URL = 'https://github.com/thaivis/app/pull/7';
 /** When gh says a merged or closed PR closed. */
 const CLOSED_AT = Date.parse('2026-10-09T03:00:00Z');
+
+/** Holds a Project's next listReady open until resolved, and the error the next Backlog action's write fails with. */
+let listGates: Record<string, Promise<void>>;
+let ticketActionError: Error | undefined;
 
 /** Every bead write and host step, as "<op> <project>/<id>" lines in the order they happened. */
 let writes: string[];
@@ -33,6 +42,11 @@ let failError: Error | undefined;
 let prepareError: Error | undefined;
 /** What gh reports for each PR url, or the error it fails with; beads the human changed by hand ("project/id"), and the error the next PR-outcome bead write fails with. */
 let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
+/** How each PR's Pipeline stands (pending when unset) and when it opened (long ago when unset). */
+let pipelines: Record<string, Pipeline>;
+let prOpenedAt: Record<string, number>;
+/** The branch GitHub says each PR targets now; main when unset. */
+let prBases: Record<string, string>;
 let touchedByHand: Set<string>;
 let outcomeError: Error | undefined;
 /** Each live Run's "<state> <attempt>" as every prepare starts. */
@@ -43,7 +57,8 @@ let removedLogs: number[];
 let markError: Error | undefined;
 /** Holds showContext open (a Run in the claimed state) until resolved. */
 let contextGate: Promise<void> | undefined;
-/** The In review blocker showContext reports, and the context each prepare was given. */
+/** The closed and In review blockers showContext reports, and the context each prepare was given. */
+let closedBlockers: TicketContext['closedBlockers'];
 let inReviewBlocker: TicketContext['inReviewBlocker'];
 let preparedContexts: TicketContext[];
 /** The sandbox containers the orchestrator was asked to remove (by clone dir), and the error stop() fails with. */
@@ -54,9 +69,28 @@ let claimed: string[];
 let interruptError: Error | undefined;
 let releaseError: Error | undefined;
 let leftoverSweeps: number;
+/** Titles of the Friction whose write fails, and the Friction ids handed out so far. */
+let failingFriction: Set<string>;
+let frictionIds: number;
+/** Titles of Follow-ups whose Ticket cannot be created (until cleared), and how many Tickets were created. */
+let failingFollowUps: Set<string>;
+let followUpIds: number;
+/** The open Friction the Project's queue holds, or the error fetching it fails with. */
+let openFriction: { id: string; title: string }[] | Error;
+/** The Ticket file the host wrote into each clone before its review agent, and the error the next write fails with. */
+let ticketFiles: TicketContext[];
+let writeTicketError: Error | undefined;
 /** What each agent was asked: "<role> attempt <n> <summary of the previous Attempt, if any>". */
 let agentCalls: string[];
 let agent: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
+/** What each breakdown agent ends with; whether the Spec's children changed by the time its plan is created; and how an empty plan leaves it. */
+let breakdowner: (attempt: number) => Promise<Awaited<ReturnType<SandboxRunner['breakDown']>>>;
+let specChildrenChanged: boolean;
+let specLeft: 'released' | 'closed' | 'handed-back';
+/** The children and baseline showContext reports for a Spec, by id; the children each breakdown agent was given; and what each breakDown write was told its agent saw. */
+let specContexts: Record<string, Pick<TicketContext, 'children' | 'baseline'>>;
+let agentChildren: string[][];
+let seenByBreakDown: { children: string[]; baseline: string }[];
 let reviewer: (attempt: number, signal: AbortSignal) => Promise<AgentResult>;
 let publish: (signal: AbortSignal | undefined) => Promise<string>;
 /** The branch the next publish reports its PR targets. */
@@ -72,15 +106,58 @@ let collected: (dir: string) => { tip: string; commits: number } | Error;
 let clones: number;
 /** Projects whose sandbox image is absent, and the Projects whose preflight fails. */
 let missingImages: Set<string>;
+let dockerDown: boolean;
 let failingPreflights: Set<string>;
 /** Every preflight the orchestrator ran, by Project. */
 let preflights: string[];
+/** Whether prepare makes clones that land on epic/e-1 (ADR 0008), and the error the next land fails with. */
+let landing: boolean;
+/** The branch prepare cuts for a Ticket. */
+let branchFor: (ticketId: string) => string;
+let landError: Error | undefined;
+/** The fields showContext adds to each Ticket's bead, by id. */
+let beadFields: Record<string, Record<string, unknown>>;
+/** What the clones directory holds, the clones whose removal fails, and each clone measured, in order; a measure waits for `sizeGate`. */
+let clonesOnDisk: string[];
+let failingRemovals: Set<string>;
+let measured: string[];
+let sizeGate: Promise<void> | undefined;
+/** What du reports for every clone. */
+const CLONE_BYTES = 3_000_000_000;
 
 const fakeBeads = (queues: Queues): BeadsGateway => ({
   async listReady(project) {
     const queue = queues[project.name];
-    if (queue instanceof Error) throw queue;
-    return { tickets: queue ?? [], backlog: backlogs[project.name] ?? 0 };
+    const read = queue instanceof Error ? queue : { tickets: queue ?? [], rows: backlogs[project.name] ?? [] };
+    const gate = listGates[project.name]; // the read is taken before the gate opens, as a slow bd call reads before it answers
+    delete listGates[project.name];
+    await gate;
+    if (read instanceof Error) throw read;
+    return read;
+  },
+  async ticketFacts(project, id) {
+    const found = backlogs[project.name]?.find((r) => r.id === id);
+    if (!found) throw new Error(`no such bead ${id}`);
+    return found;
+  },
+  async ticketDetail() {
+    return { description: '', comments: [] };
+  },
+  async ticketAction(project, id, action) {
+    writes.push(`${action} ${project.name}/${id}`);
+    if (ticketActionError) throw ticketActionError;
+    const queue = (queues[project.name] ?? []) as Ticket[];
+    const relabel = (labels: (l: string[]) => string[]) => (backlogs[project.name] = backlogs[project.name].map((r) => (r.id === id ? { ...r, labels: labels(r.labels) } : r)));
+    if (action === 'mark-ready') {
+      const [found] = relabel((l) => [...l.filter((x) => x !== 'needs-info'), 'ready-for-agent']).filter((r) => r.id === id);
+      queues[project.name] = [...queue, ticket(id, found.priority, found.created_at)];
+    }
+    if (action === 'unmark-ready') {
+      relabel((l) => l.filter((x) => x !== 'ready-for-agent'));
+      queues[project.name] = queue.filter((t) => t.id !== id);
+    }
+    if (action === 'skip') relabel((l) => [...l, 'orchestrator:skip']);
+    if (action === 'allow') relabel((l) => l.filter((x) => x !== 'orchestrator:skip'));
   },
   async claim(project, id) {
     if (claimErrors[project.name]) throw claimErrors[project.name];
@@ -90,6 +167,11 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async release(project, id) {
     if (releaseError && id === 'tv-a') throw releaseError;
     writes.push(`release ${project.name}/${id}`);
+  },
+  async breakDown(project, spec, plan, seen) {
+    writes.push(`breakDown ${project.name}/${spec.id} P${spec.priority}: ${plan.map((t) => `${t.key}<${t.blockedBy.join(',')}>`).join(' ')}`);
+    seenByBreakDown.push(seen);
+    return specChildrenChanged ? null : { created: plan.map((_, i) => `${spec.id}.${i + 1}`), left: specLeft };
   },
   async fail(project, id, reason) {
     if (failError) throw failError;
@@ -112,16 +194,34 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
   async heartbeat() {},
   async showContext(_project, id) {
     await contextGate;
-    return { ticket: { id }, parent: null, closedBlockers: [], inReviewBlocker };
+    return { ticket: { id, ...beadFields[id] }, parent: null, closedBlockers, inReviewBlocker, openFriction: [], ...specContexts[id] };
   },
   async markInReview(project, id, prUrl) {
     if (markError) throw markError;
     writes.push(`markInReview ${project.name}/${id} ${prUrl}`);
   },
+  async cleared(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`cleared ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async uncleared(project, id, prUrl) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`uncleared ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
   async merged(project, id, prUrl) {
     if (outcomeError) throw outcomeError;
     if (touchedByHand.has(`${project.name}/${id}`)) return false;
     writes.push(`merged ${project.name}/${id} ${prUrl}`);
+    return true;
+  },
+  async landed(project, id, branch, tip) {
+    if (outcomeError) throw outcomeError;
+    if (touchedByHand.has(`${project.name}/${id}`)) return false;
+    writes.push(`landed ${project.name}/${id} on ${branch} at ${tip}`);
     return true;
   },
   async prClosed(project, id, prUrl) {
@@ -130,22 +230,55 @@ const fakeBeads = (queues: Queues): BeadsGateway => ({
     writes.push(`prClosed ${project.name}/${id} ${prUrl}`);
     return true;
   },
+  async createFriction({ project, title, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `ysz-${++frictionIds}`;
+  },
+  async createFollowUp({ project, title, ticketId, attempt, role }) {
+    if (failingFollowUps.has(title)) throw new Error('project bd is down');
+    writes.push(`follow-up ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}`);
+    return `${project.name}-f${++followUpIds}`;
+  },
+  async listOpenFriction() {
+    if (openFriction instanceof Error) throw openFriction;
+    return openFriction;
+  },
+  async commentFriction(id, { project, title, body, ticketId, attempt, role }) {
+    if (failingFriction.has(title)) throw new Error('ysz bd is down');
+    writes.push(`friction-comment ${id} from ${project.name}/${ticketId} attempt ${attempt} ${role}: ${title}${body && ` / ${body}`}`);
+  },
 });
 
-const complete: AgentResult = { outcome: 'complete' };
+const none: AgentResult['reports'] = { followUps: [], friction: [], fixedFollowUps: [] };
+const planned = (key: string, ...blockedBy: string[]): PlannedTicket => ({ key, title: `title of ${key}`, body: '', blockedBy });
+const spec = (id: string, priority: number): Ticket => ({ ...ticket(id, priority, '2026-01-01T00:00:00Z'), spec: true });
+const complete: AgentResult = { outcome: 'complete', reports: none };
 const dirAttempt = (dir: string) => Number(dir.split('-').at(-1));
+
+/** What a fake sandbox reports as its Footprint: startedAt tells the Attempt apart. */
+const footprintOf = (attempt: number) => ({ startedAt: attempt, seconds: 9, peakMemory: 1, cpuAvg: 0.5, cpuPeak: 1, disk: 2, networkIn: 3 });
 
 const fakeSandbox: SandboxRunner = {
   async hasImage(project) {
+    if (dockerDown) throw new Error('request returned 500 Internal Server Error');
     return !missingImages.has(project.name);
   },
   implement(req) {
     agentCalls.push(`implement attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
+    req.onFootprint?.('implement', footprintOf(req.attempt));
     return agent(req.attempt, req.signal);
   },
   review(req) {
     agentCalls.push(`review attempt ${req.attempt}`);
+    req.onFootprint?.('review', footprintOf(req.attempt));
     return reviewer(req.attempt, req.signal);
+  },
+  breakDown(req) {
+    agentCalls.push(`breakdown attempt ${req.attempt} ${req.previousAttemptSummary ?? ''}`.trim());
+    agentChildren.push(req.children);
+    req.onFootprint?.('breakdown', footprintOf(req.attempt));
+    return breakdowner(req.attempt);
   },
   async stop({ dir }) {
     if (stopError) throw stopError;
@@ -166,7 +299,11 @@ const fakeHost: HostSteps = {
     preparedContexts.push(context);
     preparedWhile.push(...store.liveRuns().map((r) => `${r.state} ${r.attempt}`));
     if (prepareError) throw prepareError;
-    return { branch: `agent/${ticketId}`, dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId };
+    return { branch: branchFor(ticketId), dir: `/clones/${ticketId}-${++clones}`, base: 'b'.repeat(40), key: ticketId, ...(landing && { epic: 'epic/e-1', land: true as const }) };
+  },
+  async writeTicket(_prepared, context) {
+    if (writeTicketError) throw writeTicketError;
+    ticketFiles.push(context);
   },
   async collect(_project, { dir }) {
     hostSteps.push(`collect ${dir}`);
@@ -180,13 +317,32 @@ const fakeHost: HostSteps = {
     opts?.log?.(`pushing ${branch}`);
     return { url: await publish(opts?.signal), base: publishBase };
   },
+  async land(_project, { branch, epic }, opts) {
+    hostSteps.push(`land ${branch} on ${epic}${opts?.tip ? ` at ${opts.tip}` : ''}`);
+    if (landError) throw landError;
+    return opts?.tip ?? 'd'.repeat(40);
+  },
+  async publishEpic(_project, epic, key, opts) {
+    hostSteps.push(`publishEpic ${epic.id} as ${key}${opts?.reviewSkipped ? `, review skipped: ${opts.reviewSkipped}` : ''}`);
+    return { url: await publish(opts?.signal), base: 'main' };
+  },
   async removeClone({ dir }) {
     hostSteps.push(`removeClone ${dir}`);
+    if (failingRemovals.has(dir)) throw new Error('EBUSY');
+    clonesOnDisk = clonesOnDisk.filter((d) => d !== dir);
+  },
+  async listClones() {
+    return clonesOnDisk;
+  },
+  async cloneSize({ dir }) {
+    measured.push(dir);
+    await sizeGate;
+    return CLONE_BYTES;
   },
   async prState(_project, prUrl) {
     const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
     if (state instanceof Error) throw state;
-    return { state, closedAt: state === 'OPEN' ? null : CLOSED_AT };
+    return { state, openedAt: prOpenedAt[prUrl] ?? now - 60 * 60_000, closedAt: state === 'OPEN' ? null : CLOSED_AT, base: prBases[prUrl] ?? 'main', pipeline: pipelines[prUrl] ?? 'pending' };
   },
 };
 
@@ -198,6 +354,8 @@ beforeEach(() => {
   store = openStore(':memory:');
   queues = {};
   backlogs = {};
+  listGates = {};
+  ticketActionError = undefined;
   now = Date.parse('2026-10-08T12:00:00Z');
   writes = [];
   hostSteps = [];
@@ -207,12 +365,16 @@ beforeEach(() => {
   prepareError = undefined;
   preparedWhile = [];
   prStates = {};
+  pipelines = {};
+  prOpenedAt = {};
+  prBases = {};
   touchedByHand = new Set();
   outcomeError = undefined;
   killError = undefined;
   removedLogs = [];
   markError = undefined;
   contextGate = undefined;
+  closedBlockers = [];
   inReviewBlocker = null;
   preparedContexts = [];
   stops = [];
@@ -221,9 +383,22 @@ beforeEach(() => {
   interruptError = undefined;
   releaseError = undefined;
   leftoverSweeps = 0;
+  failingFriction = new Set();
+  frictionIds = 0;
+  failingFollowUps = new Set();
+  followUpIds = 0;
+  openFriction = [];
+  ticketFiles = [];
+  writeTicketError = undefined;
   agentCalls = [];
   agent = async () => complete;
   reviewer = async () => complete;
+  breakdowner = async () => ({ ...complete, plan: [planned('T1'), planned('T2', 'T1')] });
+  specChildrenChanged = false;
+  specLeft = 'released';
+  specContexts = {};
+  agentChildren = [];
+  seenByBreakDown = [];
   publish = async () => PR_URL;
   publishBase = 'main';
   publishOpts = undefined;
@@ -231,12 +406,21 @@ beforeEach(() => {
   collected = () => ({ tip: 'a'.repeat(40), commits: 1 });
   clones = 0;
   missingImages = new Set();
+  dockerDown = false;
   failingPreflights = new Set();
   preflights = [];
+  landing = false;
+  branchFor = (ticketId) => `agent/${ticketId}`;
+  landError = undefined;
+  beadFields = {};
+  clonesOnDisk = [];
+  failingRemovals = new Set();
+  measured = [];
+  sizeGate = undefined;
 });
 
-async function polled(registry: readonly Project[] = projects) {
-  const orchestrator = createOrchestrator({
+function unpolled(registry: readonly Project[] = projects) {
+  return createOrchestrator({
     projects: registry,
     beads: fakeBeads(queues),
     sandbox: fakeSandbox,
@@ -247,6 +431,10 @@ async function polled(registry: readonly Project[] = projects) {
     log: (runId, line) => runLog.push(`${runId}: ${line}`),
     removeLog: async (runId) => void removedLogs.push(runId),
   });
+}
+
+async function polled(registry: readonly Project[] = projects) {
+  const orchestrator = unpolled(registry);
   await orchestrator.poll();
   return orchestrator;
 }
@@ -394,12 +582,36 @@ describe('polling', () => {
 
   it("records each Project's Backlog and Ready counts, but none for a Project whose poll fails", async () => {
     queues = { fazwaz: new Error('boom'), PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')] };
-    backlogs = { fazwaz: 4, PopDeal: 9 };
+    backlogs = { fazwaz: [row('fz1'), row('fz2')], PopDeal: [row('pd1'), row('pd2'), row('pd3')] };
     await polled();
     assert.deepEqual(store.backlogHistory(), [
-      { project: 'PopDeal', at: now, backlog: 9, ready: 1 },
+      { project: 'PopDeal', at: now, backlog: 3, ready: 1 },
       { project: 'thaivis', at: now, backlog: 0, ready: 0 },
     ]);
+  });
+
+  it("keeps each Project's Backlog rows and when the poll applied them, and a failing poll keeps the last ones beside its error", async () => {
+    backlogs = { PopDeal: [row('pd1')] };
+    const o = await polled();
+    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows?.map((r) => r.id), b.updatedAt, b.error]), [['fazwaz', [], now, null], ['PopDeal', ['pd1'], now, null], ['thaivis', [], now, null]]);
+    const first = now;
+    now += 5000;
+    backlogs = { fazwaz: [row('fz1')] };
+    queues.PopDeal = new Error('boom');
+    await o.poll();
+    assert.deepEqual(o.backlog().map((b) => [b.name, b.rows?.map((r) => r.id), b.updatedAt, b.error]), [
+      ['fazwaz', ['fz1'], now, null],
+      ['PopDeal', ['pd1'], first, 'boom'],
+      ['thaivis', [], now, null],
+    ]);
+  });
+
+  it('has no rows and no updatedAt before a Project polls successfully, and still none after a failing first poll', async () => {
+    queues = { fazwaz: new Error('boom') };
+    const o = unpolled();
+    assert.deepEqual(o.backlog().map((b) => [b.rows, b.updatedAt]), [[null, null], [null, null], [null, null]]);
+    await o.poll();
+    assert.deepEqual(o.backlog().map((b) => [b.rows === null, b.updatedAt === null, b.error]), [[true, true, 'boom'], [false, false, null], [false, false, null]]);
   });
 });
 
@@ -489,7 +701,7 @@ describe('starting Runs', () => {
     claimErrors.fazwaz = new Error('bd claim failed: no such repo');
     const o = await polled();
     await o.tick();
-    assert.deepEqual(o.runs(), { live: [], history: [], archived: [] });
+    assert.deepEqual(o.runs(), { live: [], history: [], archived: [], cloned: [], clonedBytes: 0 });
     assert.equal(o.projectStatuses()[0].error, 'claiming fz1: bd claim failed: no such repo');
   });
 
@@ -530,6 +742,16 @@ describe('infrastructure gates', () => {
     assert.deepEqual(writes.filter((w) => w.includes('fazwaz')), []);
     assert.deepEqual(reasons(o), ['fz1: image missing']);
     assert.deepEqual(preflights.sort(), ['PopDeal', 'thaivis']);
+  });
+
+  it('shows "docker down", not "image missing", when docker cannot be asked, and claims nothing', async () => {
+    dockerDown = true;
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(writes, []);
+    assert.deepEqual(reasons(o), ['fz1: docker down', 'pd1: docker down', 'tv1: docker down']);
+    assert.deepEqual(preflights, []);
   });
 
   it('claims the Ticket on the next tick once the preflight passes, with no Attempt burned in between', async () => {
@@ -587,6 +809,15 @@ describe('infrastructure gates', () => {
 });
 
 describe('a happy-path Run', () => {
+  it('records the branch prepare cut on the Run', async () => {
+    branchFor = (ticketId) => `OP-1-${ticketId}`;
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.branch]), [['tv1', 'OP-1-tv1']]);
+  });
+
   it('ends in-review: pushes via the host, marks the bead in review, removes the clone', async () => {
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
@@ -596,7 +827,7 @@ describe('a happy-path Run', () => {
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1', 'publish agent/tv1', 'removeClone /clones/tv1-1']);
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
     assert.deepEqual(o.runs().live, []);
     assert.deepEqual(o.slots(), { used: 0, total: 2 });
     const [run] = o.runs().history;
@@ -604,6 +835,23 @@ describe('a happy-path Run', () => {
       { project: run.project, ticketId: run.ticketId, title: run.title, state: run.state, attempt: run.attempt, prUrl: run.prUrl, note: run.note },
       { project: 'thaivis', ticketId: 'tv1', title: 'title of tv1', state: 'in-review', attempt: 1, prUrl: PR_URL, note: null },
     );
+  });
+
+  it("stores each sandbox's Footprint under its Attempt and role, also for the Attempt whose agent failed", async () => {
+    agent = async (attempt) => {
+      if (attempt === 1) throw new Error('container exited 137');
+      return complete;
+    };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [run] = o.runs().history;
+    assert.deepEqual(run.footprint, {
+      'attempt1-implement': footprintOf(1),
+      'attempt2-implement': footprintOf(2),
+      'attempt2-review': footprintOf(2),
+    });
   });
 
   it("records the branch its PR targets on the Run only when that is not the Project's baseBranch", async () => {
@@ -651,20 +899,201 @@ describe('a happy-path Run', () => {
   });
 });
 
-describe('a Run stacked on an In review blocker', () => {
-  const inReviewRun = (project: string, ticketId: string, prUrl: string) =>
-    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl });
+describe('a Spec', () => {
+  async function run() {
+    queues = { thaivis: [spec('ep1', 1)] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const historyOf = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.state, r.attempt, r.note]);
 
-  it("hands prepare the blocker with its Project's In review PR", async () => {
-    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1');
-    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+  it('queues as a Spec', async () => {
+    queues = { thaivis: [spec('ep1', 1)] };
+    assert.deepEqual((await polled()).readyQueue().map((q) => [q.id, q.spec]), [['ep1', true]]);
+  });
+
+  it('is broken down by one breakdown agent, whose plan is created under it at its priority, with no review and no PR', async () => {
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/ep1', 'removeClone /clones/ep1-1']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'breakDown thaivis/ep1 P1: T1<> T2<T1>']);
+    assert.deepEqual(historyOf(o), [['broken-down', 1, 'Broken down into ep1.1, ep1.2']]);
+    assert.equal(o.runs().history[0].cloneDir, null);
+    assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it("stores the breakdown agent's Footprint under its Attempt", async () => {
+    const o = await run();
+    assert.deepEqual(o.runs().history[0].footprint, { 'attempt1-breakdown': footprintOf(1) });
+  });
+
+  it('creates nothing, and says so, when the Spec\'s children changed while its agent ran', async () => {
+    specChildrenChanged = true;
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, "The Spec's children changed while its agent ran, so none were created."]]);
+  });
+
+  it("hands the Spec's children and baseline, as read at the Run's start, to its agent and to the breakdown it writes", async () => {
+    specContexts = { ep1: { children: [{ id: 'ep1.1', title: 'done', status: 'closed', body: '', closeReason: 'PR merged' }, { id: 'ep1.2', title: 'open', status: 'open', body: '', closeReason: '' }], baseline: 'b1' } };
+    breakdowner = async (n) => {
+      // An edit made while the agent runs is not what it saw: the second Attempt gets the same as the first.
+      specContexts = { ep1: { children: [], baseline: 'b2' } };
+      return n === 1 ? { ...complete, plan: 'it output no <ticket> tags' } : { ...complete, plan: [planned('T3', 'ep1.2')] };
+    };
+    await run();
+    assert.deepEqual(agentChildren, [['ep1.1', 'ep1.2'], ['ep1.1', 'ep1.2']]);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'breakDown thaivis/ep1 P1: T3<ep1.2>']);
+    assert.deepEqual(seenByBreakDown, [{ children: ['ep1.1', 'ep1.2'], baseline: 'b1' }]);
+  });
+
+  it('ends broken-down saying nothing was left when its agent plans no Tickets', async () => {
+    breakdowner = async () => ({ ...complete, plan: [] });
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'Nothing left to break down']]);
+  });
+
+  it('says so when a breakdown with nothing left closed the Spec, or handed it back for changing while its agent ran', async () => {
+    breakdowner = async () => ({ ...complete, plan: [] });
+    specLeft = 'closed';
+    assert.deepEqual(historyOf(await run()), [['broken-down', 1, 'Nothing left to break down; closed the Spec']]);
+    specLeft = 'handed-back';
+    assert.deepEqual(historyOf(await run())[0], ['broken-down', 1, 'Nothing left to break down, but the Spec changed while its agent ran, so it went back to the human']);
+  });
+
+  it('tries a second Attempt, told why the first failed, then hands the Spec back with both reasons', async () => {
+    breakdowner = async (n) => {
+      if (n === 1) throw new Error('container exited 137');
+      return { ...complete, plan: 'it output no <ticket> tags' };
+    };
+    const o = await run();
+    const first = 'Attempt 1 failed: the breakdown agent failed: container exited 137';
+    const both = `${first}\nAttempt 2 failed: the breakdown agent's plan is unusable: it output no <ticket> tags`;
+    assert.deepEqual(agentCalls, ['breakdown attempt 1', `breakdown attempt 2 ${first}`]);
+    assert.deepEqual(hostSteps, ['prepare thaivis/ep1', 'removeClone /clones/ep1-1', 'prepare thaivis/ep1', 'removeClone /clones/ep1-2']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', `fail thaivis/ep1: ${both}`]);
+    assert.deepEqual(historyOf(o), [['failed', 2, both]]);
+  });
+
+  it('counts an agent that stopped without a signal as a failed Attempt', async () => {
+    breakdowner = async (n) => (n === 1 ? { outcome: 'stopped', tail: 'blocked: no network', reports: none, plan: 'it output no <ticket> tags' } : { ...complete, plan: [planned('T1')] });
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1', 'breakdown attempt 2 Attempt 1 failed: the breakdown agent stopped without signalling COMPLETE: blocked: no network']);
+    assert.deepEqual(historyOf(o), [['broken-down', 2, 'Broken down into ep1.1']]);
+  });
+
+  it("hands the Spec back with the agent's question, without a second Attempt", async () => {
+    breakdowner = async () => ({ outcome: 'needs-info', question: 'One epic or two?', reports: none, plan: 'it output no <ticket> tags' });
+    const o = await run();
+    assert.deepEqual(agentCalls, ['breakdown attempt 1']);
+    assert.deepEqual(writes, ['claim thaivis/ep1', 'fail thaivis/ep1: The breakdown agent needs information:\nOne epic or two?']);
+    assert.deepEqual(historyOf(o), [['failed', 1, 'The breakdown agent needs information:\nOne epic or two?']]);
+  });
+});
+
+describe('a Run stacked on an In review blocker', () => {
+  const inReviewRun = (project: string, ticketId: string, prUrl: string, branch: string | null = null) =>
+    store.updateRun(store.insertRun({ project, ticketId, title: 'the blocker', state: 'in-review', startedAt: now }), { prUrl, branch });
+
+  it("hands prepare the blocker with its Project's In review PR and the branch that Run was cut on", async () => {
+    inReviewRun('PopDeal', 'tv0', 'https://example.test/popdeal/pull/1', 'OP-1-tv0');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2', 'OP-2-tv0');
     inReviewBlocker = { id: 'tv0', title: 'the blocker' };
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
     await o.whenIdle();
-    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2' });
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2', branch: 'OP-2-tv0' });
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
+  });
+
+  it('stacks on the PR of a Cleared blocker: closed, with its code only on its own branch', async () => {
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2', 'OP-2-tv0');
+    closedBlockers = [{ id: 'tv0', title: 'the blocker', closeReason: 'PR open' }];
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[0].inReviewBlocker, { id: 'tv0', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/2', branch: 'OP-2-tv0' });
+  });
+
+  it('keeps a Ticket from being Ready while two of its blockers have a PR not merged yet, since a PR has one base', async () => {
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    inReviewRun('thaivis', 'tv9', 'https://example.test/thaivis/pull/3');
+    queues = {
+      thaivis: [
+        { ...ticket('two', 2, '2026-01-01T00:00:00Z'), blockedBy: ['tv0', 'tv9'] },
+        { ...ticket('one', 2, '2026-01-01T00:00:01Z'), blockedBy: ['tv0', 'merged-long-ago'] },
+      ],
+    };
+    assert.deepEqual(order(await polled()), ['one']);
+  });
+
+  it("stacks on the In review branch a closed blocker's PR merged into, which alone holds its code", async () => {
+    // thaivis app-2bl: .16 stacked on .13 and merged into agent/app-2bl.13 while .13's own PR was still In review.
+    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975', 'OP-3-tv13');
+    inReviewBlocker = { id: 'tv13', title: 'the blocker' };
+    queues = { thaivis: [ticket('tv16', 2, '2026-01-01T00:00:00Z')] };
+    publish = async () => 'https://example.test/thaivis/pull/1979';
+    publishBase = 'OP-3-tv13';
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    prStates = { 'https://example.test/thaivis/pull/1975': 'OPEN', 'https://example.test/thaivis/pull/1979': 'MERGED' };
+    prBases['https://example.test/thaivis/pull/1979'] = 'OP-3-tv13';
+    assert.deepEqual(await o.watchReviews(), []);
+
+    inReviewBlocker = null;
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: 'PR merged: https://example.test/thaivis/pull/1979' }];
+    queues.thaivis = [ticket('tv18', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(preparedContexts[1].inReviewBlocker, { id: 'tv13', title: 'the blocker', prUrl: 'https://example.test/thaivis/pull/1975', branch: 'OP-3-tv13' });
+  });
+
+  const mergedRun = (ticketId: string, prBase: string, prClosedAt: number | null = null) =>
+    store.updateRun(store.insertRun({ project: 'thaivis', ticketId, title: 'merged', state: 'merged', startedAt: now }), { prUrl: `https://example.test/${ticketId}`, prBase, prClosedAt });
+
+  it('does not stack once the branch a closed blocker merged into has merged into the epic branch', async () => {
+    mergedRun('tv13', 'epic/tv', Date.parse('2026-10-08T11:00:00Z'));
+    mergedRun('tv16', 'agent/tv13', Date.parse('2026-10-08T10:00:00Z'));
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.equal(preparedContexts[0].inReviewBlocker, null);
+  });
+
+  it("fails the Run before any clone when a closed blocker merged into a branch after that branch's own PR merged", async () => {
+    // thaivis keeps merged head branches, so GitHub does not retarget a PR still open onto agent/tv13 once tv13 merges.
+    mergedRun('tv13', 'epic/tv', Date.parse('2026-10-08T10:00:00Z'));
+    mergedRun('tv14', 'agent/tv13', Date.parse('2026-10-08T11:00:00Z'));
+    closedBlockers = [{ id: 'tv14', title: 'title of tv14', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state, r.note]).filter(([id]) => id === 'tv18'), [
+      ['tv18', 'failed', 'tv14 merged into agent/tv13 after tv13 had merged, so its code is on no branch to start from'],
+    ]);
+  });
+
+  it('fails the Run before any clone when its In review blocker and a closed blocker sit on different branches', async () => {
+    inReviewRun('thaivis', 'tv13', 'https://example.test/thaivis/pull/1975');
+    inReviewRun('thaivis', 'tv0', 'https://example.test/thaivis/pull/2');
+    mergedRun('tv16', 'agent/tv13');
+    inReviewBlocker = { id: 'tv0', title: 'the blocker' };
+    closedBlockers = [{ id: 'tv16', title: 'title of tv16', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, []);
+    assert.deepEqual(o.runs().history.map((r) => [r.ticketId, r.state, r.note]).filter(([id]) => id === 'tv18'), [
+      ['tv18', 'failed', 'the Run would stack on tv0 and tv13, but a PR has one base'],
+    ]);
   });
 
   it('fails the Run before any clone, releasing the Ticket, when no In review Run holds the blocker', async () => {
@@ -690,7 +1119,7 @@ describe('a Run that does not reach a PR', () => {
   const historyOf = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.state, r.attempt, r.note]);
 
   it('does not pick a Ticket again once handing it back failed while the process lives', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     await o.poll(); // the released bead is Ready again
@@ -699,7 +1128,7 @@ describe('a Run that does not reach a PR', () => {
   });
 
   it('falls back to a plain release, keeping the reason, when the failed hand-back itself fails', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     failError = new Error('bd timed out');
     const o = await failedRun();
     assert.deepEqual(writes, ['claim thaivis/tv1', 'release thaivis/tv1']);
@@ -721,7 +1150,7 @@ describe('the Attempt policy', () => {
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
-    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined });
+    assert.deepEqual(publishOpts, { tip: undefined, reviewSkipped: undefined, followUps: [] });
   });
 
   it('retries a thrown implement agent once, in a fresh clone, handing over the failure', async () => {
@@ -748,7 +1177,7 @@ describe('the Attempt policy', () => {
   });
 
   it('retries an agent that stops without a signal, passing the end of its output', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database' } : complete);
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: 'the build needs a database', reports: none } : complete);
     await run();
     assert.equal(agentCalls[1], 'implement attempt 2 Attempt 1 failed: the implement agent stopped without signalling COMPLETE: the build needs a database');
   });
@@ -806,15 +1235,15 @@ describe('the Attempt policy', () => {
       throw new Error('idle for 600s');
     };
     const o = await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent failed: idle for 600s', followUps: [] });
     assert.deepEqual(historyOf(o), [['in-review', 1, null]]);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'markInReview thaivis/tv1 ' + PR_URL]);
   });
 
   it('skips the review, not the PR, when the review agent stops without a signal', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     await run();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it('keeps the review-skipped reason to one line of at most 300 characters', async () => {
@@ -828,7 +1257,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the implement agent needs info', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'Which of the two APIs?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nWhich of the two APIs?']);
@@ -837,7 +1266,7 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question and no second Attempt when the review agent needs info', async () => {
-    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?' });
+    reviewer = async () => ({ outcome: 'needs-info', question: 'Is the old export still wanted?', reports: none });
     const o = await run();
     assert.deepEqual(agentCalls, ['implement attempt 1', 'review attempt 1']);
     assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The review agent needs information:\nIs the old export still wanted?']);
@@ -846,9 +1275,557 @@ describe('the Attempt policy', () => {
   });
 
   it('ends failed with the question when Attempt 2 needs info after a failed Attempt 1', async () => {
-    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '' } : { outcome: 'needs-info', question: 'Which API?' });
+    agent = async (attempt) => (attempt === 1 ? { outcome: 'stopped', tail: '', reports: none } : { outcome: 'needs-info', question: 'Which API?', reports: none });
     const o = await run();
     assert.deepEqual(historyOf(o), [['failed', 2, 'The implement agent needs information:\nWhich API?']]);
+  });
+});
+
+describe('Follow-ups an agent reports', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it("gives publish the implement agent's titles, then the review agent's own", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export', 'rename the flag', 'cover the empty case']);
+  });
+
+  it("gives the implement agent's alone when the review stopped", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: followUps('half a review') });
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it("gives the implement agent's alone when the review threw", async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    reviewer = async () => {
+      throw new Error('idle for 600s');
+    };
+    await run();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+
+  it('takes them from the Attempt the PR opens from, never from a failed one', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('from the second review') });
+    await run();
+    assert.deepEqual(published(), ['from the second attempt', 'from the second review']);
+  });
+
+  it('keeps them for a retry of the host step', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    let failures = 1;
+    publish = async () => {
+      if (failures-- > 0) throw new Error('git push failed: rejected');
+      return PR_URL;
+    };
+    const o = await run();
+    publishOpts = undefined;
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+    assert.deepEqual(published(), ['drop the old export']);
+  });
+});
+
+describe('what the review agent is handed and may mark fixed', () => {
+  const reports = (followUps: string[], friction: AgentResult['reports']['friction'] = [], fixedFollowUps: string[] = []): AgentResult['reports'] => ({
+    followUps: followUps.map((title) => ({ title, body: `why ${title}` })),
+    friction,
+    fixedFollowUps,
+  });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const created = () => writes.filter((w) => w.startsWith('follow-up')).map((w) => w.split(': ').slice(1).join(': '));
+  const published = () => (publishOpts as { followUps: string[] }).followUps;
+
+  it('writes the implement agent\'s Follow-ups as F1... and its Friction with their Ticket ids into the Ticket file before the review agent starts', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({
+      outcome: 'complete',
+      reports: reports(['drop the old export', 'rename the flag'], [{ title: 'no php', body: 'x' }, { title: 'phpunit exited 127 again', body: 'y', ref: 'ysz-7' }]),
+    });
+    let seen: TicketContext[] = [];
+    reviewer = async () => {
+      seen = [...ticketFiles];
+      return complete;
+    };
+    await run();
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].implementReports, {
+      followUps: [
+        { ref: 'F1', title: 'drop the old export', body: 'why drop the old export' },
+        { ref: 'F2', title: 'rename the flag', body: 'why rename the flag' },
+      ],
+      friction: [
+        { id: 'ysz-1', title: 'no php', seenAgain: false },
+        { id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true },
+      ],
+    });
+    assert.deepEqual(seen[0].openFriction, [
+      { id: 'ysz-7', title: 'phpunit cannot run' },
+      { id: 'ysz-1', title: 'no php' },
+    ]);
+  });
+
+  it('turns the review agent\'s reference to a Friction the implement agent just opened into a comment', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php', body: 'x' }]) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [{ title: 'no php again', body: 'z', ref: 'ysz-1' }]) });
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), [
+      'friction thaivis/tv1 attempt 1 implement: no php',
+      'friction-comment ysz-1 from thaivis/tv1 attempt 1 review: no php again / z',
+    ]);
+  });
+
+  it('hands the review agent no reports when the implement agent made none', async () => {
+    await run();
+    assert.deepEqual(ticketFiles.map((f) => f.implementReports), [{ followUps: [], friction: [] }]);
+  });
+
+  it('drops the Follow-ups the review marks fixed from the PR and the Tickets, and keeps the rest and its own', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two', 'three']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports(['four'], [], ['F1', 'F3']) });
+    const o = await run();
+    assert.deepEqual(published(), ['two', 'four']);
+    assert.deepEqual(created(), ['two', 'four']);
+    assert.deepEqual(o.runs().history[0].reports?.followUps.map((f) => f.title), ['two', 'four']);
+  });
+
+  it('keeps an implement Follow-up the review says nothing about, and ignores a ref it never handed out', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'complete', reports: reports([], [], ['F3', 'F0', 'one', 'F']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('gives the implement agent\'s Follow-ups alone when the review is skipped, whatever it marked', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two']) });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: reports(['half a review'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+    assert.deepEqual(created(), ['one', 'two']);
+  });
+
+  it('ignores fixed marks the implement agent makes', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one', 'two'], [], ['F1']) });
+    await run();
+    assert.deepEqual(published(), ['one', 'two']);
+  });
+
+  it('fails the Attempt, and retries on a fresh clone, when the Ticket file cannot be written', async () => {
+    agent = async () => ({ outcome: 'complete', reports: reports(['one']) });
+    writeTicketError = new Error('refusing to write the Ticket file: .orchestrator is not a plain directory');
+    const o = await run();
+    assert.deepEqual(agentCalls.filter((c) => c.startsWith('review')), []);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.note]), [[
+      'failed',
+      'Attempt 1 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory\n' +
+        'Attempt 2 failed: the implement agent\'s reports could not be handed to the review agent: refusing to write the Ticket file: .orchestrator is not a plain directory',
+    ]]);
+  });
+});
+
+describe('Follow-up Tickets the Run creates', () => {
+  const followUps = (...titles: string[]): AgentResult['reports'] => ({ followUps: titles.map((title) => ({ title, body: '' })), friction: [], fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+
+  it('writes them one at a time between publish and markInReview, and the Run records each id and title', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export', 'rename the flag') });
+    reviewer = async () => ({ outcome: 'complete', reports: followUps('cover the empty case') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'follow-up thaivis/tv1 attempt 1 implement: drop the old export',
+      'follow-up thaivis/tv1 attempt 1 implement: rename the flag',
+      'follow-up thaivis/tv1 attempt 1 review: cover the empty case',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [
+      ['in-review', [
+        { id: 'thaivis-f1', title: 'drop the old export' },
+        { id: 'thaivis-f2', title: 'rename the flag' },
+        { id: 'thaivis-f3', title: 'cover the empty case' },
+      ]],
+    ]);
+  });
+
+  it('creates them only after the PR is open', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('drop the old export') });
+    publish = async () => {
+      assert.deepEqual(writes, ['claim thaivis/tv1']);
+      return PR_URL;
+    };
+    await run();
+    assert.equal(writes.length, 3);
+  });
+
+  it('creates none from a failed Attempt, only from the Attempt the PR opened from', async () => {
+    agent = async (attempt) =>
+      attempt === 1 ? { outcome: 'stopped', tail: 'x', reports: followUps('from the failed attempt') } : { outcome: 'complete', reports: followUps('from the second attempt') };
+    await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 2 implement: from the second attempt']);
+  });
+
+  it('creates none for a Run that fails without reaching In review', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: followUps('drop the old export') });
+    const o = await run();
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), []);
+    assert.equal(o.runs().history[0].reports, null);
+  });
+
+  it('parks the Run in needs-attention when a Follow-up cannot be written, and a retry creates only the missing ones, with no second PR', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second', 'third') });
+    failingFollowUps.add('second');
+    const o = await run();
+    assert.deepEqual(o.runs().live.map((r) => [r.state, r.note, r.reports?.followUps]), [['needs-attention', 'project bd is down', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+
+    failingFollowUps.clear();
+    await o.retryHostStep(o.runs().live[0].id);
+    await o.whenIdle();
+
+    assert.deepEqual(writes.slice(2), [
+      'follow-up thaivis/tv1 attempt 1 implement: second',
+      'follow-up thaivis/tv1 attempt 1 implement: third',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps.map((f) => f.title)]), [['in-review', ['first', 'second', 'third']]]);
+  });
+
+  it('creates no further Follow-up once the Run is killed during the host steps', async () => {
+    agent = async () => ({ outcome: 'complete', reports: followUps('first', 'second') });
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFollowUp: async (f) => { const id = await base.createFollowUp(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('follow-up')), ['follow-up thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.followUps]), [['killed', [{ id: 'thaivis-f1', title: 'first' }]]]);
+    assert.equal(writes.some((w) => w.startsWith('markInReview')), false);
+  });
+});
+
+describe('Friction an agent reports', () => {
+  const friction = (...titles: string[]): AgentResult['reports'] => ({ followUps: [], friction: titles.map((title) => ({ title, body: '' })), fixedFollowUps: [] });
+  async function run() {
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    return o;
+  }
+  const recorded = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => r.reports);
+
+  it('writes each agent\'s Friction as a new Ticket, in order, and the Run records them', async () => {
+    agent = async () => ({ outcome: 'complete', reports: friction('no php in the sandbox', 'stale check hint') });
+    reviewer = async () => ({ outcome: 'complete', reports: friction('lint cannot run') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no php in the sandbox',
+      'friction thaivis/tv1 attempt 1 implement: stale check hint',
+      'friction thaivis/tv1 attempt 1 review: lint cannot run',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o), [
+      {
+        followUps: [],
+        friction: [
+          { id: 'ysz-1', title: 'no php in the sandbox', seenAgain: false },
+          { id: 'ysz-2', title: 'stale check hint', seenAgain: false },
+          { id: 'ysz-3', title: 'lint cannot run', seenAgain: false },
+        ],
+      },
+    ]);
+  });
+
+  it('has nothing recorded for a Run whose agents reported nothing', async () => {
+    assert.deepEqual(recorded(await run()), [null]);
+  });
+
+  it('writes the Friction of an agent that needs info, before handing the Ticket back', async () => {
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('check hint is wrong') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: check hint is wrong',
+      'fail thaivis/tv1: The implement agent needs information:\nwhich API?',
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'check hint is wrong', seenAgain: false }]);
+  });
+
+  it('writes the Friction of a review agent that needs info', async () => {
+    reviewer = async () => ({ outcome: 'needs-info', question: 'keep the export?', reports: friction('review hint is wrong') });
+    await run();
+    assert.deepEqual(writes.slice(1, 2), ['friction thaivis/tv1 attempt 1 review: review hint is wrong']);
+  });
+
+  it('writes the Friction of an agent that stopped, in both Attempts, and keeps both on the Run', async () => {
+    agent = async (attempt) =>
+      attempt === 1
+        ? { outcome: 'stopped', tail: 'no database', reports: friction('no database in the sandbox') }
+        : { outcome: 'complete', reports: friction('still no database') };
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('review stopped too') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction thaivis/tv1 attempt 1 implement: no database in the sandbox',
+      'friction thaivis/tv1 attempt 2 implement: still no database',
+      'friction thaivis/tv1 attempt 2 review: review stopped too',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction.map((f) => f.id), ['ysz-1', 'ysz-2', 'ysz-3']);
+  });
+
+  it('writes nothing for an agent that finishes after the Run was killed', async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    agent = async () => {
+      await gate;
+      return { outcome: 'complete', reports: friction('too late') };
+    };
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await flush();
+    const killed = o.kill(o.runs().live[0].id);
+    finish(); // the agent ignores the abort and still reports
+    await killed;
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'kill thaivis/tv1: Killed from the dashboard while agent.']);
+    assert.deepEqual(recorded(o), [null]);
+  });
+
+  it('stops writing the rest of an agent\'s Friction once the Run is killed, and ends the Attempt there, keeping the clone', async () => {
+    let kill!: () => Promise<void>;
+    let killed: Promise<void> | undefined;
+    agent = async () => ({ outcome: 'stopped', tail: 'x', reports: friction('first', 'second') });
+    const base = fakeBeads(queues);
+    const o = createOrchestrator({
+      projects,
+      beads: { ...base, createFriction: async (f) => { const id = await base.createFriction(f); killed ??= kill(); return id; } },
+      sandbox: fakeSandbox, host: fakeHost, store, clock: { now: () => now }, model: 'test-model',
+    });
+    queues.thaivis = [ticket('tv1', 2, '2026-01-01T00:00:00Z')];
+    await o.poll();
+    await o.tick();
+    kill = () => o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    await killed;
+    assert.deepEqual(writes.filter((w) => w.startsWith('friction')), ['friction thaivis/tv1 attempt 1 implement: first']);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.cloneDir]), [['killed', '/clones/tv1-1']]);
+  });
+
+  it('logs a failed write and goes on: the other Friction is written and the Run ends In review', async () => {
+    failingFriction.add('broken one');
+    agent = async () => ({ outcome: 'complete', reports: friction('broken one', 'fine one') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "broken one" failed: ysz bd is down']);
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: fine one', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports?.friction]), [['in-review', [{ id: 'ysz-1', title: 'fine one', seenAgain: false }]]]);
+  });
+
+  const seenAgain = (ref: string, title: string, body = ''): AgentResult['reports'] => ({ followUps: [], friction: [{ title, body, ref }], fixedFollowUps: [] });
+
+  it('comments on an open Friction a report refers to, instead of opening a duplicate, and the Run shows it as seen again', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again', 'skipped it') });
+    const o = await run();
+    assert.deepEqual(writes, [
+      'claim thaivis/tv1',
+      'friction-comment ysz-7 from thaivis/tv1 attempt 1 implement: phpunit exited 127 again / skipped it',
+      'markInReview thaivis/tv1 ' + PR_URL,
+    ]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-7', title: 'phpunit cannot run', seenAgain: true }]);
+  });
+
+  it('opens a new Ticket for a reference that is not in the open list: a closed Friction, or a mistaken id', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-3', 'came back after the fix') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'friction thaivis/tv1 attempt 1 implement: came back after the fix', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'came back after the fix', seenAgain: false }]);
+  });
+
+  it('gives prepare the open Friction of the Project, fetched again for each Attempt', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    agent = async (attempt) => {
+      if (attempt > 1) return complete;
+      openFriction = [{ id: 'ysz-8', title: 'lint cannot run' }]; // the human closed ysz-7 and a new Friction opened meanwhile
+      return { outcome: 'stopped', tail: 'x', reports: none };
+    };
+    await run();
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[{ id: 'ysz-7', title: 'phpunit cannot run' }], [{ id: 'ysz-8', title: 'lint cannot run' }]]);
+  });
+
+  it('logs a failed fetch of the open Friction and goes ahead with none: a reference then opens a new Ticket', async () => {
+    openFriction = new Error('ysz bd is down');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'phpunit exited 127 again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('open Friction')), ['1: Fetching the open Friction failed, so the agents get none: ysz bd is down']);
+    assert.deepEqual(preparedContexts.map((c) => c.openFriction), [[]]);
+    assert.deepEqual(o.runs().history.map((r) => r.state), ['in-review']);
+    assert.deepEqual(recorded(o)[0]?.friction, [{ id: 'ysz-1', title: 'phpunit exited 127 again', seenAgain: false }]);
+  });
+
+  it('logs a failed comment and goes on, leaving it off the Run', async () => {
+    openFriction = [{ id: 'ysz-7', title: 'phpunit cannot run' }];
+    failingFriction.add('again');
+    agent = async () => ({ outcome: 'complete', reports: seenAgain('ysz-7', 'again') });
+    const o = await run();
+    assert.deepEqual(runLog.filter((l) => l.includes('Friction')), ['1: Recording Friction "again" failed: ysz bd is down']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['in-review', null]]);
+  });
+
+  it('ends a failed Run as it otherwise would when its Friction cannot be written', async () => {
+    failingFriction.add('lost');
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: friction('lost') });
+    const o = await run();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'fail thaivis/tv1: The implement agent needs information:\nwhich API?']);
+    assert.deepEqual(o.runs().history.map((r) => [r.state, r.reports]), [['failed', null]]);
+  });
+});
+
+describe('an epic on its own branch (ADR 0008)', () => {
+  const D = 'd'.repeat(40);
+  const epicPr = (id: string): Ticket => ({ ...ticket(id, 2, '2026-01-01T00:00:00Z'), epicPr: true });
+
+  it('lands a child on the epic branch instead of publishing: bead closed as landed, Run ends landed with no PR, clone removed', async () => {
+    landing = true;
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(writes, ['claim thaivis/tv1', `landed thaivis/tv1 on epic/e-1 at ${D}`]);
+    assert.deepEqual(hostSteps, ['prepare thaivis/tv1', 'collect /clones/tv1-1', 'land agent/tv1 on epic/e-1', 'removeClone /clones/tv1-1']);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.prUrl, run.prBase, run.note, run.cloneDir], ['landed', 1, null, 'epic/e-1', null, null]);
+    assert.deepEqual(o.slots(), { used: 0, total: 2 });
+  });
+
+  it('lands the implement commits when the review agent stops, and notes the skipped review on the Run', async () => {
+    landing = true;
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.equal(hostSteps[2], `land agent/tv1 on epic/e-1 at ${'a'.repeat(40)}`);
+    assert.equal(o.runs().history[0].note, 'review skipped: the review agent stopped without signalling COMPLETE');
+  });
+
+  it('parks a landing that fails in needs-attention with the bead open, and Retry lands it, then closes the bead', async () => {
+    landing = true;
+    landError = new Error('git fetch failed: ! [rejected] agent/tv1 -> epic/e-1 (non-fast-forward)');
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [parked] = o.runs().live;
+    assert.deepEqual([parked.state, parked.note], ['needs-attention', 'git fetch failed: ! [rejected] agent/tv1 -> epic/e-1 (non-fast-forward)']);
+    assert.deepEqual(writes, ['claim thaivis/tv1']);
+
+    landError = undefined;
+    await o.retryHostStep(parked.id);
+    await o.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', `landed thaivis/tv1 on epic/e-1 at ${D}`]);
+    assert.equal(o.runs().history[0].state, 'landed');
+  });
+
+  it('runs an epic whose children are all closed with no Attempt: opens its PR titled by its Jira key, then marks the epic in review', async () => {
+    queues = { thaivis: [epicPr('e-1')] };
+    beadFields = { 'e-1': { labels: ['epic-branch', 'OP-9'] } };
+    const o = await polled();
+    assert.deepEqual(o.readyQueue().map((q) => [q.id, q.epicPr]), [['e-1', true]]);
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(writes, ['claim thaivis/e-1', `markInReview thaivis/e-1 ${PR_URL}`]);
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9']);
+    assert.deepEqual(agentCalls, []);
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.attempt, run.prUrl, run.prBase], ['in-review', 0, PR_URL, null]);
+  });
+
+  it("heads the epic's PR with each child of this epic that landed with its review skipped", async () => {
+    const landedRun = (ticketId: string, prBase: string, note: string | null) => {
+      const id = store.insertRun({ project: 'thaivis', ticketId, title: ticketId, state: 'landed', startedAt: now });
+      store.updateRun(id, { prBase, note });
+    };
+    landedRun('e-1.1', 'epic/e-1', 'review skipped: the review agent failed: boom');
+    landedRun('e-1.2', 'epic/e-1', null);
+    landedRun('e-2.1', 'epic/e-2', 'review skipped: elsewhere');
+    landedRun('e-1.3', 'epic/e-1', 'review skipped: the review agent stopped without signalling COMPLETE');
+    landedRun('e-1.4', 'OP-9-e-1', 'review skipped: cut under its Jira key');
+    landedRun('e-10.1', 'OP-9-e-10', 'review skipped: another epic');
+    queues = { thaivis: [epicPr('e-1')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as e-1, review skipped: e-1.1: the review agent failed: boom; e-1.3: the review agent stopped without signalling COMPLETE; e-1.4: cut under its Jira key']);
+  });
+
+  it("resumes an epic's PR after a restart without a clone, and parks it when it fails again", async () => {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'e-1', title: 'the epic', state: 'host', startedAt: now });
+    store.setHostJob(id, JSON.stringify({ epicKey: 'OP-9', followUps: [] }));
+    publish = async () => {
+      throw new Error('git push failed: rejected');
+    };
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9']);
+    assert.deepEqual([o.runs().live[0].state, o.runs().live[0].note], ['needs-attention', 'git push failed: rejected']);
+
+    publish = async () => PR_URL;
+    await o.retryHostStep(id);
+    await o.whenIdle();
+    assert.deepEqual(hostSteps, ['publishEpic e-1 as OP-9', 'publishEpic e-1 as OP-9']); // no clone to remove
+    assert.deepEqual(writes, [`markInReview thaivis/e-1 ${PR_URL}`]);
+  });
+
+  it('archives a landed Run like a merged one', async () => {
+    const id = store.insertRun({ project: 'thaivis', ticketId: 'tv1', title: 'a Run', state: 'landed', startedAt: now });
+    const o = await polled();
+    o.setArchived(id, true);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [id]);
   });
 });
 
@@ -907,11 +1884,11 @@ describe('a host step that fails', () => {
   });
 
   it('a retry publishes the same commit and review note as the first try', async () => {
-    reviewer = async () => ({ outcome: 'stopped', tail: 'x' });
+    reviewer = async () => ({ outcome: 'stopped', tail: 'x', reports: none });
     const o = await parkedRun();
     await o.retryHostStep(o.runs().live[0].id);
     await o.whenIdle();
-    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE' });
+    assert.deepEqual(publishOpts, { tip: 'a'.repeat(40), reviewSkipped: 'the review agent stopped without signalling COMPLETE', followUps: [] });
   });
 
   it("writes each Push & PR try to the Run's log: the host step's lines, then the PR or why it failed", async () => {
@@ -1151,7 +2128,7 @@ describe('Kill', () => {
 
 describe('Retry a failed Run', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1195,7 +2172,7 @@ describe('Retry a failed Run', () => {
 
 describe('Clean up', () => {
   async function failedRun() {
-    agent = async () => ({ outcome: 'stopped', tail: 'blocked' });
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1219,7 +2196,7 @@ describe('Clean up', () => {
   });
 
   it('also removes the clone a NEEDS_INFO Run left behind', async () => {
-    agent = async () => ({ outcome: 'needs-info', question: 'which API?' });
+    agent = async () => ({ outcome: 'needs-info', question: 'which API?', reports: none });
     queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
     await o.tick();
@@ -1241,10 +2218,22 @@ describe('Clean up', () => {
     assert.equal(o.runs().history[0].cloneDir, null);
   });
 
-  it('refuses Runs that are live or in review', async () => {
+  it('cleans up a merged Run that still has its clone', async () => {
     const o = await polled();
-    await assert.rejects(o.cleanUp(startRun('thaivis', 'needs-attention')), /no clone to clean up/);
+    const id = startRun('thaivis', 'merged');
+    store.updateRun(id, { cloneDir: '/clones/x' });
+    await o.cleanUp(id);
+    assert.deepEqual(hostSteps, ['removeClone /clones/x']);
+    assert.equal(store.getRun(id)?.cloneDir, null);
+  });
+
+  it('refuses a live Run, whose clone Retry still publishes from, and a Run with no clone', async () => {
+    const o = await polled();
+    const live = startRun('thaivis', 'needs-attention');
+    store.updateRun(live, { cloneDir: '/clones/x' });
+    await assert.rejects(o.cleanUp(live), /still live/);
     await assert.rejects(o.cleanUp(startRun('fazwaz', 'in-review')), /no clone to clean up/);
+    await assert.rejects(o.cleanUp(999), /no clone to clean up/);
     assert.deepEqual(hostSteps, []);
   });
 
@@ -1261,6 +2250,159 @@ describe('Clean up', () => {
       fakeHost.removeClone = removeClone;
     }
     assert.equal(o.runs().history[0].cloneDir, '/clones/tv1-2');
+  });
+});
+
+describe('Clones nobody needs', () => {
+  /** An ended Run of `ticketId` from before, with its clone at /clones/<clone> when one is named. */
+  const endedRun = (ticketId: string, state: RunState, clone?: string, project = 'thaivis') => {
+    const id = store.insertRun({ project, ticketId, title: 't', state, startedAt: now });
+    store.updateRun(id, { endedAt: now, cloneDir: clone ? `/clones/${clone}` : null });
+    return id;
+  };
+  const clonesLeft = () => store.allRuns().flatMap((r) => r.cloneDir ?? []);
+  const removed = () => hostSteps.filter((s) => s.startsWith('removeClone ')).map((s) => s.slice('removeClone /clones/'.length));
+
+  for (const ending of ['in-review', 'landed'] as const) {
+    it(`removes the clones of the Ticket's earlier failed and killed Runs once a Run ends ${ending}`, async () => {
+      landing = ending === 'landed';
+      endedRun('tv1', 'failed', 'tv1-failed');
+      endedRun('tv1', 'killed', 'tv1-killed');
+      endedRun('tv2', 'failed', 'tv2-failed');
+      endedRun('tv1', 'failed', 'fazwaz-tv1-failed', 'fazwaz');
+      queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+      const o = await polled();
+      await o.tick();
+      await o.whenIdle();
+      assert.equal(o.runs().history[0].state, ending);
+      assert.deepEqual(removed().sort(), ['tv1-1', 'tv1-failed', 'tv1-killed']);
+      assert.deepEqual(clonesLeft(), ['/clones/tv2-failed', '/clones/fazwaz-tv1-failed']);
+      assert.deepEqual(measured, []); // only a Run that ends failed or killed keeps its clone
+    });
+  }
+
+  it('still ends the Run in review, and logs it, when an earlier clone cannot be removed', async () => {
+    const old = endedRun('tv1', 'failed', 'tv1-failed');
+    failingRemovals.add('/clones/tv1-failed');
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    const [run] = o.runs().history;
+    assert.deepEqual([run.state, run.cloneDir], ['in-review', null]);
+    assert.equal(store.getRun(old)?.cloneDir, '/clones/tv1-failed');
+    assert.ok(runLog.includes(`${run.id}: Removing the clone of Run ${old} failed: EBUSY`), runLog.join('\n'));
+  });
+
+  it("keeps the earlier clones when the Ticket's Run fails again", async () => {
+    endedRun('tv1', 'failed', 'tv1-failed');
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(clonesLeft(), ['/clones/tv1-failed', '/clones/tv1-2']);
+  });
+
+  it("measures a failed Run's clone once it ends", async () => {
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/tv1-2']);
+    assert.equal(o.runs().history[0].cloneBytes, CLONE_BYTES);
+  });
+
+  it("measures a killed Run's clone", async () => {
+    gatedAgent();
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await flush();
+    await o.kill(o.runs().live[0].id);
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/tv1-1']);
+    assert.equal(o.runs().history[0].cloneBytes, CLONE_BYTES);
+  });
+
+  it('records no size for a clone cleaned up while du measured it', async () => {
+    let open!: () => void;
+    sizeGate = new Promise((resolve) => (open = resolve));
+    agent = async () => ({ outcome: 'stopped', tail: 'blocked', reports: none });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    for (let i = 0; i < 100 && !measured.length; i++) await flush();
+    await o.cleanUp(o.runs().history[0].id);
+    open();
+    await o.whenIdle();
+    assert.deepEqual([o.runs().history[0].cloneDir, o.runs().history[0].cloneBytes], [null, null]);
+  });
+
+  it('lists every Run with a clone past the History limit, with their total size', async () => {
+    store.updateRun(endedRun('tv1', 'failed', 'tv1-failed'), { cloneBytes: 2_000 });
+    store.updateRun(endedRun('tv2', 'killed', 'tv2-killed'), { cloneBytes: 500 });
+    endedRun('tv3', 'failed', 'tv3-unmeasured');
+    endedRun('tv4', 'merged');
+    const o = await polled();
+    const { history, cloned, clonedBytes } = o.runs(1);
+    assert.deepEqual(history.map((r) => r.ticketId), ['tv4']);
+    assert.deepEqual(cloned.map((r) => r.ticketId), ['tv3', 'tv2', 'tv1']);
+    assert.equal(clonedBytes, 2_500);
+  });
+
+  it('at a restart, removes every clone no one needs and keeps the ones failed Runs still have for inspection', async () => {
+    // The clones that had piled up by 2026-10-22, by the Run that held them.
+    endedRun('app-2bl.1', 'failed', 'run33');
+    endedRun('app-2bl.1', 'merged');
+    endedRun('app-2bl.11', 'merged', 'run41');
+    endedRun('app-2bl.18', 'failed', 'run48');
+    endedRun('app-2bl.18', 'merged');
+    endedRun('app-2bl.21', 'failed', 'run53');
+    endedRun('app-2bl.21', 'in-review');
+    endedRun('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    // The other ways a clone outlives its use.
+    endedRun('tv-k', 'killed', 'killed-then-landed');
+    endedRun('tv-k', 'landed');
+    endedRun('tv-c', 'failed', 'failed-then-pr-closed');
+    endedRun('tv-c', 'pr-closed');
+    endedRun('tv-i', 'interrupted', 'interrupted');
+    endedRun('tv-r', 'pr-closed');
+    endedRun('tv-r', 'failed', 'failed-after-a-pr');
+    const live = store.insertRun({ project: 'fazwaz', ticketId: 'fz1', title: 't', state: 'needs-attention', startedAt: now });
+    store.updateRun(live, { cloneDir: '/clones/live' });
+    store.setHostJob(live, JSON.stringify({ prepared: { branch: 'agent/fz1', dir: '/clones/live', base: 'b'.repeat(40) } }));
+    clonesOnDisk = [...clonesLeft(), '/clones/orphan'];
+    const o = await polled();
+
+    assert.deepEqual(await o.recover(), []);
+
+    assert.deepEqual(clonesLeft(), ['/clones/run67', '/clones/failed-after-a-pr', '/clones/live']);
+    assert.deepEqual(removed().sort(), ['failed-then-pr-closed', 'interrupted', 'killed-then-landed', 'orphan', 'run33', 'run41', 'run48', 'run53']);
+  });
+
+  it('at a restart, reports a clone it could not remove and keeps its path', async () => {
+    const id = endedRun('tv1', 'merged', 'tv1-merged');
+    failingRemovals.add('/clones/tv1-merged');
+    clonesOnDisk = ['/clones/tv1-merged', '/clones/stuck-orphan'];
+    failingRemovals.add('/clones/stuck-orphan');
+    const o = await polled();
+    assert.deepEqual(await o.recover(), [`removing the clone of Run ${id}: EBUSY`, 'removing /clones/stuck-orphan: EBUSY']);
+    assert.equal(store.getRun(id)?.cloneDir, '/clones/tv1-merged');
+  });
+
+  it('at a restart, measures the clones that have no size yet in the background, without holding up the first tick', async () => {
+    let open!: () => void;
+    sizeGate = new Promise((resolve) => (open = resolve));
+    const unmeasured = endedRun('PopDeal-9r7', 'failed', 'run67', 'PopDeal');
+    store.updateRun(endedRun('tv1', 'killed', 'tv1-killed'), { cloneBytes: 1 });
+    const o = await polled();
+    assert.equal(await Promise.race([o.recover().then(() => 'recovered'), new Promise((resolve) => setTimeout(resolve, 100, 'held up'))]), 'recovered');
+    open();
+    await o.whenIdle();
+    assert.deepEqual(measured, ['/clones/run67']);
+    assert.equal(store.getRun(unmeasured)?.cloneBytes, CLONE_BYTES);
   });
 });
 
@@ -1323,24 +2465,26 @@ describe('Delete', () => {
 });
 
 describe('Archive', () => {
-  it('moves a merged or PR-closed Run from the history to the archive, and back', async () => {
+  it('moves a merged, PR-closed or broken-down Run from the history to the archive, and back', async () => {
     const o = await polled();
     const merged = startRun('thaivis', 'merged');
     const closed = startRun('fazwaz', 'pr-closed');
+    const brokenDown = startRun('PopDeal', 'broken-down');
     o.setArchived(merged, true);
     o.setArchived(closed, true);
+    o.setArchived(brokenDown, true);
     assert.deepEqual(o.runs().history, []);
-    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[closed, now], [merged, now]]);
+    assert.deepEqual(o.runs().archived.map((r) => [r.id, r.archivedAt]), [[brokenDown, now], [closed, now], [merged, now]]);
 
     o.setArchived(merged, false);
     assert.deepEqual(o.runs().history.map((r) => [r.id, r.archivedAt]), [[merged, null]]);
-    assert.deepEqual(o.runs().archived.map((r) => r.id), [closed]);
+    assert.deepEqual(o.runs().archived.map((r) => r.id), [brokenDown, closed]);
   });
 
-  it('refuses Runs that are not merged or PR closed', async () => {
+  it('refuses Runs that are not merged, PR closed, broken down or landed', async () => {
     const o = await polled();
     for (const state of ['agent', 'in-review', 'failed', 'killed'] as const) {
-      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged or PR closed/);
+      assert.throws(() => o.setArchived(startRun('thaivis', state), true), /not merged, PR closed, broken down or landed/);
     }
     assert.deepEqual(o.runs().archived, []);
   });
@@ -1484,6 +2628,117 @@ describe('Run now', () => {
   });
 });
 
+describe('Backlog actions', () => {
+  const withRow = (id: string, patch: Partial<BacklogRow> = {}): BacklogRow => ({ ...row(id), ...patch });
+
+  it('Marks Ready an open Ticket with one write, and shows it in the Backlog and the Ready queue when the call resolves, with a Stats point', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { labels: ['needs-info'] })] };
+    const o = await polled();
+    assert.deepEqual(order(o), []);
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.deepEqual(writes, ['mark-ready PopDeal/pd1']);
+    assert.deepEqual(order(o), ['pd1']);
+    assert.deepEqual(o.backlog().find((b) => b.name === 'PopDeal')!.rows!.map((r) => r.labels), [['ready-for-agent']]);
+    assert.deepEqual(store.backlogHistory().filter((p) => p.project === 'PopDeal').map((p) => p.ready), [0, 1]);
+  });
+
+  it('Skips and Allows ysz, showing each at once', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    const labels = () => o.backlog().find((b) => b.name === 'PopDeal')!.rows![0].labels;
+    await o.ticketAction('PopDeal', 'pd1', 'skip');
+    assert.deepEqual(labels(), ['orchestrator:skip']);
+    await o.ticketAction('PopDeal', 'pd1', 'allow');
+    assert.deepEqual(labels(), []);
+    assert.deepEqual(writes, ['skip PopDeal/pd1', 'allow PopDeal/pd1']);
+  });
+
+  it('drops a pending Run now when the Ticket is Unmarked Ready', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { labels: ['ready-for-agent'] })] };
+    queues = { PopDeal: [ticket('pd1', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    o.runNow('PopDeal', 'pd1');
+    await o.ticketAction('PopDeal', 'pd1', 'unmark-ready');
+    assert.deepEqual(order(o), []);
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.equal(o.readyQueue()[0].runNow, false);
+  });
+
+  const refused: [string, Partial<BacklogRow>, TicketAction, RegExp][] = [
+    ['an epic', { issue_type: 'epic' }, 'mark-ready', /pd1 is an epic/],
+    ['a closed Ticket', { status: 'closed' }, 'skip', /pd1 is closed/],
+    ['a Ticket ysz holds', { status: 'in_progress', assignee: 'orchestrator' }, 'unmark-ready', /pd1 is held by ysz/],
+    ['an In review Ticket', { status: 'in_progress', assignee: 'orchestrator', labels: ['in-review', 'ready-for-agent'] }, 'skip', /pd1 is held by ysz/],
+    ['a Ticket already Ready', { labels: ['ready-for-agent'] }, 'mark-ready', /pd1 is already Ready/],
+    ['a Ticket not Ready', {}, 'unmark-ready', /pd1 is not Ready/],
+    ['a Ticket already skipped', { labels: ['orchestrator:skip'] }, 'skip', /pd1 is already skipped/],
+    ['a Ticket not skipped', {}, 'allow', /pd1 is not skipped/],
+    ['a Ticket nobody is assigned', {}, 'unassign', /pd1 has no assignee/],
+    ['a deferred Ticket', { status: 'deferred', assignee: 'yoss' }, 'unassign', /pd1 is deferred/],
+  ];
+  for (const [what, patch, action, reason] of refused) {
+    it(`refuses ${action} on ${what} and writes nothing`, async () => {
+      backlogs = { PopDeal: [withRow('pd1', patch)] };
+      const o = await polled();
+      await assert.rejects(o.ticketAction('PopDeal', 'pd1', action), reason);
+      assert.deepEqual(writes, []);
+    });
+  }
+
+  it('allows Mark Ready on a blocked or human-assigned Ticket: it waits, still labelled', async () => {
+    backlogs = { PopDeal: [withRow('pd1', { assignee: 'somebody' })] };
+    const o = await polled();
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    assert.deepEqual(writes, ['mark-ready PopDeal/pd1']);
+  });
+
+  it('checks the Ticket as bd has it now, not as the last poll saw it', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    backlogs = { PopDeal: [withRow('pd1', { status: 'closed' })] }; // closed in a terminal since the poll
+    await assert.rejects(o.ticketAction('PopDeal', 'pd1', 'mark-ready'), /pd1 is closed/);
+    assert.deepEqual(writes, []);
+    assert.equal(o.backlog().find((p) => p.name === 'PopDeal')?.rows?.[0].status, 'closed'); // the refusal re-read the Project
+  });
+
+  it('rejects an unknown Project', async () => {
+    await assert.rejects((await polled()).ticketAction('nope', 'x-1', 'skip'), /Unknown Project nope/);
+  });
+
+  it('leaves the click in place when a poll that started before it resolves after it', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    let open!: () => void;
+    listGates.PopDeal = new Promise<void>((resolve) => (open = resolve));
+    const poll = o.poll(); // reads pd1 unlabelled, then waits
+    await flush();
+    await o.ticketAction('PopDeal', 'pd1', 'mark-ready');
+    open();
+    await poll;
+    assert.deepEqual(order(o), ['pd1']);
+    assert.deepEqual(o.backlog().find((b) => b.name === 'PopDeal')!.rows![0].labels, ['ready-for-agent']);
+  });
+
+  it('sets the Project error but still resolves when the refresh fails after the write landed', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    queues.PopDeal = new Error('bd timed out');
+    await o.ticketAction('PopDeal', 'pd1', 'skip');
+    assert.deepEqual(writes, ['skip PopDeal/pd1']);
+    assert.equal(o.projectStatuses().find((s) => s.name === 'PopDeal')!.error, 'bd timed out');
+  });
+
+  it('rejects, refreshing nothing, when the write fails', async () => {
+    backlogs = { PopDeal: [withRow('pd1')] };
+    const o = await polled();
+    const first = o.backlog().find((b) => b.name === 'PopDeal')!.updatedAt;
+    now += 5000;
+    ticketActionError = new Error('bd is locked');
+    await assert.rejects(o.ticketAction('PopDeal', 'pd1', 'skip'), /bd is locked/);
+    assert.equal(o.backlog().find((b) => b.name === 'PopDeal')!.updatedAt, first);
+  });
+});
+
 describe('restart recovery', () => {
   const HOST_JOB = JSON.stringify({ prepared: { branch: 'agent/tv1', dir: '/clones/tv1-9', base: 'b'.repeat(40) }, tip: 'c'.repeat(40), reviewSkipped: 'no review' });
 
@@ -1537,6 +2792,37 @@ describe('restart recovery', () => {
     assert.match(o.runs().history[0].note!, /releasing the Ticket failed: bd timed out/);
   });
 
+  it('resumes a host job that holds Follow-ups with them: published, created, then the bead marked', async () => {
+    const id = leftBehind('host', { hostJob: true });
+    store.setHostJob(id, JSON.stringify({ ...JSON.parse(HOST_JOB), followUps: [{ title: 'drop the old export', body: 'it is unused', attempt: 2, role: 'review' }] }));
+    const o = await polled();
+    await o.recover();
+    await o.whenIdle();
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: ['drop the old export'] });
+    assert.deepEqual(writes, ['follow-up thaivis/tv1 attempt 2 review: drop the old export', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.deepEqual(store.getRun(id)!.reports?.followUps, [{ id: 'thaivis-f1', title: 'drop the old export' }]);
+  });
+
+  it('after a restart mid-way, creates only the Follow-ups still in the host job and opens no second PR', async () => {
+    // first process: the second Follow-up fails
+    failingFollowUps.add('second');
+    agent = async () => ({ outcome: 'complete', reports: { followUps: [{ title: 'first', body: '' }, { title: 'second', body: '' }], friction: [], fixedFollowUps: [] } });
+    queues = { thaivis: [ticket('tv1', 2, '2026-01-01T00:00:00Z')] };
+    const first = await polled();
+    await first.tick();
+    await first.whenIdle();
+    assert.deepEqual(writes, ['claim thaivis/tv1', 'follow-up thaivis/tv1 attempt 1 implement: first']);
+    // restart: a new Orchestrator over the same store
+    failingFollowUps.clear();
+    const second = await polled();
+    assert.deepEqual(await second.recover(), []);
+    await second.retryHostStep(store.liveRuns()[0].id);
+    await second.whenIdle();
+    assert.deepEqual(writes.slice(2), ['follow-up thaivis/tv1 attempt 1 implement: second', 'markInReview thaivis/tv1 ' + PR_URL]);
+    assert.equal(hostSteps.filter((s) => s.startsWith('publish')).length, 1);
+    assert.deepEqual(store.history(10).map((r) => r.reports?.followUps.map((f) => f.title)), [['first', 'second']]);
+  });
+
   it('resumes a host-phase Run from its host step to in-review, without another agent run', async () => {
     let finishPublish!: () => void;
     publish = () => new Promise((resolve) => (finishPublish = () => resolve(PR_URL)));
@@ -1549,7 +2835,7 @@ describe('restart recovery', () => {
     await o.whenIdle();
 
     assert.deepEqual(hostSteps, ['publish agent/tv1', 'removeClone /clones/tv1-9']);
-    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review' });
+    assert.deepEqual(publishOpts, { tip: 'c'.repeat(40), reviewSkipped: 'no review', followUps: [] });
     assert.deepEqual(writes, ['markInReview thaivis/tv1 ' + PR_URL]);
     assert.deepEqual(agentCalls, []);
     const run = store.getRun(id)!;
@@ -1655,6 +2941,26 @@ describe('watching in-review PRs', () => {
     assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`]);
   });
 
+  it('records the branch the PR merged into, which GitHub changed when the branch it opened on was deleted', async () => {
+    // PopDeal-cxm opened onto OP-2655-PopDeal-o3o; that branch was deleted when its PR merged, so GitHub retargeted cxm onto develop.
+    const id = inReview('tv14', PR_URL);
+    store.updateRun(id, { prBase: 'agent/tv13' });
+    prStates[PR_URL] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.equal(o.runs().history[0].prBase, null);
+  });
+
+  it('keeps the branch a PR merged into when it is not the baseBranch', async () => {
+    const id = inReview('tv14', PR_URL);
+    store.updateRun(id, { prBase: 'agent/tv13' });
+    prStates[PR_URL] = 'MERGED';
+    prBases[PR_URL] = 'agent/tv13';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.equal(o.runs().history[0].prBase, 'agent/tv13');
+  });
+
   it('ends a Run PR closed and hands its bead back once the PR closes unmerged', async () => {
     inReview('tv1', PR_URL);
     prStates[PR_URL] = 'CLOSED';
@@ -1682,6 +2988,119 @@ describe('watching in-review PRs', () => {
     assert.deepEqual(writes, []);
     assert.deepEqual(states(o), [['tv1', 'merged', now + 1000, CLOSED_AT]]);
     assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`, '1: Ticket left alone: changed by hand since the PR opened']);
+  });
+
+  describe('Clearing (ADR 0012)', () => {
+    const runStates = (o: Awaited<ReturnType<typeof polled>>) => o.runs().history.map((r) => [r.ticketId, r.state, r.clearedAt === null ? null : 'cleared']);
+
+    it('Clears an In review Run once its Pipeline passed, closing its bead once and keeping the Run In review', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+      assert.deepEqual(runLog, ['1: Cleared: Pipeline passed']);
+    });
+
+    it('does not Clear a Run while its Pipeline is pending or failed', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      const o = await polled();
+      for (const pipeline of ['pending', 'failed'] as const) {
+        pipelines[PR_URL] = pipeline;
+        assert.deepEqual(await o.watchReviews(), []);
+      }
+      assert.deepEqual(writes, []);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+    });
+
+    it('Clears a PR with no check only once it has been open for 2 minutes', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'none';
+      prOpenedAt[PR_URL] = now - 119_000;
+      const o = await polled();
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, []);
+      prOpenedAt[PR_URL] = now - 120_000;
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runLog, ['1: Cleared: no Pipeline']);
+    });
+
+    it('puts a Cleared Run back In review when its Pipeline fails, and Clears it again once the Pipeline passes', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      pipelines[PR_URL] = 'failed';
+      await o.watchReviews();
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+      pipelines[PR_URL] = 'passed';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`, `uncleared thaivis/tv1 ${PR_URL}`, `cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+    });
+
+    it('ends a Cleared Run Merged, or PR closed, as any In review Run, whatever its Pipeline says by then', async () => {
+      const other = 'https://github.com/thaivis/app/pull/8';
+      inReview('tv1', PR_URL);
+      inReview('tv2', other);
+      prStates[PR_URL] = 'OPEN';
+      prStates[other] = 'OPEN';
+      pipelines[PR_URL] = pipelines[other] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      writes.length = 0;
+      prStates[PR_URL] = 'MERGED';
+      prStates[other] = 'CLOSED';
+      pipelines[PR_URL] = pipelines[other] = 'failed';
+      assert.deepEqual(await o.watchReviews(), []);
+      assert.deepEqual(writes, [`merged thaivis/tv1 ${PR_URL}`, `prClosed thaivis/tv2 ${other}`]);
+    });
+
+    it('keeps a Cleared Run Cleared while its Pipeline reruns', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      pipelines[PR_URL] = 'pending';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+    });
+
+    it('leaves a bead the human changed since the Run was Cleared when its Pipeline fails, and still puts the Run back In review', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      const o = await polled();
+      await o.watchReviews();
+      touchedByHand.add('thaivis/tv1');
+      pipelines[PR_URL] = 'failed';
+      await o.watchReviews();
+      assert.deepEqual(writes, [`cleared thaivis/tv1 ${PR_URL}`]);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', null]]);
+      assert.deepEqual(runLog.at(-1), '1: Ticket left alone: changed by hand since it was Cleared');
+    });
+
+    it('leaves a bead the human changed since the Run was Cleared, and does not try again', async () => {
+      inReview('tv1', PR_URL);
+      prStates[PR_URL] = 'OPEN';
+      pipelines[PR_URL] = 'passed';
+      touchedByHand.add('thaivis/tv1');
+      const o = await polled();
+      await o.watchReviews();
+      await o.watchReviews();
+      assert.deepEqual(writes, []);
+      assert.deepEqual(runStates(o), [['tv1', 'in-review', 'cleared']]);
+      assert.deepEqual(runLog, ['1: Cleared: Pipeline passed', '1: Ticket left alone: changed by hand since the PR opened']);
+    });
   });
 
   it('keeps a Run in review when gh fails, and still checks the other Runs', async () => {

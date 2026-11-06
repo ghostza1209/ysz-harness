@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createHostSteps, prTitleAndBody, ticketKey } from '../src/host';
+import { createHostSteps, pipelineOf, prTitleAndBody, ticketKey } from '../src/host';
 import type { Project } from '../src/projects';
+
+/** git reads a case variant of objects/info/alternates only where the disk ignores case, as macOS does and Linux does not. */
+const caseInsensitiveDisk = existsSync(tmpdir().toUpperCase());
 
 /** These tests drive real git against a throwaway origin and Project repo, with fake `claude` and `gh` on PATH. */
 describe('host steps against real git', () => {
@@ -16,7 +19,7 @@ describe('host steps against real git', () => {
   let log: string;
   let project: Project;
   let host: ReturnType<typeof createHostSteps>;
-  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null };
+  const context = { ticket: { id: 't-1', title: 'a ticket' }, parent: null, closedBlockers: [], inReviewBlocker: null, openFriction: [] };
   const ticket = (id: string) => ({ id, title: 'a ticket' });
   const savedPath = process.env.PATH;
 
@@ -81,6 +84,9 @@ describe('host steps against real git', () => {
     await host.preflight(withPreflight(0));
     assert.equal(readFileSync(probe, 'utf8').trim(), repo);
     await assert.rejects(host.preflight(withPreflight(1)), /sh -c failed/);
+    // A pre-push hook's findings come on stdout; the error must carry them after stderr.
+    const hook = { ...project, preflight: ['sh', '-c', 'echo "3:5 error no-explicit-any"; echo "pre-push failed" >&2; exit 1'] };
+    await assert.rejects(host.preflight(hook), /^Error: sh -c failed: pre-push failed\n3:5 error no-explicit-any$/);
     await host.preflight(project);
   });
 
@@ -168,6 +174,25 @@ describe('host steps against real git', () => {
     assert.ok(existsSync(join(root, 'clones')));
   });
 
+  it('lists what the clones directory holds, and nothing before it exists', async () => {
+    const sweep = createHostSteps('test-model', join(root, 'sweep'));
+    assert.deepEqual(await sweep.listClones(), []);
+    mkdirSync(join(root, 'sweep/lab-t-1-abc'), { recursive: true });
+    mkdirSync(join(root, 'sweep/lab-t-2-def'));
+    assert.deepEqual((await sweep.listClones()).sort(), [join(root, 'sweep/lab-t-1-abc'), join(root, 'sweep/lab-t-2-def')]);
+  });
+
+  it("measures a clone's disk use without following a link out of it", async () => {
+    const dir = join(root, 'clones/lab-size');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'kept'), Buffer.alloc(512 * 1024, 1));
+    writeFileSync(join(root, 'big-outside'), Buffer.alloc(4 * 1024 * 1024, 1));
+    symlinkSync(join(root, 'big-outside'), join(dir, 'link'));
+    const bytes = await host.cloneSize({ dir });
+    assert.ok(bytes >= 512 * 1024 && bytes < 1024 * 1024, `${bytes} bytes`);
+    await host.removeClone({ dir });
+  });
+
   it('publishes: fetches the agent branch back, pushes it, and writes the PR body outside the clone and the repo', async () => {
     const prepared = await host.prepare(project, 't-2', context);
     const clone = join(prepared.dir, 'repo');
@@ -184,6 +209,37 @@ describe('host steps against real git', () => {
     const cwd = readFileSync(join(log, 'claude.cwd'), 'utf8').trim();
     assert.ok(!cwd.startsWith(prepared.dir) && !cwd.startsWith(repo), `claude ran in ${cwd}`);
     assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the agent change/);
+  });
+
+  it('pushes on top of commits a human added to the branch on origin since the Run, instead of being rejected', async () => {
+    const prepared = await host.prepare(project, 't-hf', context);
+    commit(join(prepared.dir, 'repo'), 'hf.txt', 'the agent change\n');
+    await host.publish(project, ticket('t-hf'), prepared);
+    const other = join(root, 'other-human-fix');
+    git(root, 'clone', '-q', '-b', 'agent/t-hf', origin, other);
+    commit(other, 'fix.txt', 'the human fix\n');
+    git(other, 'push', '-q', 'origin', 'agent/t-hf');
+    const humanTip = git(other, 'rev-parse', 'HEAD');
+
+    await host.publish(project, ticket('t-hf'), prepared);
+
+    assert.equal(git(origin, 'rev-parse', 'agent/t-hf'), humanTip);
+    assert.equal(git(repo, 'rev-parse', 'agent/t-hf'), humanTip);
+  });
+
+  it('takes the PR that already exists for the branch when gh refuses to open another', async () => {
+    const prepared = await host.prepare(project, 't-px', context);
+    commit(join(prepared.dir, 'repo'), 'px.txt', 'px\n');
+    const bin = join(root, 'bin-pr-exists');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho 'a pull request for branch "agent/t-px" into branch "develop" already exists:' >&2\necho https://example.test/pull/719 >&2\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.deepEqual(await host.publish(project, ticket('t-px'), prepared), { url: 'https://example.test/pull/719', base: 'develop' });
+    } finally {
+      process.env.PATH = path;
+    }
   });
 
   it('collects: counts the agent commits over base and brings them into the Project repo without pushing', async () => {
@@ -276,6 +332,96 @@ describe('host steps against real git', () => {
     assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /\+the merged blocker change/);
   });
 
+  it("cuts a retried Attempt from the base when its blocker's PR merged and its branch was deleted since the Run began", async () => {
+    // ysz-harness Run 104: Attempt 1 stacked on the blocker; the human merged that PR meanwhile; Attempt 2 prepared from the same stale context.
+    const other = join(root, 'other-stack-gone');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'agent/t-g');
+    commit(other, 'blocker-g.txt', 'the merged blocker change');
+    git(other, 'push', '-q', 'origin', 'agent/t-g');
+    const blocker = { id: 't-g', title: 'g', prUrl: 'https://example.test/pull/31', branch: 'agent/t-g' };
+    await host.prepare(project, 't-sg1', { ...context, inReviewBlocker: blocker }); // Attempt 1 finds the branch
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', '--squash', 'agent/t-g');
+    git(other, 'commit', '-q', '-m', 'the squash commit');
+    git(other, 'push', '-q', 'origin', 'develop', ':agent/t-g');
+
+    const bin = join(root, 'bin-stack-gone');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const prepared = await host.prepare(project, 't-sg2', { ...context, inReviewBlocker: blocker }); // Attempt 2
+
+      assert.equal(prepared.stack, undefined);
+      assert.equal(git(join(prepared.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'develop'));
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  it("still fails a retried Attempt whose blocker's branch is gone but whose PR did not merge", async () => {
+    const blocker = { id: 't-x', title: 'x', prUrl: 'https://example.test/pull/32', branch: 'agent/t-x' }; // never pushed: a PR closed unmerged, its branch deleted
+    const bin = join(root, 'bin-stack-closed');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\n[ "$2" = view ] && { echo '{"state":"CLOSED","baseRefName":"develop"}'; exit 0; }\nexit 1`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.prepare(project, 't-sx', { ...context, inReviewBlocker: blocker }), /couldn't find remote ref agent\/t-x/);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
+  /** A stacked Run on `blocker` whose agent rewrote mm-<blocker>.txt, while the blocker merged into develop by `merge` and develop then rewrote that line too. */
+  const stackedOnMergedConflict = async (blocker: string, id: string, merge: string[]) => {
+    const other = join(root, `other-${blocker}`);
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', `agent/${blocker}`);
+    commit(other, `mm-${blocker}.txt`, 'the blocker line');
+    git(other, 'push', '-q', 'origin', `agent/${blocker}`);
+    const prepared = await host.prepare(project, id, { ...context, inReviewBlocker: { id: blocker, title: 'm', prUrl: 'https://example.test/pull/21' } });
+    commit(join(prepared.dir, 'repo'), `mm-${blocker}.txt`, 'the agent line');
+    git(other, 'switch', '-q', 'develop');
+    git(other, 'merge', '-q', ...merge, `agent/${blocker}`);
+    if (merge.includes('--squash')) git(other, 'commit', '-q', '-m', 'the squash commit');
+    commit(other, `mm-${blocker}.txt`, 'the develop line');
+    git(other, 'push', '-q', 'origin', 'develop', `:agent/${blocker}`);
+    git(repo, 'update-ref', '-d', `refs/remotes/origin/agent/${blocker}`);
+    const bin = join(root, `bin-${blocker}`);
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && exit 0\necho "$*" >> ${log}/gh.${blocker}\n[ "$2" = view ] && { echo '{"state":"MERGED","baseRefName":"develop"}'; exit 0; }\n[ "$1" = pr ] && echo https://example.test/pull/22\nexit 0`);
+    return { prepared, bin, tip: (await host.collect(project, prepared)).tip };
+  };
+
+  it('opens the PR onto the base with the branch unchanged when the blocker merged with a merge commit, even if it conflicts there', async () => {
+    const { prepared, bin, tip } = await stackedOnMergedConflict('t-mc', 't-smc', ['--no-ff', '--no-edit']);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.deepEqual(await host.publish(project, ticket('t-smc'), prepared), { url: 'https://example.test/pull/22', base: 'develop' });
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.match(readFileSync(join(log, 'gh.t-mc'), 'utf8'), /^pr create --head agent\/t-smc --base develop /m);
+    assert.equal(git(origin, 'rev-parse', 'agent/t-smc'), tip);
+    assert.equal(git(origin, 'rev-list', '--count', 'develop..agent/t-smc'), '1');
+  });
+
+  it('names the conflicting files when the replay after a squash merge conflicts', async () => {
+    const { prepared, bin } = await stackedOnMergedConflict('t-sq', 't-ssq', ['--squash']);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await assert.rejects(host.publish(project, ticket('t-ssq'), prepared), /^Error: https:\/\/example\.test\/pull\/21 merged meanwhile and agent\/t-ssq conflicts with develop in mm-t-sq\.txt$/);
+    } finally {
+      process.env.PATH = path;
+    }
+    assert.equal(git(origin, 'branch', '--list', 'agent/t-ssq'), '');
+  });
+
   it('still returns the PR when linking the stack fails, and logs why', async () => {
     const other = join(root, 'other-stack-fail');
     git(root, 'clone', '-q', '-b', 'develop', origin, other);
@@ -299,45 +445,227 @@ describe('host steps against real git', () => {
     assert.match(lines.at(-1)!, /^Could not stack it on https:\/\/example.test\/pull\/9, so it stays a plain PR onto agent\/t-b: .*would remove #2/);
   });
 
-  it("clones a child of an epic-branch epic at the epic's branch, cutting it from origin/<base> first, and opens the PR onto it", async () => {
-    const epicContext = { ...context, parent: { id: 'e-1', labels: ['epic-branch'] } };
-    const first = await host.prepare(project, 't-e1', epicContext);
-    assert.equal(git(origin, 'rev-parse', 'epic/e-1'), git(origin, 'rev-parse', 'develop'));
-    assert.equal(git(join(first.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
-    commit(join(first.dir, 'repo'), 'e1.txt', 'e1');
-    const lines: string[] = [];
-    assert.equal((await host.publish(project, ticket('t-e1'), first, { log: (line) => lines.push(line) })).base, 'epic/e-1');
-    assert.equal(lines.at(-1), 'Opening the PR against epic/e-1');
-    assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /since origin\/epic\/e-1/);
-
-    // The human merged a child into the epic branch: the next child starts from it, which is no longer develop.
-    const other = join(root, 'other-epic');
-    git(root, 'clone', '-q', '-b', 'epic/e-1', origin, other);
-    commit(other, 'merged-child.txt', 'merged');
-    git(other, 'push', '-q', 'origin', 'epic/e-1');
-    const second = await host.prepare(project, 't-e2', epicContext);
-    assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
-  });
-
-  it("names the epic branch with the Project's prefix, and keeps a Ticket whose parent lacks the label on baseBranch", async () => {
-    const custom = await host.prepare({ ...project, epicBranchPrefix: 'train/' }, 't-e3', { ...context, parent: { id: 'e-2', labels: ['epic-branch'] } });
-    assert.equal(git(origin, 'rev-parse', 'train/e-2'), git(origin, 'rev-parse', 'develop'));
-    assert.equal(git(join(custom.dir, 'repo'), 'rev-parse', 'origin/train/e-2'), git(origin, 'rev-parse', 'develop'));
-
-    const plain = await host.prepare(project, 't-e4', { ...context, parent: { id: 'e-3', labels: ['ready-for-human'] } });
-    assert.equal(git(origin, 'branch', '--list', 'epic/e-3'), '');
-    assert.equal(git(join(plain.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
-  });
-
-  it("reads a PR's state and when it closed as the Project's gh account", async () => {
-    const bin = join(root, 'bin-pr-view');
+  /** Run `fn` with a gh on PATH that answers `pr list` with `list` and records `pr create`'s argv, title and body. */
+  async function withEpicGh<T>(list: string, fn: () => Promise<T>): Promise<T> {
+    const bin = join(root, 'bin-epic');
     mkdirSync(bin, { recursive: true });
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","closedAt":"2026-10-16T07:05:01Z"}'`);
+    rmSync(join(log, 'gh.create'), { force: true });
+    script(
+      join(bin, 'gh'),
+      `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\n[ "$2" = list ] && { echo '${list}'; exit 0; }\nprintf '%s\\n' "$@" > ${log}/gh.create\n` +
+        `while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" ${log}/gh.create.body; shift; done\necho https://example.test/pull/20`,
+    );
     const path = process.env.PATH;
     process.env.PATH = `${bin}:${path}`;
     try {
-      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', closedAt: Date.UTC(2026, 9, 16, 7, 5, 1) });
-      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,closedAt');
+      return await fn();
+    } finally {
+      process.env.PATH = path;
+    }
+  }
+  const epicChild = (epicId: string) => ({ ...context, parent: { id: epicId, labels: ['epic-branch'] } });
+
+  it('clones a child of an epic-branch epic that origin lacks at a local epic branch cut from origin/<base>, never pushed', async () => {
+    const first = await host.prepare(project, 't-e1', epicChild('e-1'));
+    const develop = git(origin, 'rev-parse', 'develop');
+    assert.deepEqual([first.epic, first.land], ['epic/e-1', true]);
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/epic/e-1'), develop);
+    assert.equal(git(origin, 'branch', '--list', 'epic/e-1'), '');
+    assert.equal(git(join(first.dir, 'repo'), 'rev-parse', 'HEAD'), develop);
+    assert.equal(git(join(first.dir, 'repo'), 'rev-parse', 'origin/epic/e-1'), develop);
+  });
+
+  it('lands a child by fast-forwarding the local epic branch, again without harm, and the next child starts from it', async () => {
+    const first = await host.prepare(project, 't-e1', epicChild('e-1'));
+    commit(join(first.dir, 'repo'), 'e1.txt', 'e1');
+    const tip = git(join(first.dir, 'repo'), 'rev-parse', 'HEAD');
+    const lines: string[] = [];
+    assert.equal(await host.land(project, first, { log: (line) => lines.push(line) }), tip);
+    assert.equal(await host.land(project, first), tip);
+    assert.deepEqual(lines, ['Landing agent/t-e1 on epic/e-1']);
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/epic/e-1'), tip);
+    assert.equal(git(origin, 'branch', '--list', 'epic/e-1'), '');
+
+    const second = await host.prepare(project, 't-e2', epicChild('e-1'));
+    assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), tip);
+    assert.equal(second.base, tip);
+  });
+
+  it('refuses to land on an epic branch that moved elsewhere since the clone, or that a worktree has checked out, or a secret', async () => {
+    const child = await host.prepare(project, 't-e5', epicChild('e-5'));
+    commit(join(child.dir, 'repo'), 'e5.txt', 'e5');
+    const cut = git(repo, 'rev-parse', 'refs/heads/epic/e-5');
+    const elsewhere = git(repo, 'commit-tree', '-p', cut, '-m', 'by hand', `${cut}^{tree}`);
+    git(repo, 'update-ref', 'refs/heads/epic/e-5', elsewhere);
+    await assert.rejects(host.land(project, child), /non-fast-forward/);
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/epic/e-5'), elsewhere);
+
+    git(repo, 'update-ref', 'refs/heads/epic/e-5', cut);
+    const worktree = join(root, 'wt-e5');
+    git(repo, 'worktree', 'add', '-q', worktree, 'epic/e-5');
+    try {
+      await assert.rejects(host.land(project, child), /checked out/);
+    } finally {
+      git(repo, 'worktree', 'remove', '--force', worktree);
+    }
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/epic/e-5'), cut);
+
+    const leaky = await host.prepare(project, 't-e6', epicChild('e-5'));
+    writeFileSync(join(leaky.dir, 'repo/.env'), 'SECRET=2');
+    git(join(leaky.dir, 'repo'), 'add', '-f', '.env');
+    git(join(leaky.dir, 'repo'), 'commit', '-q', '-m', 'leak');
+    await assert.rejects(host.land(project, leaky), /refusing to push: \.env is committed/);
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/epic/e-5'), cut);
+  });
+
+  it('refuses to clone a child that lands on its epic branch onto an In review blocker', async () => {
+    const stacked = { ...epicChild('e-8'), inReviewBlocker: { id: 't-b', title: 'blocker', prUrl: 'https://example.test/pull/9' } };
+    await assert.rejects(host.prepare(project, 't-e8', stacked), /lands on epic\/e-8, so it cannot stack on https:\/\/example.test\/pull\/9/);
+  });
+
+  it('keeps a child of an epic already on origin on opening its PR onto that branch (ADR 0006)', async () => {
+    const other = join(root, 'other-epic');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'epic/e-9');
+    commit(other, 'merged-child.txt', 'merged');
+    git(other, 'push', '-q', 'origin', 'epic/e-9');
+
+    const child = await host.prepare(project, 't-e9', epicChild('e-9'));
+    assert.deepEqual([child.epic, child.land], ['epic/e-9', undefined]);
+    assert.equal(git(join(child.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+    assert.equal(git(repo, 'branch', '--list', 'epic/e-9'), '');
+    commit(join(child.dir, 'repo'), 'e9.txt', 'e9');
+    assert.equal((await host.publish(project, ticket('t-e9'), child)).base, 'epic/e-9');
+  });
+
+  it('keeps an epic already on origin on its branch there once the epic gains a Jira key', async () => {
+    const other = join(root, 'other-keyed-epic');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'epic/e-9k');
+    commit(other, 'merged-child-k.txt', 'merged');
+    git(other, 'push', '-q', 'origin', 'epic/e-9k');
+
+    const child = await host.prepare(project, 'e-9k.1', { ...context, parent: { id: 'e-9k', labels: ['epic-branch', 'OP-40'] } });
+    assert.deepEqual([child.epic, child.land, child.branch], ['epic/e-9k', undefined, 'OP-40-e-9k.1']);
+    assert.equal(git(join(child.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+
+    git(other, 'switch', '-q', '-c', 'OP-41-e-9o');
+    git(other, 'push', '-q', 'origin', 'OP-41-e-9o');
+    const keyedOnOrigin = await host.prepare(project, 'e-9o.1', { ...context, parent: { id: 'e-9o', labels: ['epic-branch', 'OP-42'] } });
+    assert.deepEqual([keyedOnOrigin.epic, keyedOnOrigin.land], ['OP-41-e-9o', undefined]);
+  });
+
+  it("names the epic branch by the epic's Jira key, keeps it once cut whatever key comes later, and opens the epic's PR from it", async () => {
+    const keyed = (id: string, key?: string) => ({ ...context, parent: { id, labels: ['epic-branch', ...(key ? [key] : [])] } });
+    const first = await host.prepare(project, 'e-k.1', keyed('e-k', 'OP-30'));
+    assert.deepEqual([first.epic, first.land, first.branch], ['OP-30-e-k', true, 'OP-30-e-k.1']);
+    commit(join(first.dir, 'repo'), 'k1.txt', 'k1');
+    const tip = await host.land(project, first);
+    // The Project repo now holds the child's own OP-30-e-k.1 too, which is no branch of epic e-k.
+    const second = await host.prepare(project, 'e-k.2', keyed('e-k', 'OP-31'));
+    assert.deepEqual([second.epic, second.land], ['OP-30-e-k', true]);
+    assert.equal(git(join(second.dir, 'repo'), 'rev-parse', 'HEAD'), tip);
+
+    const pr = await withEpicGh('[]', () => host.publishEpic(project, { id: 'e-k', title: 'the epic' }, 'OP-31'));
+    assert.equal(pr.url, 'https://example.test/pull/20');
+    assert.equal(git(origin, 'rev-parse', 'OP-30-e-k'), tip);
+    assert.deepEqual(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').slice(2, 4), ['--head', 'OP-30-e-k']);
+
+    const unkeyed = await host.prepare(project, 'e-g.1', keyed('e-g'));
+    assert.equal(unkeyed.epic, 'epic/e-g');
+    commit(join(unkeyed.dir, 'repo'), 'g1.txt', 'g1');
+    await host.land(project, unkeyed);
+    assert.equal((await host.prepare(project, 'e-g.2', keyed('e-g', 'OP-32'))).epic, 'epic/e-g');
+    await withEpicGh('[]', () => host.publishEpic(project, { id: 'e-g', title: 'keyed late' }, 'OP-32'));
+    assert.deepEqual(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').slice(2, 4), ['--head', 'epic/e-g']);
+  });
+
+  it('refuses to clone a child of an epic that has two branches, rather than pick one', async () => {
+    const develop = git(repo, 'rev-parse', 'develop');
+    git(repo, 'branch', 'epic/e-two', develop);
+    git(repo, 'branch', 'OP-50-e-two', develop);
+    await assert.rejects(host.prepare(project, 'e-two.1', epicChild('e-two')), /epic e-two has more than one branch: .*epic\/e-two.*OP-50-e-two|OP-50-e-two.*epic\/e-two/);
+  });
+
+  it("names the epic branch with the Project's prefix, and keeps a Ticket whose parent lacks the label on baseBranch", async () => {
+    const custom = await host.prepare({ ...project, epicBranchPrefix: 'train/' }, 't-e3', epicChild('e-2'));
+    assert.equal(custom.epic, 'train/e-2');
+    assert.equal(git(repo, 'rev-parse', 'refs/heads/train/e-2'), git(origin, 'rev-parse', 'develop'));
+
+    const plain = await host.prepare(project, 't-e4', { ...context, parent: { id: 'e-3', labels: ['ready-for-human'] } });
+    assert.deepEqual([plain.epic, plain.land], [undefined, undefined]);
+    assert.equal(git(repo, 'branch', '--list', 'epic/e-3'), '');
+    assert.equal(git(join(plain.dir, 'repo'), 'rev-parse', 'HEAD'), git(origin, 'rev-parse', 'develop'));
+  });
+
+  it("pushes the local epic branch and opens the epic's PR onto baseBranch, titled by its key, with the skipped reviews on top", async () => {
+    const child = await host.prepare(project, 't-p1', epicChild('e-p'));
+    commit(join(child.dir, 'repo'), 'p1.txt', 'p1');
+    const tip = await host.land(project, child);
+    const lines: string[] = [];
+
+    const pr = await withEpicGh('[]', () =>
+      host.publishEpic(project, { id: 'e-p', title: 'the epic' }, 'OP-5', { reviewSkipped: 't-p1: boom', log: (line) => lines.push(line) }),
+    );
+
+    assert.deepEqual(pr, { url: 'https://example.test/pull/20', base: 'develop' });
+    assert.equal(git(origin, 'rev-parse', 'epic/e-p'), tip);
+    const argv = readFileSync(join(log, 'gh.create'), 'utf8').split('\n');
+    assert.deepEqual(argv.slice(0, 8), ['pr', 'create', '--head', 'epic/e-p', '--base', 'develop', '--title', 'chore: OP-5 the epic']);
+    assert.equal(readFileSync(join(log, 'gh.create.body'), 'utf8'), '> review skipped: t-p1: boom\n\nthe PR body');
+    assert.match(readFileSync(join(log, 'claude.argv'), 'utf8'), /Ticket e-p "the epic"\. Its commits since origin\/develop/);
+    assert.deepEqual(lines, ['Pushing epic/e-p to origin', 'Writing the PR body (claude -p)', 'Opening the PR against develop']);
+  });
+
+  it("takes the epic's open PR instead of opening a second, and refuses an epic branch with no commits over the base", async () => {
+    const child = await host.prepare(project, 't-q1', epicChild('e-q'));
+    commit(join(child.dir, 'repo'), 'q1.txt', 'q1');
+    await host.land(project, child);
+    const pr = await withEpicGh('[{"url":"https://example.test/pull/76","state":"CLOSED"},{"url":"https://example.test/pull/77","state":"OPEN"}]', () =>
+      host.publishEpic(project, { id: 'e-q', title: 'the epic' }, 'e-q'),
+    );
+    assert.deepEqual(pr, { url: 'https://example.test/pull/77', base: 'develop' });
+    assert.equal(existsSync(join(log, 'gh.create')), false);
+
+    await host.prepare(project, 't-r1', epicChild('e-r'));
+    await assert.rejects(withEpicGh('[]', () => host.publishEpic(project, { id: 'e-r', title: 'empty' }, 'e-r')), /epic\/e-r has no commits over develop/);
+  });
+
+  it('opens the PR of an epic begun before ADR 0008 from its branch on origin, pushing nothing', async () => {
+    const other = join(root, 'other-old-epic');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'epic/e-old');
+    commit(other, 'old.txt', 'old');
+    git(other, 'push', '-q', 'origin', 'epic/e-old');
+
+    const pr = await withEpicGh('[]', () => host.publishEpic(project, { id: 'e-old', title: 'old epic' }, 'e-old'));
+    assert.equal(pr.url, 'https://example.test/pull/20');
+    assert.equal(git(repo, 'branch', '--list', 'epic/e-old'), '');
+    assert.equal(git(origin, 'rev-parse', 'epic/e-old'), git(other, 'rev-parse', 'HEAD'));
+    assert.deepEqual(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').slice(2, 6), ['--head', 'epic/e-old', '--base', 'develop']);
+  });
+
+  it('takes the merged PR of an epic begun before ADR 0008 whose branch origin has deleted since, but not one with a local branch', async () => {
+    const mergedPr = '[{"url":"https://example.test/pull/88","state":"MERGED"}]';
+    const pr = await withEpicGh(mergedPr, () => host.publishEpic(project, { id: 'e-gone', title: 'merged by hand' }, 'e-gone'));
+    assert.deepEqual(pr, { url: 'https://example.test/pull/88', base: 'develop' });
+    assert.equal(existsSync(join(log, 'gh.create')), false);
+
+    const child = await host.prepare(project, 't-m1', epicChild('e-m'));
+    commit(join(child.dir, 'repo'), 'm1.txt', 'm1');
+    await host.land(project, child);
+    assert.equal((await withEpicGh(mergedPr, () => host.publishEpic(project, { id: 'e-m', title: 'reopened' }, 'e-m'))).url, 'https://example.test/pull/20');
+  });
+
+  it("reads a PR's state, when it opened and closed and how its Pipeline stands as the Project's gh account", async () => {
+    const bin = join(root, 'bin-pr-view');
+    mkdirSync(bin, { recursive: true });
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","createdAt":"2026-10-16T06:00:00Z","closedAt":"2026-10-16T07:05:01Z","baseRefName":"develop","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}'`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', openedAt: Date.UTC(2026, 9, 16, 6, 0, 0), closedAt: Date.UTC(2026, 9, 16, 7, 5, 1), base: 'develop', pipeline: 'passed' });
+      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,createdAt,closedAt,baseRefName,statusCheckRollup');
     } finally {
       process.env.PATH = path;
     }
@@ -359,6 +687,16 @@ describe('host steps against real git', () => {
     }
   });
 
+  it('opens the PR as a draft only in a Project that sets draftPr', async () => {
+    for (const [draftPr, expected] of [[true, true], [undefined, false]] as const) {
+      const id = `t-draft-${draftPr ?? 'unset'}`;
+      const prepared = await host.prepare(project, id, context);
+      commit(join(prepared.dir, 'repo'), 'c.txt', id);
+      await withEpicGh('[]', () => host.publish({ ...project, draftPr }, ticket(id), prepared));
+      assert.equal(readFileSync(join(log, 'gh.create'), 'utf8').split('\n').includes('--draft'), expected);
+    }
+  });
+
   it('titles the PR as a Conventional Commit naming the Ticket by its Jira key, and keeps the rest as the body', async () => {
     const prepared = await host.prepare(project, 't-16', { ...context, ticket: { id: 't-16', external_ref: 'jira-OP-7' } });
     commit(join(prepared.dir, 'repo'), 'd.txt', 'd');
@@ -374,6 +712,49 @@ describe('host steps against real git', () => {
     }
     assert.equal(readFileSync(join(log, 'gh.title'), 'utf8'), 'feat(api): OP-7 run the checks');
     assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '## Summary\nthe body');
+  });
+
+  it("names the branch by the Ticket's Jira key, its own or else its parent's, and pushes it under that name (ADR 0010)", async () => {
+    const own = await host.prepare(project, 't-k1', { ...context, ticket: { id: 't-k1', external_ref: 'jira-OP-7' }, parent: { id: 't-kp', labels: ['OP-9'] } });
+    assert.equal(own.branch, 'OP-7-t-k1');
+    assert.equal(git(join(own.dir, 'repo'), 'branch', '--show-current'), 'OP-7-t-k1');
+    commit(join(own.dir, 'repo'), 'k1.txt', 'k1');
+    await host.publish(project, ticket('t-k1'), own);
+    assert.equal(git(origin, 'rev-parse', 'OP-7-t-k1'), git(join(own.dir, 'repo'), 'rev-parse', 'HEAD'));
+
+    const inherited = await host.prepare(project, 't-k2', { ...context, ticket: { id: 't-k2' }, parent: { id: 't-kp', labels: ['OP-9'] } });
+    assert.equal(inherited.branch, 'OP-9-t-k2');
+  });
+
+  it('stacks on the branch the context names for its In review blocker', async () => {
+    const other = join(root, 'other-keyed-stack');
+    git(root, 'clone', '-q', '-b', 'develop', origin, other);
+    git(other, 'switch', '-q', '-c', 'OP-4-t-kb');
+    commit(other, 'keyed-blocker.txt', 'the keyed blocker change');
+    git(other, 'push', '-q', 'origin', 'OP-4-t-kb');
+
+    const prepared = await host.prepare(project, 't-ks', { ...context, inReviewBlocker: { id: 't-kb', title: 'the blocker', prUrl: 'https://example.test/pull/7', branch: 'OP-4-t-kb' } });
+    assert.deepEqual(prepared.stack, { branch: 'OP-4-t-kb', prUrl: 'https://example.test/pull/7' });
+    assert.equal(git(join(prepared.dir, 'repo'), 'rev-parse', 'HEAD'), git(other, 'rev-parse', 'HEAD'));
+  });
+
+  it('lists the given Follow-up titles in a ## Follow-ups section at the end of the PR body, and leaves it out when there are none', async () => {
+    const withTitles = await host.prepare(project, 't-17', context);
+    commit(join(withTitles.dir, 'repo'), 'e.txt', 'e');
+    await host.publish(project, ticket('t-17'), withTitles, { reviewSkipped: 'no review', followUps: ['drop the old export', 'cover the empty case'] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), '> review skipped: no review\n\nthe PR body\n\n## Follow-ups\n\n- drop the old export\n- cover the empty case');
+
+    const without = await host.prepare(project, 't-18', context);
+    commit(join(without.dir, 'repo'), 'f.txt', 'f');
+    await host.publish(project, ticket('t-18'), without, { followUps: [] });
+    assert.equal(readFileSync(join(log, 'gh.body'), 'utf8'), 'the PR body');
+  });
+
+  it('does not ask claude to collect or invent follow-ups for the PR body', async () => {
+    const prepared = await host.prepare(project, 't-19', context);
+    commit(join(prepared.dir, 'repo'), 'g.txt', 'g');
+    await host.publish(project, ticket('t-19'), prepared);
+    assert.doesNotMatch(readFileSync(join(log, 'claude.argv'), 'utf8'), /Follow-ups/i);
   });
 
   it('publishes a given tip instead of whatever the review agent left on the branch, and says the review was skipped', async () => {
@@ -456,7 +837,7 @@ describe('host steps against real git', () => {
     assert.equal(git(clone, 'show', 'origin/pushed:pushed.txt'), 'pushed');
   });
 
-  it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', async () => {
+  it('refuses an alternates file whose name differs only in case, which a case-insensitive disk still serves to git', { skip: !caseInsensitiveDisk && 'the disk is case-sensitive' }, async () => {
     const other = join(root, 'other-project-2');
     git(root, 'init', '-q', other);
     commit(other, 'secret.txt', 'TOP SECRET 2');
@@ -495,6 +876,53 @@ describe('host steps against real git', () => {
     git(clone, 'commit', '-q', '-m', 'oops');
     await assert.rejects(host.publish(project, ticket('t-12'), prepared), /\.env is committed/);
     assert.equal(git(origin, 'branch', '--list', 'agent/t-12'), '');
+  });
+
+  describe('writeTicket', () => {
+    const ticketPath = (dir: string) => join(dir, 'repo/.orchestrator/ticket.json');
+    const handed = { ...context, implementReports: { followUps: [{ ref: 'F1', title: 'drop it', body: 'why' }], friction: [] } };
+
+    it('rewrites the Ticket file with the given context', async () => {
+      const prepared = await host.prepare(project, 't-wt1', context);
+      await host.writeTicket(prepared, handed);
+      assert.deepEqual(JSON.parse(readFileSync(ticketPath(prepared.dir), 'utf8')), handed);
+    });
+
+    it('refuses a ticket.json that is a symlink and leaves its target untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt2', context);
+      const target = join(root, 'wt2-target');
+      writeFileSync(target, 'host file');
+      rmSync(ticketPath(prepared.dir));
+      symlinkSync(target, ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+      assert.equal(readFileSync(target, 'utf8'), 'host file');
+    });
+
+    it('refuses an .orchestrator that is a symlink and leaves the directory it points at untouched', async () => {
+      const prepared = await host.prepare(project, 't-wt3', context);
+      const targetDir = join(root, 'wt3-target');
+      mkdirSync(targetDir);
+      writeFileSync(join(targetDir, 'ticket.json'), 'host file');
+      rmSync(join(prepared.dir, 'repo/.orchestrator'), { recursive: true });
+      symlinkSync(targetDir, join(prepared.dir, 'repo/.orchestrator'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.equal(readFileSync(join(targetDir, 'ticket.json'), 'utf8'), 'host file');
+    });
+
+    it('refuses a clone whose repo is a symlink', async () => {
+      const prepared = await host.prepare(project, 't-wt4', context);
+      const moved = join(root, 'wt4-moved');
+      renameSync(join(prepared.dir, 'repo'), moved);
+      symlinkSync(moved, join(prepared.dir, 'repo'));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain directory/);
+      assert.deepEqual(JSON.parse(readFileSync(join(moved, '.orchestrator/ticket.json'), 'utf8')), context);
+    });
+
+    it('refuses when the sandbox deleted the Ticket file', async () => {
+      const prepared = await host.prepare(project, 't-wt5', context);
+      rmSync(ticketPath(prepared.dir));
+      await assert.rejects(host.writeTicket(prepared, handed), /not a plain file/);
+    });
   });
 
   it('refuses a clone whose refs reach out of it through a symlink', async () => {
@@ -575,11 +1003,19 @@ describe('host steps against real git', () => {
 
 describe('PR title', () => {
   it('names a Ticket by its own Jira key, else its parent epic\'s, else its own id', () => {
-    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null });
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null, openFriction: [] });
     assert.equal(key({ external_ref: 'jira-OP-7' }, { external_ref: 'jira-OP-1' }), 'OP-7');
     assert.equal(key({}, { external_ref: 'jira-OP-1' }), 'OP-1');
     assert.equal(key({ external_ref: 'gh-12' }, null), 't-9');
     assert.equal(key({}, {}), 't-9');
+  });
+
+  it('also takes a Jira key from a bare external_ref or a label, the Ticket\'s before its parent\'s', () => {
+    const key = (ticket: Record<string, unknown>, parent: Record<string, unknown> | null) => ticketKey('t-9', { ticket, parent, closedBlockers: [], inReviewBlocker: null, openFriction: [] });
+    assert.equal(key({ labels: ['in-review'] }, { labels: ['epic-branch', 'OP-2567', 'ready-for-agent'] }), 'OP-2567');
+    assert.equal(key({ external_ref: 'TV-839' }, { labels: ['OP-1'] }), 'TV-839');
+    assert.equal(key({ labels: ['DW-5482'] }, { external_ref: 'jira-OP-1' }), 'DW-5482');
+    assert.equal(key({ labels: ['op-7', 'needs-info'] }, null), 't-9');
   });
 
   it('puts the key before the subject of a Conventional Commit first line, with or without a scope', () => {
@@ -591,5 +1027,33 @@ describe('PR title', () => {
     for (const output of ['## Summary\nbody', 'feature: add x\n\nbody', 'feat!: drop the API\n\nbody', 'Feat: add x\n\nbody']) {
       assert.deepEqual(prTitleAndBody(output, 'OP-2', 'Add x'), { title: 'chore: OP-2 Add x', body: output }, output);
     }
+  });
+
+  it('names the key once in that fallback when the Ticket title already starts with it', () => {
+    assert.equal(prTitleAndBody('## Summary', 'OP-2567', 'OP-2567: Gmail sync attaches').title, 'chore: OP-2567 Gmail sync attaches');
+    assert.equal(prTitleAndBody('## Summary', 'OP-25', 'OP-2567 is unrelated').title, 'chore: OP-25 OP-2567 is unrelated');
+  });
+});
+
+describe('pipelineOf', () => {
+  const run = (status: string, conclusion = '') => ({ status, conclusion });
+
+  it('has no Pipeline when GitHub lists no check', () => {
+    assert.equal(pipelineOf([]), 'none');
+  });
+
+  it('fails on any failed or timed out check, whatever else is unfinished', () => {
+    assert.equal(pipelineOf([run('IN_PROGRESS'), run('COMPLETED', 'TIMED_OUT')]), 'failed');
+    assert.equal(pipelineOf([run('COMPLETED', 'FAILURE')]), 'failed');
+    assert.equal(pipelineOf([{ state: 'ERROR' }]), 'failed');
+  });
+
+  it('is pending while one check is unfinished and none failed, and while a check is queued, running or cancelled, or a commit status pending', () => {
+    assert.equal(pipelineOf([run('COMPLETED', 'SUCCESS'), run('IN_PROGRESS')]), 'pending');
+    for (const check of [run('QUEUED'), run('IN_PROGRESS'), run('COMPLETED', 'CANCELLED'), { state: 'PENDING' }]) assert.equal(pipelineOf([check]), 'pending');
+  });
+
+  it('passes when every check succeeded, was skipped or neutral', () => {
+    assert.equal(pipelineOf([run('COMPLETED', 'SUCCESS'), run('COMPLETED', 'SKIPPED'), run('COMPLETED', 'NEUTRAL'), { state: 'SUCCESS' }]), 'passed');
   });
 });

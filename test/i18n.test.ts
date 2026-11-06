@@ -17,6 +17,11 @@ it('gives Thai every English string, none of them empty', () => {
   for (const [path] of leaves(en)) assert.ok(thai.get(path)?.trim(), `th.${path} is missing or empty`);
 });
 
+it('gives Thai no string English lacks', () => {
+  const english = new Map(leaves(en));
+  for (const [path] of leaves(th)) assert.ok(english.has(path), `en.${path} is missing`);
+});
+
 it('picks singular or plural English by count', () => {
   assert.equal(en.attempts(1), '1 attempt');
   assert.equal(en.allPausedRest(1), "Nothing will start, though 1 Ticket is ready. Flip a Project's switch to resume it.");

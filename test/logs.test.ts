@@ -22,6 +22,13 @@ it("reads one Run's log files as a single stream, oldest Attempt first, ignoring
   assert.equal((await logs.slice(7, 2, 99)).toString(), 'CD'); // past the end
 });
 
+it("reads a Spec Run's breakdown logs, oldest Attempt first", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
+  writeFileSync(join(dir, '8-attempt2-breakdown.log'), 'B');
+  writeFileSync(join(dir, '8-attempt1-breakdown.log'), 'A');
+  assert.equal((await createRunLogs(dir).slice(8, 0, 9)).toString(), 'AB');
+});
+
 it('treats a Run with no log yet, or no log directory, as empty', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'runlogs-'));
   assert.equal(await createRunLogs(dir).size(3), 0);

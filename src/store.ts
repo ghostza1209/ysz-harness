@@ -1,13 +1,15 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 export type RunState =
   | 'claimed' | 'agent' | 'agent-review' | 'host' | 'needs-attention'
-  | 'in-review' | 'merged' | 'pr-closed' | 'failed' | 'killed' | 'interrupted';
+  | 'in-review' | 'merged' | 'pr-closed' | 'broken-down' | 'landed' | 'failed' | 'killed' | 'interrupted';
 
 /** Only these states hold a capacity slot; needs-attention frees it. */
 const SLOT_STATES = ['claimed', 'agent', 'agent-review', 'host'];
+/** Rollback-journal mode: a writer waits this long for a reader's lock (`npm run bug` reads while ysz runs) instead of failing at once. */
+const BUSY_TIMEOUT_MS = 5_000;
 /** Runs the user can still act on: the slot holders and the ones waiting on a Retry or Kill. */
 const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 
@@ -15,6 +17,17 @@ const LIVE_STATES = [...SLOT_STATES, 'needs-attention'];
 export interface AgentUsage {
   context: number;
   tokens: number;
+}
+
+/** What one agent sandbox took from the host, summarised over its life; memory, disk and network in bytes, CPU in cores of the Docker VM. */
+export interface Footprint {
+  startedAt: number;
+  seconds: number;
+  peakMemory: number;
+  cpuAvg: number;
+  cpuPeak: number;
+  disk: number;
+  networkIn: number;
 }
 
 export interface RunRow {
@@ -26,6 +39,8 @@ export interface RunRow {
   /** Attempts started so far: 0 until the agent starts. */
   attempt: number;
   prUrl: string | null;
+  /** ADR 0010: the branch the Run's clone was cut on, which its PR is opened from. Null before its clone, for a Spec's or an epic's PR Run, and for Runs from before it was recorded: those were cut on `agent/<ticket-id>`. */
+  branch: string | null;
   /** The branch the PR targets when it is not the Project's baseBranch: an epic branch or a stacked-on blocker's. Null otherwise, and for Runs from before it was recorded. */
   prBase: string | null;
   /** Why a Run failed. */
@@ -34,20 +49,34 @@ export interface RunRow {
   endedAt: number | null;
   /** The Run's disposable clone while it exists on disk; null once removed or before the first one. */
   cloneDir: string | null;
+  /** The clone's size on disk, measured once the Run ended failed or killed; null until then. */
+  cloneBytes: number | null;
   /** When the human archived the Run, hiding it from history; null while not archived. */
   archivedAt: number | null;
   /** The model the Run's agents ran on; null for Runs from before it was recorded. */
   model: string | null;
   /** Each agent's usage by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
   usage: Record<string, AgentUsage>;
+  /** Each sandbox's Footprint by its log part name (`attempt1-implement`); empty for Runs from before it was recorded. */
+  footprint: Record<string, Footprint>;
   /** When GitHub says the PR merged or closed, ending the Run's Review wait; null before then and for Runs from before it was recorded. */
   prClosedAt: number | null;
+  /** When the Run was Cleared and its Ticket closed before the merge (ADR 0012); null while its Ticket is not. */
+  clearedAt: number | null;
+  /** What the Run's agents reported and ysz recorded as Tickets; null when nothing was. Not a live view of bd. */
+  reports: Reports | null;
 }
 
-type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'archivedAt' | 'prClosedAt'>>;
+/** Follow-ups go to the Project's queue, Friction to ysz's own; `seenAgain` marks a Friction that only got a comment. */
+export interface Reports {
+  followUps: { id: string; title: string }[];
+  friction: { id: string; title: string; seenAgain: boolean }[];
+}
+
+type RunPatch = Partial<Pick<RunRow, 'state' | 'attempt' | 'prUrl' | 'branch' | 'prBase' | 'note' | 'endedAt' | 'cloneDir' | 'cloneBytes' | 'archivedAt' | 'prClosedAt' | 'clearedAt'>>;
 
 const COLUMNS: Record<keyof RunPatch, string> = {
-  state: 'state', attempt: 'attempt', prUrl: 'pr_url', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at',
+  state: 'state', attempt: 'attempt', prUrl: 'pr_url', branch: 'branch', prBase: 'pr_base', note: 'note', endedAt: 'ended_at', cloneDir: 'clone_dir', cloneBytes: 'clone_bytes', archivedAt: 'archived_at', prClosedAt: 'pr_closed_at', clearedAt: 'cleared_at',
 };
 
 /** A Project's Backlog and Ready Ticket counts from the poll at `at`. */
@@ -72,11 +101,17 @@ export interface Store {
   history(limit: number): RunRow[];
   /** Archived Runs, newest first. */
   archived(limit: number): RunRow[];
+  /** Every Run that ended but still has its clone, archived ones too, newest first. */
+  cloned(): RunRow[];
   /** Every Run, live and archived ones too, oldest first. */
   allRuns(): RunRow[];
   getRun(id: number): RunRow | undefined;
   /** Record one agent's usage so far, under its log part name. */
   setUsage(id: number, part: string, usage: AgentUsage): void;
+  /** Record one sandbox's Footprint, under its log part name. */
+  setFootprint(id: number, part: string, footprint: Footprint): void;
+  /** Replace what the Run reported. */
+  setReports(id: number, reports: Reports): void;
   deleteRun(id: number): void;
   /** Save what a Run needs to resume its host steps after a restart (JSON; the store does not read it). */
   setHostJob(id: number, job: string): void;
@@ -92,10 +127,45 @@ export interface Store {
   backlogHistory(): BacklogPoint[];
 }
 
+const toRow = (r: Record<string, unknown>): RunRow => ({
+  id: r.id as number,
+  project: r.project as string,
+  ticketId: r.ticket_id as string,
+  title: r.title as string,
+  state: r.state as RunState,
+  attempt: r.attempt as number,
+  prUrl: r.pr_url as string | null,
+  branch: r.branch as string | null,
+  prBase: r.pr_base as string | null,
+  note: r.note as string | null,
+  startedAt: r.started_at as number,
+  endedAt: r.ended_at as number | null,
+  cloneDir: r.clone_dir as string | null,
+  cloneBytes: r.clone_bytes as number | null,
+  archivedAt: r.archived_at as number | null,
+  model: r.model as string | null,
+  usage: JSON.parse((r.usage as string | null) ?? '{}'),
+  footprint: JSON.parse((r.footprint as string | null) ?? '{}'),
+  prClosedAt: r.pr_closed_at as number | null,
+  clearedAt: r.cleared_at as number | null,
+  reports: r.reports ? JSON.parse(r.reports as string) : null,
+});
+
+/** The Runs of the store at `path`, oldest first, read without writing: no table created, no migration, so ysz need not run. A missing file has none. */
+export function readRuns(path: string): RunRow[] {
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path, { readOnly: true, timeout: BUSY_TIMEOUT_MS });
+  try {
+    return db.prepare('SELECT * FROM runs ORDER BY id').all().map(toRow);
+  } finally {
+    db.close();
+  }
+}
+
 /** `:memory:` or a file path; the parent directory is created. */
 export function openStore(path: string): Store {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
+  const db = new DatabaseSync(path, { timeout: BUSY_TIMEOUT_MS });
   // The walking skeleton's runs table never held a real Run, so a pre-1 database is simply rebuilt.
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 1) {
     db.exec('DROP TABLE IF EXISTS runs; PRAGMA user_version = 1');
@@ -133,6 +203,21 @@ export function openStore(path: string): Store {
   if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 8) {
     db.exec('ALTER TABLE runs ADD COLUMN pr_closed_at INTEGER; PRAGMA user_version = 8');
   }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 9) {
+    db.exec('ALTER TABLE runs ADD COLUMN reports TEXT; PRAGMA user_version = 9');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 10) {
+    db.exec('ALTER TABLE runs ADD COLUMN clone_bytes INTEGER; PRAGMA user_version = 10');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 11) {
+    db.exec('ALTER TABLE runs ADD COLUMN footprint TEXT; PRAGMA user_version = 11');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 12) {
+    db.exec('ALTER TABLE runs ADD COLUMN branch TEXT; PRAGMA user_version = 12');
+  }
+  if ((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 13) {
+    db.exec('ALTER TABLE runs ADD COLUMN cleared_at INTEGER; PRAGMA user_version = 13');
+  }
   db.exec('CREATE TABLE IF NOT EXISTS paused_projects (project TEXT PRIMARY KEY)');
   db.exec(`CREATE TABLE IF NOT EXISTS backlog (project TEXT NOT NULL, at INTEGER NOT NULL, backlog INTEGER NOT NULL, ready INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS backlog_project_at ON backlog (project, at)`);
@@ -142,34 +227,18 @@ export function openStore(path: string): Store {
   const live = db.prepare(`SELECT * FROM runs WHERE ${inStates(LIVE_STATES)} ORDER BY id`);
   const ended = db.prepare(`SELECT * FROM runs WHERE NOT (${inStates(LIVE_STATES)}) AND archived_at IS NULL ORDER BY id DESC LIMIT ?`);
   const shelved = db.prepare('SELECT * FROM runs WHERE archived_at IS NOT NULL ORDER BY id DESC LIMIT ?');
+  const withClone = db.prepare(`SELECT * FROM runs WHERE clone_dir IS NOT NULL AND NOT (${inStates(LIVE_STATES)}) ORDER BY id DESC`);
   const reviewing = db.prepare("SELECT * FROM runs WHERE state = 'in-review' ORDER BY id");
   const byId = db.prepare('SELECT * FROM runs WHERE id = ?');
   const every = db.prepare('SELECT * FROM runs ORDER BY id');
   const setUsage = db.prepare("UPDATE runs SET usage = json_set(coalesce(usage, '{}'), ?, json(?)) WHERE id = ?");
+  const setFootprint = db.prepare("UPDATE runs SET footprint = json_set(coalesce(footprint, '{}'), ?, json(?)) WHERE id = ?");
   const pause = db.prepare('INSERT OR IGNORE INTO paused_projects (project) VALUES (?)');
   const resume = db.prepare('DELETE FROM paused_projects WHERE project = ?');
   const paused = db.prepare('SELECT project FROM paused_projects');
   const lastCounts = db.prepare('SELECT backlog, ready FROM backlog WHERE project = ? ORDER BY at DESC LIMIT 1');
   const addCounts = db.prepare('INSERT INTO backlog (project, at, backlog, ready) VALUES (?, ?, ?, ?)');
   const counts = db.prepare('SELECT project, at, backlog, ready FROM backlog ORDER BY at, rowid');
-  const toRow = (r: Record<string, unknown>): RunRow => ({
-    id: r.id as number,
-    project: r.project as string,
-    ticketId: r.ticket_id as string,
-    title: r.title as string,
-    state: r.state as RunState,
-    attempt: r.attempt as number,
-    prUrl: r.pr_url as string | null,
-    prBase: r.pr_base as string | null,
-    note: r.note as string | null,
-    startedAt: r.started_at as number,
-    endedAt: r.ended_at as number | null,
-    cloneDir: r.clone_dir as string | null,
-    archivedAt: r.archived_at as number | null,
-    model: r.model as string | null,
-    usage: JSON.parse((r.usage as string | null) ?? '{}'),
-    prClosedAt: r.pr_closed_at as number | null,
-  });
   return {
     insertRun: (r) => Number(insert.run(r.project, r.ticketId, r.title, r.state, r.startedAt, r.model ?? null).lastInsertRowid),
     updateRun(id, patch) {
@@ -184,12 +253,15 @@ export function openStore(path: string): Store {
     inReview: () => reviewing.all().map(toRow),
     history: (limit) => ended.all(...LIVE_STATES, limit).map(toRow),
     archived: (limit) => shelved.all(limit).map(toRow),
+    cloned: () => withClone.all(...LIVE_STATES).map(toRow),
     allRuns: () => every.all().map(toRow),
     getRun: (id) => {
       const row = byId.get(id);
       return row && toRow(row);
     },
     setUsage: (id, part, usage) => void setUsage.run(`$."${part}"`, JSON.stringify(usage), id),
+    setFootprint: (id, part, footprint) => void setFootprint.run(`$."${part}"`, JSON.stringify(footprint), id),
+    setReports: (id, reports) => void db.prepare('UPDATE runs SET reports = ? WHERE id = ?').run(JSON.stringify(reports), id),
     deleteRun: (id) => void db.prepare('DELETE FROM runs WHERE id = ?').run(id),
     setHostJob: (id, job) => void db.prepare('UPDATE runs SET host_job = ? WHERE id = ?').run(job, id),
     hostJob: (id) => (db.prepare('SELECT host_job FROM runs WHERE id = ?').get(id)?.host_job as string | null | undefined) ?? null,

@@ -1,5 +1,5 @@
-import { Children, createContext, lazy, memo, Suspense, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { ProjectStatus, QueueItem } from '../src/core';
+import { Children, createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { Orchestrator, ProjectStatus, QueueItem } from '../src/core';
 import { dicts, en, span, type Dict, type Lang } from './i18n';
 import { epicOf, groupRuns, type GroupBy } from './history';
 import { parseLog, splitLog, type LogBlock } from './logView';
@@ -7,11 +7,12 @@ import { muted, openedPrs, play, setMuted, stageCue } from './sound';
 import type { Range } from './stats';
 import { SAMPLE_LOG, sampleState, startTour } from './tour';
 import type { RunRow, RunState } from '../src/store';
+import { reportable } from '../src/reportable';
 
 export interface State {
   slots: { used: number; total: number };
   ready: QueueItem[];
-  runs: { live: RunRow[]; history: RunRow[]; archived: RunRow[] };
+  runs: ReturnType<Orchestrator['runs']>;
   projects: ProjectStatus[];
 }
 
@@ -21,6 +22,7 @@ const PAGE = 20;
 
 /** Its own chunk, so the overview never loads the chart library. */
 const Stats = lazy(() => import('./StatsPage'));
+const Backlog = lazy(() => import('./BacklogPage'));
 
 const T = createContext<Dict>(en);
 const useT = () => useContext(T);
@@ -179,6 +181,9 @@ function LogTail({ runId, now }: { runId: number; now: number }) {
 }
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const gigabytes = new Intl.NumberFormat('en', { style: 'unit', unit: 'gigabyte', maximumSignificantDigits: 3 });
+/** A clone's disk use, from bytes: clones run from hundreds of MB to several GB. */
+const gb = (bytes: number) => gigabytes.format(bytes / 1e9);
 
 /** Each agent's context window and tokens, in the order they ran, then the Run's total tokens. Older Runs have none. */
 function Usage({ usage, brief }: { usage: RunRow['usage']; brief?: boolean }) {
@@ -207,11 +212,42 @@ function Usage({ usage, brief }: { usage: RunRow['usage']; brief?: boolean }) {
   );
 }
 
+/** A Run's Follow-ups and Friction as one chip each, shown only when the kind has some; opening a chip lists each title with its Ticket id. */
+function Reports({ reports }: { reports: RunRow['reports'] }) {
+  const t = useT();
+  if (!reports) return null;
+  const kinds = [
+    { name: t.followUps, items: reports.followUps.map((f) => ({ ...f, seenAgain: false })) },
+    { name: t.friction, items: reports.friction },
+  ].filter((k) => k.items.length);
+  if (!kinds.length) return null;
+  return (
+    <div className="reports">
+      {kinds.map((k) => (
+        <details key={k.name} className="report">
+          <summary className="tag">
+            {k.name} {k.items.length}
+          </summary>
+          <ul>
+            {/* By position: a Friction seen again in the same Run repeats its id. */}
+            {k.items.map((i, n) => (
+              <li key={n}>
+                <code>{i.id}</code> {i.title}
+                {i.seenAgain && <span className="mute"> · {t.seenAgain}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 /** A log part's name (`attempt2-review`, `host`) as its stage on the stage bar, with its Attempt once there are two. */
 const partLabel = (name: string, attempts: boolean) => {
-  const m = /^attempt(\d+)-(implement|review)$/.exec(name);
+  const m = /^attempt(\d+)-(implement|review|breakdown)$/.exec(name);
   if (!m) return STAGE_NAMES.host;
-  const stage = m[2] === 'review' ? STAGE_NAMES['agent-review'] : STAGE_NAMES.agent;
+  const stage = m[2] === 'review' ? STAGE_NAMES['agent-review'] : m[2] === 'breakdown' ? 'Breakdown' : STAGE_NAMES.agent;
   return attempts ? `${stage} · ${m[1]}` : stage;
 };
 
@@ -312,11 +348,13 @@ const ago = (ms: number, t: Dict) => {
 };
 /** A stage's name for the states on the stage bar, so pills and bar agree. */
 const label = (state: string) => STAGE_NAMES[state as keyof typeof STAGE_NAMES] ?? state.replace('-', ' ');
-/** How many of `runs` are in each state, in the order the states first show up. */
+/** Done first, trouble last, so a group's counts read the same way every time. */
+const STATE_ORDER: RunState[] = ['merged', 'in-review', 'pr-closed', 'broken-down', 'landed', 'claimed', 'agent', 'agent-review', 'host', 'needs-attention', 'interrupted', 'killed', 'failed'];
+/** How many of `runs` are in each state, in STATE_ORDER. */
 const stateCounts = (runs: RunRow[]) => {
-  const n = new Map<string, number>();
+  const n = new Map<RunState, number>();
   for (const r of runs) n.set(r.state, (n.get(r.state) ?? 0) + 1);
-  return [...n];
+  return [...n].sort(([a], [b]) => STATE_ORDER.indexOf(a) - STATE_ORDER.indexOf(b));
 };
 const prNumber = (url: string) => url.match(/\/pull\/(\d+)/)?.[1];
 
@@ -338,7 +376,7 @@ function Stages({ state }: { state: RunRow['state'] }) {
   );
 }
 
-function Copy({ text }: { text: string }) {
+export function Copy({ text }: { text: string }) {
   const t = useT();
   const [done, setDone] = useState(false);
   return (
@@ -358,9 +396,10 @@ function Copy({ text }: { text: string }) {
   );
 }
 
-/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first. */
-function More({ id, children }: { id: number; children: ReactNode }) {
+/** A ⋯ button opening a popover of a Run's rarer actions; nothing when every child is empty. Picking one closes it first, hiding its button's dots: while `busy` names the action in flight, a status in its place says so. */
+function More({ id, busy, children }: { id: number; busy?: string | null; children: ReactNode }) {
   const t = useT();
+  if (busy) return <span className="act waiting" role="status">{busy}</span>;
   if (!Children.toArray(children).length) return null;
   return (
     <>
@@ -369,6 +408,58 @@ function More({ id, children }: { id: number; children: ReactNode }) {
       </button>
       <div className="more-menu" id={`more-${id}`} popover="auto" style={{ positionAnchor: `--more-${id}` }} onClickCapture={(e) => e.currentTarget.hidePopover()}>
         {children}
+      </div>
+    </>
+  );
+}
+
+const BUG_ICON = (
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <ellipse cx="8" cy="9.5" rx="3.5" ry="4.5" />
+    <path d="M8 5.5V14M4.5 9.5H2M14 9.5h-2.5M5.5 6 3.5 4M10.5 6l2-2M5 13l-2 1.5M11 13l2 1.5" />
+  </svg>
+);
+
+/**
+ * A bug button opening a popover that walks the reporter through a Bug report: for a Run, step 1 downloads its excerpt
+ * file and step 2 opens the pre-filled form; without a Run, only step 2, for a bug that is in no Run. Plain links to the
+ * server's routes, so nothing is popup-blocked and step 2 does not wait for step 1.
+ */
+function ReportBug({ run }: { run?: RunRow }) {
+  const t = useT();
+  const id = run ? `bug-${run.id}` : 'bug-general';
+  const base = run ? `/api/runs/${run.id}` : '/api';
+  return (
+    <>
+      {run ? (
+        <button className="act" popoverTarget={id} style={{ anchorName: `--${id}` }}>
+          {BUG_ICON}
+          {t.report}
+        </button>
+      ) : (
+        <button className="ghost theme" popoverTarget={id} style={{ anchorName: `--${id}` }} aria-label={t.reportGeneral} title={t.reportGeneral}>
+          {BUG_ICON}
+        </button>
+      )}
+      <div className="more-menu bug-steps" id={id} popover="auto" style={{ positionAnchor: `--${id}` }}>
+        <b>{run ? t.reportRunHeading(run.ticketId) : t.reportGeneralHeading}</b>
+        <span className="mute">{run ? t.reportRunHelp : t.reportGeneralHelp}</span>
+        <ol>
+          {run && (
+            <li>
+              <a className="act" download href={`${base}/bug-report`}>
+                {t.reportDownload(`${run.ticketId}-run${run.id}.log`)}
+              </a>
+            </li>
+          )}
+          <li>
+            <a className="act" href={`${base}/bug-form`} target="_blank" rel="noreferrer">
+              {t.reportOpenForm} <span className="arrow">↗</span>
+            </a>
+            {run && <span className="mute"> {t.reportDragFile}</span>}
+          </li>
+        </ol>
+        <span className="mute">{run ? t.reportRunPublic : t.reportGeneralPublic}</span>
       </div>
     </>
   );
@@ -402,10 +493,14 @@ const FILTERS = {
   'in-review': (s: string) => s === 'in-review',
   merged: (s: string) => s === 'merged',
   'pr-closed': (s: string) => s === 'pr-closed',
+  'broken-down': (s: string) => s === 'broken-down',
+  landed: (s: string) => s === 'landed',
   failed: (s: string) => s === 'failed' || s === 'interrupted',
   killed: (s: string) => s === 'killed',
   // Lists the archived Runs instead of the history.
   archived: () => true,
+  // Lists every Run that still has a clone instead, however far back.
+  cloned: () => true,
 };
 
 /** The error a 401 from /api/state stands for: this browser has no Dashboard cookie. */
@@ -519,6 +614,10 @@ export function App() {
       return next;
     });
   };
+  // The same `post` for the memoised Backlog page, which the clock's re-renders of App would otherwise redraw every second.
+  const postNow = useRef(post);
+  postNow.current = post;
+  const stablePost = useCallback((url: string, done: string) => postNow.current(url, done), []);
   /** Pause every picking Project, or resume all once every one is paused: one POST each, one toast. */
   const pauseAll = async (resume: boolean) => {
     const targets = state!.projects.filter((p) => p.paused === resume);
@@ -551,15 +650,17 @@ export function App() {
   const slots = view?.slots ?? { used: 0, total: 2 };
   const history = view?.runs.history ?? [];
   const archived = view?.runs.archived ?? [];
+  const cloned = view?.runs.cloned ?? [];
+  const listed = filter === 'archived' ? archived : filter === 'cloned' ? cloned : history;
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (filter === 'archived' ? archived : history).filter(
+    return listed.filter(
       (r) =>
         FILTERS[filter](r.state) &&
         (!project || r.project === project) &&
         (!q || r.ticketId.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
     );
-  }, [history, archived, filter, project, query]);
+  }, [listed, filter, project, query]);
   /** Failed Runs a Retry may re-queue: only each Ticket's newest Run, and none of a Ticket that has a live Run. */
   const retryable = useMemo(() => {
     const seen = new Set(view?.runs.live.map((r) => `${r.project}/${r.ticketId}`));
@@ -571,8 +672,8 @@ export function App() {
     }
     return ids;
   }, [view, history]);
-  // Fewer than asked for means the server has no more.
-  const more = (group === 'none' && shown.length > visible) || (filter === 'archived' ? archived : history).length >= limit.current;
+  // Fewer than asked for means the server has no more; it always sends every Run with a clone.
+  const more = (group === 'none' && shown.length > visible) || (filter !== 'cloned' && listed.length >= limit.current);
   const showMore = () => {
     setVisible((v) => v + PAGE);
     limit.current += PAGE;
@@ -587,20 +688,28 @@ export function App() {
       : dayOf(ms) === yesterday.toDateString()
         ? t.yesterday
         : new Date(ms).toLocaleDateString(t === en ? [] : t.locale, { weekday: 'short', day: 'numeric', month: 'short' });
-  const row = (r: RunRow) => (
+  /** A History row; under its epic's header it leaves out the Project and epic branch the header already says. */
+  const row = (r: RunRow, inEpic = false) => (
     <div className="tr" key={r.id}>
       <span className={`pill ${r.state}`}>{label(r.state)}</span>
       <div className="what">
         <div className="row">
-          <span className="tag">{r.project}</span>
+          {!inEpic && <span className="tag">{r.project}</span>}
           <Copy text={r.ticketId} />
           {r.model && <span className="tag model" title={t.model}>{r.model}</span>}
-          {r.prBase && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
+          {r.prBase && !(inEpic && [`/${epicOf(r.ticketId)}`, `-${epicOf(r.ticketId)}`].some((end) => r.prBase!.endsWith(end))) && <span className="tag" title={t.prBase}>→ {r.prBase}</span>}
         </div>
         <div className="title" title={r.note ? `${r.title}\n${r.note}` : r.title}>
           {r.title}
         </div>
         <Usage usage={r.usage} brief={density === 'compact'} />
+        <Reports reports={r.reports} />
+        {r.cloneDir && (
+          <div className="row where">
+            <Copy text={r.cloneDir} />
+            {r.cloneBytes !== null && <span className="mute">{gb(r.cloneBytes)}</span>}
+          </div>
+        )}
         {r.note && <div className="note">{r.note}</div>}
       </div>
       <div className="when">
@@ -638,8 +747,9 @@ export function App() {
             {t.requeue}
           </button>
         )}
-        <More id={r.id}>
-          {(r.state === 'failed' || r.state === 'killed') && r.cloneDir && (
+        {reportable(r.state).ok && <ReportBug run={r} />}
+        <More id={r.id} busy={busy.has(`/api/runs/${r.id}/cleanup`) ? t.cleaningUp : busy.has(`/api/runs/${r.id}/delete`) ? t.deleting : null}>
+          {r.cloneDir && (
             <button {...pending(r, 'cleanup', 'small')} onClick={() => void act(r, 'cleanup', t.cleanedUp)}>
               {t.cleanUp}
             </button>
@@ -649,7 +759,7 @@ export function App() {
               {t.delete}
             </button>
           )}
-          {(r.state === 'merged' || r.state === 'pr-closed') &&
+          {(r.state === 'merged' || r.state === 'pr-closed' || r.state === 'broken-down' || r.state === 'landed') &&
             (r.archivedAt ? (
               <button {...pending(r, 'unarchive', 'small')} onClick={() => void act(r, 'unarchive', t.unarchived)}>
                 {t.unarchive}
@@ -666,9 +776,13 @@ export function App() {
   const allPaused = !!view && view.projects.length > 0 && view.projects.every((p) => p.paused);
   // The tour's steps are on the overview.
   const onStats = hash === '#stats' && !demo;
+  const onBacklog = hash === '#backlog' && !demo;
   // The same array until the Projects change, so the Stats page skips the polls' re-renders.
   const projectList = view?.projects.map((p) => p.name).join('\n') ?? '';
   const projectNames = useMemo(() => (projectList ? projectList.split('\n') : []), [projectList]);
+  // A held Ticket's Run stage for the Backlog page, as its Run card names it; the same map until the live Runs change.
+  const live = view?.runs.live;
+  const stages = useMemo(() => new Map((live ?? []).map((r) => [`${r.project}/${r.ticketId}`, label(r.state)])), [live]);
   const stats = view && [
     { key: 'live', n: view.runs.live.length, label: 'Running' },
     { key: 'ready', n: view.ready.length, label: 'Ready' },
@@ -693,8 +807,11 @@ export function App() {
           </b>
         </div>
         <nav className="chips">
-          <a className={`chip ${onStats ? '' : 'on'}`} href="#" aria-current={onStats ? undefined : 'page'}>
+          <a className={`chip ${onStats || onBacklog ? '' : 'on'}`} href="#" aria-current={onStats || onBacklog ? undefined : 'page'}>
             {t.overview}
+          </a>
+          <a className={`chip ${onBacklog ? 'on' : ''}`} href="#backlog" aria-current={onBacklog ? 'page' : undefined}>
+            {t.backlog.title}
           </a>
           <a className={`chip ${onStats ? 'on' : ''}`} href="#stats" aria-current={onStats ? 'page' : undefined}>
             {t.stats}
@@ -707,6 +824,7 @@ export function App() {
           </button>
           <SoundToggle />
           <ThemeToggle />
+          <ReportBug />
           <button className="ghost theme" onClick={() => setDemo(sampleState(Date.now()))} aria-label={t.startTour} title={t.startTour}>
             ?
           </button>
@@ -765,7 +883,11 @@ export function App() {
       )}
 
       <div className="page">
-        {onStats ? (
+        {onBacklog ? (
+          <Suspense fallback={<div className="skeleton" />}>
+            <Backlog t={t} stages={stages} refreshMs={REFRESH_MS} post={stablePost} />
+          </Suspense>
+        ) : onStats ? (
           <Suspense fallback={<div className="skeleton" />}>
             <Stats t={t} projects={projectNames} project={project} setProject={setProject} range={range} setRange={setRange} />
           </Suspense>
@@ -797,14 +919,14 @@ export function App() {
                       <div className="title">{r.title}</div>
                       <Stages state={r.state} />
                       <div className="row where">
-                        {/* Branch name as HostSteps.prepare in host.ts makes it. */}
-                        <Copy text={`agent/${r.ticketId}`} />
+                        {r.branch && <Copy text={r.branch} />}
                         {r.cloneDir ? <Copy text={r.cloneDir} /> : <span className="mute">{t.cloning}</span>}
                       </div>
                       <div className="mute">
                         {t.started(time(r.startedAt, t))} · <span className="elapsed">{span(now - r.startedAt, t)}</span>
                       </div>
                       <Usage usage={r.usage} />
+                      <Reports reports={r.reports} />
                       {r.state === 'needs-attention' ? (
                         <div className="note">{r.note}</div>
                       ) : (
@@ -817,6 +939,7 @@ export function App() {
                           </button>
                         )}
                         <span className="grow" />
+                        {reportable(r.state).ok && <ReportBug run={r} />}
                         {r.state === 'needs-attention' && (
                           <button {...pending(r, 'retry', 'primary')} onClick={() => void act(r, 'retry', t.retrying)}>
                             {t.retryHostStep}
@@ -843,6 +966,8 @@ export function App() {
                         <span className="pos">{i + 1}</span>
                         <span className="tag">{q.project}</span>
                         <span className={`tag prio p${q.priority}`}>P{q.priority}</span>
+                        {q.spec && <span className="tag" title={t.specTitle}>Spec</span>}
+                        {q.epicPr && <span className="tag" title={t.epicPrTitle}>Epic PR</span>}
                         <Copy text={q.id} />
                       </div>
                       <div className="title">{q.title}</div>
@@ -872,7 +997,14 @@ export function App() {
                 <div className="chips" role="group" aria-label={t.filterByState}>
                   {(Object.keys(FILTERS) as (keyof typeof FILTERS)[]).map((f) => (
                     <button key={f} className={`chip ${filter === f ? 'on' : ''}`} aria-pressed={filter === f} onClick={() => setFilter(f)}>
-                      {f === 'all' ? t.all : f === 'archived' ? t.archived : label(f)}
+                      {f === 'all' ? t.all : f === 'archived' ? t.archived : f === 'cloned' ? t.hasClone : label(f)}
+                      {f === 'cloned' && cloned.length > 0 && (
+                        <span className="mute" title={t.clonesSize}>
+                          {' '}
+                          {gb(view.runs.clonedBytes)}
+                          {cloned.some((r) => r.cloneBytes === null) && '+'}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -902,29 +1034,53 @@ export function App() {
                 <div className={`table ${density}`}>
                   {groupRuns(group === 'none' ? shown.slice(0, visible) : shown, group).map((g, i) =>
                     g.key === null ? (
-                      g.runs.map(row)
+                      g.runs.map((r) => row(r))
                     ) : (
                       // Today's opens; every epic and older day starts folded.
-                      <details key={g.key} className="group" open={group === 'day' && i === 0}>
-                        <summary>
-                          {group === 'epic' ? (
-                            <>
-                              <span className="tag">{g.runs[0].project}</span>
-                              <b>{epicOf(g.runs[0].ticketId)}</b>
-                            </>
-                          ) : (
-                            <b>{dayLabel(g.runs[0].endedAt ?? g.runs[0].startedAt)}</b>
-                          )}
-                          <span className="count">{g.runs.length}</span>
-                          {stateCounts(g.runs).map(([s, n]) => (
-                            <span key={s} className={`pill ${s}`}>
-                              {n} {label(s)}
+                      <details key={g.key} className={`group ${group}`} open={group === 'day' && i === 0}>
+                        {group === 'epic' ? (
+                          // Laid out as a Run row, so the epic's columns line up with its Tickets'.
+                          <summary className="tr">
+                            <span className="mix" role="img" aria-label={stateCounts(g.runs).map(([s, n]) => `${n} ${label(s)}`).join(', ')}>
+                              <span className="bar">
+                                {stateCounts(g.runs).map(([s, n]) => (
+                                  <span key={s} className={s} style={{ flexGrow: n }} />
+                                ))}
+                              </span>
+                              <span className="counts">
+                                {stateCounts(g.runs).map(([s, n]) => (
+                                  <span key={s} className={s} title={label(s)}>
+                                    {n}
+                                  </span>
+                                ))}
+                              </span>
                             </span>
-                          ))}
-                          <span className="grow" />
-                          {group === 'epic' && <time className="mute">{ago(now - (g.runs[0].endedAt ?? g.runs[0].startedAt), t)}</time>}
-                        </summary>
-                        {g.runs.map(row)}
+                            <div className="what">
+                              <div className="row">
+                                <span className="tag">{g.runs[0].project}</span>
+                                <code>{epicOf(g.runs[0].ticketId)}</code>
+                                <span className="count">{g.runs.length}</span>
+                              </div>
+                              {/* The Spec's own title, when ysz broke it down and so has its Run. */}
+                              <div className="title">{g.runs.find((r) => r.ticketId === epicOf(r.ticketId))?.title}</div>
+                            </div>
+                            <div className="when">
+                              {/* The runs are in Ticket order, so the newest is anywhere among them. */}
+                              <time>{ago(now - Math.max(...g.runs.map((r) => r.endedAt ?? r.startedAt)), t)}</time>
+                            </div>
+                          </summary>
+                        ) : (
+                          <summary>
+                            <b>{dayLabel(g.runs[0].endedAt ?? g.runs[0].startedAt)}</b>
+                            <span className="count">{g.runs.length}</span>
+                            {stateCounts(g.runs).map(([s, n]) => (
+                              <span key={s} className={`pill ${s}`}>
+                                {n} {label(s)}
+                              </span>
+                            ))}
+                          </summary>
+                        )}
+                        {g.runs.map((r) => row(r, group === 'epic'))}
                       </details>
                     ),
                   )}

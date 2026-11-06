@@ -17,11 +17,23 @@ it('groups Tickets under their epic per Project, leaving a lone Run ungrouped', 
     run(1, 'PopDeal', 'PopDeal-41f.3.1', 1),
   ];
   assert.deepEqual(ids(groupRuns(runs, 'epic')), [
-    ['PopDeal/PopDeal-41f', [6, 4]],
+    ['PopDeal/PopDeal-41f', [4, 6]],
     [null, [5]],
-    ['PopDeal/PopDeal-41f.3', [3, 1]],
+    ['PopDeal/PopDeal-41f.3', [1, 3]],
     [null, [2]],
   ]);
+});
+
+it("lists an epic's Runs as the Spec, then its Tickets by number, each Ticket's retries newest first", () => {
+  const runs = [
+    run(6, 'fazwaz', 'laravel-qfx.10', 1),
+    run(5, 'fazwaz', 'laravel-qfx.2', 1),
+    run(4, 'fazwaz', 'laravel-qfx', 1),
+    run(3, 'fazwaz', 'laravel-qfx.2', 1),
+    run(2, 'fazwaz', 'laravel-qfx.1', 1),
+    run(1, 'fazwaz', 'laravel-qfx', 1),
+  ];
+  assert.deepEqual(ids(groupRuns(runs, 'epic')), [['fazwaz/laravel-qfx', [4, 1, 2, 5, 3, 6]]]);
 });
 
 it('groups by the local day a Run ended, or started while it has not', () => {

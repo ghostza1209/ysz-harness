@@ -2,20 +2,21 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createBeadsGateway } from './beads';
+import { gatherFacts, generalReportLink, redactor, runExcerpt, runReportLink } from './bugReport';
 import { createOrchestrator } from './core';
 import { createHostSteps } from './host';
 import { appendRunLog, createRunLogs } from './logs';
 import { projects } from './projects';
 import { createSandboxRunner, MODEL } from './sandbox';
-import { createHttpServer } from './server';
+import { createHttpServer, type BugReports } from './server';
 import { openStore } from './store';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT ?? 4000);
 /** bd serializes all access to a Project's DB, so every poll briefly blocks the user's own bd calls. */
-const POLL_INTERVAL_MS = 30_000;
+const POLL_INTERVAL_MS = 10_000;
 
-const beads = createBeadsGateway();
+const beads = createBeadsGateway({ yszRepo: root });
 const orchestrator = createOrchestrator({
   projects,
   beads,
@@ -40,7 +41,7 @@ for (const problem of await orchestrator.recover()) console.error(`[recover] ${p
 // Sequential, so a slow poll can never overlap the next one. A tick only starts Runs; they finish in the background.
 void (async () => {
   for (;;) {
-    // Before the poll, which can run long: a bd lease lasts 5 minutes and the loop comes round every 30 seconds.
+    // Before the poll, which can run long: a bd lease lasts 5 minutes and the loop comes round every 10 seconds.
     await Promise.all(projects.map((p) => beads.heartbeat(p).catch((err) => console.error(`[heartbeat] ${p.name}: ${err.message}`))));
     for (const problem of await orchestrator.watchReviews()) console.error(`[review-watch] ${problem}`);
     await orchestrator.poll();
@@ -62,6 +63,15 @@ try {
   writeFileSync(tokenPath, token, { mode: 0o600 });
 }
 
-createHttpServer(orchestrator, `${root}dist`, createRunLogs(`${root}data/logs`), token).listen(port, '127.0.0.1', () => {
+// Redaction reads every Project's copyToWorktree files as they are when the report is made, so the Projects are a function.
+const runLogs = createRunLogs(`${root}data/logs`);
+const currentProjects = () => projects;
+const bugs: BugReports = {
+  file: (run) => runExcerpt(run, runLogs, redactor(root, currentProjects())),
+  runLink: async (run) => runReportLink(run, await gatherFacts(root), redactor(root, currentProjects())),
+  generalLink: async () => generalReportLink(await gatherFacts(root)),
+};
+
+createHttpServer(orchestrator, `${root}dist`, runLogs, token, bugs).listen(port, '127.0.0.1', () => {
   console.log(`ysz on http://localhost:${port}/?token=${token}`);
 });
