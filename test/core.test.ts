@@ -45,6 +45,8 @@ let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
 /** How each PR's Pipeline stands (pending when unset) and when it opened (long ago when unset). */
 let pipelines: Record<string, Pipeline>;
 let prOpenedAt: Record<string, number>;
+/** The branch GitHub says each PR targets now; main when unset. */
+let prBases: Record<string, string>;
 let touchedByHand: Set<string>;
 let outcomeError: Error | undefined;
 /** Each live Run's "<state> <attempt>" as every prepare starts. */
@@ -340,7 +342,7 @@ const fakeHost: HostSteps = {
   async prState(_project, prUrl) {
     const state = prStates[prUrl] ?? new Error(`no such PR ${prUrl}`);
     if (state instanceof Error) throw state;
-    return { state, openedAt: prOpenedAt[prUrl] ?? now - 60 * 60_000, closedAt: state === 'OPEN' ? null : CLOSED_AT, pipeline: pipelines[prUrl] ?? 'pending' };
+    return { state, openedAt: prOpenedAt[prUrl] ?? now - 60 * 60_000, closedAt: state === 'OPEN' ? null : CLOSED_AT, base: prBases[prUrl] ?? 'main', pipeline: pipelines[prUrl] ?? 'pending' };
   },
 };
 
@@ -365,6 +367,7 @@ beforeEach(() => {
   prStates = {};
   pipelines = {};
   prOpenedAt = {};
+  prBases = {};
   touchedByHand = new Set();
   outcomeError = undefined;
   killError = undefined;
@@ -1036,6 +1039,7 @@ describe('a Run stacked on an In review blocker', () => {
     await o.tick();
     await o.whenIdle();
     prStates = { 'https://example.test/thaivis/pull/1975': 'OPEN', 'https://example.test/thaivis/pull/1979': 'MERGED' };
+    prBases['https://example.test/thaivis/pull/1979'] = 'OP-3-tv13';
     assert.deepEqual(await o.watchReviews(), []);
 
     inReviewBlocker = null;
@@ -2935,6 +2939,26 @@ describe('watching in-review PRs', () => {
     assert.deepEqual(writes, [`merged thaivis/tv1 ${PR_URL}`]);
     assert.deepEqual(states(o), [['tv1', 'merged', now + 1000, CLOSED_AT]]);
     assert.deepEqual(runLog, [`1: PR merged: ${PR_URL}`]);
+  });
+
+  it('records the branch the PR merged into, which GitHub changed when the branch it opened on was deleted', async () => {
+    // PopDeal-cxm opened onto OP-2655-PopDeal-o3o; that branch was deleted when its PR merged, so GitHub retargeted cxm onto develop.
+    const id = inReview('tv14', PR_URL);
+    store.updateRun(id, { prBase: 'agent/tv13' });
+    prStates[PR_URL] = 'MERGED';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.equal(o.runs().history[0].prBase, null);
+  });
+
+  it('keeps the branch a PR merged into when it is not the baseBranch', async () => {
+    const id = inReview('tv14', PR_URL);
+    store.updateRun(id, { prBase: 'agent/tv13' });
+    prStates[PR_URL] = 'MERGED';
+    prBases[PR_URL] = 'agent/tv13';
+    const o = await polled();
+    assert.deepEqual(await o.watchReviews(), []);
+    assert.equal(o.runs().history[0].prBase, 'agent/tv13');
   });
 
   it('ends a Run PR closed and hands its bead back once the PR closes unmerged', async () => {

@@ -86,10 +86,10 @@ export interface HostSteps {
   /** A clone's disk use in bytes, by du, which does not follow links out of it. */
   cloneSize(clone: Pick<Prepared, 'dir'>): Promise<number>;
   /**
-   * The PR's state on GitHub, when it opened, when it merged or closed (null while open) and how its Pipeline stands
-   * (ADR 0012), asked as the Project's gh account.
+   * The PR's state on GitHub, when it opened, when it merged or closed (null while open), the branch it targets now
+   * and how its Pipeline stands (ADR 0012), asked as the Project's gh account.
    */
-  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; openedAt: number; closedAt: number | null; pipeline: Pipeline }>;
+  prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; openedAt: number; closedAt: number | null; base: string; pipeline: Pipeline }>;
 }
 
 /** How a PR's Pipeline stands: failed once any check failed, pending while one is unfinished, none when GitHub lists no check. */
@@ -556,9 +556,9 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
 
     async prState(project, prUrl) {
       // GitHub sets closedAt on a merge too, to the merge time.
-      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,createdAt,closedAt,statusCheckRollup'], project.repoPath, { env: await ghEnv(project) });
-      const { state, createdAt, closedAt, statusCheckRollup } = JSON.parse(out);
-      return { state, openedAt: Date.parse(createdAt), closedAt: closedAt ? Date.parse(closedAt) : null, pipeline: pipelineOf(statusCheckRollup ?? []) };
+      const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,createdAt,closedAt,baseRefName,statusCheckRollup'], project.repoPath, { env: await ghEnv(project) });
+      const { state, createdAt, closedAt, baseRefName, statusCheckRollup } = JSON.parse(out);
+      return { state, openedAt: Date.parse(createdAt), closedAt: closedAt ? Date.parse(closedAt) : null, base: baseRefName, pipeline: pipelineOf(statusCheckRollup ?? []) };
     },
 
     async removeClone({ dir }) {

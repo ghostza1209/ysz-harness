@@ -660,12 +660,12 @@ describe('host steps against real git', () => {
   it("reads a PR's state, when it opened and closed and how its Pipeline stands as the Project's gh account", async () => {
     const bin = join(root, 'bin-pr-view');
     mkdirSync(bin, { recursive: true });
-    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","createdAt":"2026-10-16T06:00:00Z","closedAt":"2026-10-16T07:05:01Z","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}'`);
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\necho "\${GH_TOKEN:-none} $*" > ${log}/gh.view\necho '{"state":"MERGED","createdAt":"2026-10-16T06:00:00Z","closedAt":"2026-10-16T07:05:01Z","baseRefName":"develop","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}'`);
     const path = process.env.PATH;
     process.env.PATH = `${bin}:${path}`;
     try {
-      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', openedAt: Date.UTC(2026, 9, 16, 6, 0, 0), closedAt: Date.UTC(2026, 9, 16, 7, 5, 1), pipeline: 'passed' });
-      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,createdAt,closedAt,statusCheckRollup');
+      assert.deepEqual(await host.prState({ ...project, ghUser: 'work-acct' }, 'https://example.test/pull/4'), { state: 'MERGED', openedAt: Date.UTC(2026, 9, 16, 6, 0, 0), closedAt: Date.UTC(2026, 9, 16, 7, 5, 1), base: 'develop', pipeline: 'passed' });
+      assert.equal(readFileSync(join(log, 'gh.view'), 'utf8').trim(), 'tok-work-acct pr view https://example.test/pull/4 --json state,createdAt,closedAt,baseRefName,statusCheckRollup');
     } finally {
       process.env.PATH = path;
     }

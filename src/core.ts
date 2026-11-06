@@ -850,7 +850,7 @@ export function createOrchestrator(deps: {
           continue;
         }
         try {
-          const { state, openedAt, closedAt, pipeline } = await host.prState(project, run.prUrl);
+          const { state, openedAt, closedAt, base, pipeline } = await host.prState(project, run.prUrl);
           if (state === 'OPEN') {
             // ADR 0012: a Pipeline with no check at all is only believed once GitHub has had time to list its checks.
             const shouldClear = pipeline === 'passed' || (pipeline === 'none' && clock.now() - openedAt >= NO_PIPELINE_AFTER_MS);
@@ -871,7 +871,8 @@ export function createOrchestrator(deps: {
           const merged = state === 'MERGED';
           // Bead first: if its write fails the Run stays in-review, so the next call tries again.
           const written = merged ? await beads.merged(project, run.ticketId, run.prUrl) : await beads.prClosed(project, run.ticketId, run.prUrl);
-          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed', prClosedAt: closedAt });
+          // GitHub retargets an open PR when its base branch is deleted, so the base it opened on may not be where it merged.
+          store.updateRun(run.id, { state: merged ? 'merged' : 'pr-closed', prClosedAt: closedAt, prBase: base === project.baseBranch ? null : base });
           logRun(run.id, `PR ${merged ? 'merged' : 'closed unmerged'}: ${run.prUrl}`);
           if (!written) logRun(run.id, 'Ticket left alone: changed by hand since the PR opened');
         } catch (err) {
