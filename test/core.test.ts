@@ -45,6 +45,8 @@ let prStates: Record<string, 'OPEN' | 'MERGED' | 'CLOSED' | Error>;
 /** How each PR's Pipeline stands (pending when unset) and when it opened (long ago when unset). */
 let pipelines: Record<string, Pipeline>;
 let prOpenedAt: Record<string, number>;
+/** The PR urls whose merge commit is on the Project's base branch. */
+let landedPrs: Set<string>;
 /** The branch GitHub says each PR targets now; main when unset. */
 let prBases: Record<string, string>;
 let touchedByHand: Set<string>;
@@ -344,6 +346,9 @@ const fakeHost: HostSteps = {
     if (state instanceof Error) throw state;
     return { state, openedAt: prOpenedAt[prUrl] ?? now - 60 * 60_000, closedAt: state === 'OPEN' ? null : CLOSED_AT, base: prBases[prUrl] ?? 'main', pipeline: pipelines[prUrl] ?? 'pending' };
   },
+  async landedOnBase(_project, prUrl) {
+    return landedPrs.has(prUrl);
+  },
 };
 
 let store: Store;
@@ -367,6 +372,7 @@ beforeEach(() => {
   prStates = {};
   pipelines = {};
   prOpenedAt = {};
+  landedPrs = new Set();
   prBases = {};
   touchedByHand = new Set();
   outcomeError = undefined;
@@ -1086,6 +1092,22 @@ describe('a Run stacked on an In review blocker', () => {
     mergedRun('tv14', 'agent/tv13', Date.parse('2026-10-08T11:00:00Z'));
     prStates['https://example.test/tv14'] = 'MERGED';
     prBases['https://example.test/tv14'] = 'main';
+    closedBlockers = [{ id: 'tv14', title: 'title of tv14', closeReason: '' }];
+    queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
+    const o = await polled();
+    await o.tick();
+    await o.whenIdle();
+    assert.equal(preparedContexts[0].inReviewBlocker, null);
+    assert.equal(o.runs().history.find((r) => r.ticketId === 'tv14')!.prBase, null);
+  });
+
+  it("starts the Run when the blocker merged into the branch that had already merged but its merge commit has since reached the base branch", async () => {
+    // PopDeal-l88's PR merged into PopDeal-n5s's branch a second after PopDeal-n5s's PR merged; the branch was later landed on develop.
+    mergedRun('tv13', 'epic/tv', Date.parse('2026-10-08T10:00:00Z'));
+    mergedRun('tv14', 'agent/tv13', Date.parse('2026-10-08T11:00:00Z'));
+    prStates['https://example.test/tv14'] = 'MERGED';
+    prBases['https://example.test/tv14'] = 'agent/tv13';
+    landedPrs.add('https://example.test/tv14');
     closedBlockers = [{ id: 'tv14', title: 'title of tv14', closeReason: '' }];
     queues = { thaivis: [ticket('tv18', 2, '2026-01-01T00:00:00Z')] };
     const o = await polled();
