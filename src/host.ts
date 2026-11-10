@@ -90,6 +90,11 @@ export interface HostSteps {
    * and how its Pipeline stands (ADR 0012), asked as the Project's gh account.
    */
   prState(project: Project, prUrl: string): Promise<{ state: 'OPEN' | 'MERGED' | 'CLOSED'; openedAt: number; closedAt: number | null; base: string; pipeline: Pipeline }>;
+  /**
+   * Whether a merged PR's merge commit is reachable from the Project's base branch, asked as the Project's gh account.
+   * A PR squashed into a branch that later merged by another commit is not, though its changes are.
+   */
+  landedOnBase(project: Project, prUrl: string): Promise<boolean>;
 }
 
 /** How a PR's Pipeline stands: failed once any check failed, pending while one is unfinished, none when GitHub lists no check. */
@@ -559,6 +564,15 @@ export function createHostSteps(model: string, clonesDir = CLONES_DIR): HostStep
       const out = await text('gh', ['pr', 'view', prUrl, '--json', 'state,createdAt,closedAt,baseRefName,statusCheckRollup'], project.repoPath, { env: await ghEnv(project) });
       const { state, createdAt, closedAt, baseRefName, statusCheckRollup } = JSON.parse(out);
       return { state, openedAt: Date.parse(createdAt), closedAt: closedAt ? Date.parse(closedAt) : null, base: baseRefName, pipeline: pipelineOf(statusCheckRollup ?? []) };
+    },
+
+    async landedOnBase(project, prUrl) {
+      const env = await ghEnv(project);
+      const oid = JSON.parse(await text('gh', ['pr', 'view', prUrl, '--json', 'mergeCommit'], project.repoPath, { env })).mergeCommit?.oid;
+      if (!oid) return false;
+      // compare base...oid reads "behind" when the base branch already holds oid, "identical" when it is its tip.
+      const status = await text('gh', ['api', `repos/{owner}/{repo}/compare/${project.baseBranch}...${oid}`, '--jq', '.status'], project.repoPath, { env });
+      return status === 'behind' || status === 'identical';
     },
 
     async removeClone({ dir }) {
