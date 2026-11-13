@@ -671,6 +671,30 @@ describe('host steps against real git', () => {
     }
   });
 
+  it("says a merged PR landed on the base branch only when gh compares its merge commit as behind or identical to it", async () => {
+    const bin = join(root, 'bin-landed');
+    mkdirSync(bin, { recursive: true });
+    // `gh pr view` answers with the merge commit the test writes; `gh api` answers with the compare status it writes.
+    script(join(bin, 'gh'), `[ "$1" = auth ] && [ "$2" = token ] && { echo "tok-$4"; exit 0; }\n[ "$1" = pr ] && { echo "$*" >> ${log}/gh.landed; echo "{\\"mergeCommit\\":$(cat ${log}/gh.oid)}"; exit 0; }\necho "$*" >> ${log}/gh.landed\ncat ${log}/gh.status`);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const landed = async (oid: string, status: string) => {
+        writeFileSync(join(log, 'gh.oid'), oid);
+        writeFileSync(join(log, 'gh.status'), status);
+        return host.landedOnBase(project, 'https://example.test/pull/898');
+      };
+      assert.equal(await landed('{"oid":"da7984d"}', 'behind'), true);
+      assert.equal(await landed('{"oid":"da7984d"}', 'identical'), true);
+      assert.equal(await landed('{"oid":"da7984d"}', 'diverged'), false);
+      assert.equal(await landed('{"oid":"da7984d"}', 'ahead'), false);
+      assert.equal(await landed('null', 'behind'), false); // a PR with no merge commit has nothing to compare
+      assert.match(readFileSync(join(log, 'gh.landed'), 'utf8'), /api repos\/\{owner\}\/\{repo\}\/compare\/develop\.\.\.da7984d --jq \.status/);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+
   it("opens the PR as the Project's gh account, and as gh's active account when it names none", async () => {
     for (const [ghUser, token] of [['work-acct', 'tok-work-acct'], [undefined, 'none']] as const) {
       const id = `t-gh-${ghUser ?? 'default'}`;

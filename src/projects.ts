@@ -44,6 +44,7 @@ export const projects: readonly Project[] = [
   {
     name: 'fazwaz',
     ghUser: 'yoss1209',
+    draftPr: true,
     repoPath: join(projectsDir, 'work/fazwaz'),
     baseBranch: 'develop',
     image: 'ysz-harness/fazwaz',
@@ -77,6 +78,7 @@ export const projects: readonly Project[] = [
   },
   {
     name: 'thaivis',
+    draftPr: true,
     repoPath: appRepo,
     baseBranch: 'develop',
     image: 'ysz-harness/app',

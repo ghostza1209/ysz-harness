@@ -418,7 +418,15 @@ export function createOrchestrator(deps: {
           const onto = cutOn.get(run.prBase);
           // GitHub retargets a PR only when its base branch is deleted, so one merged after that branch's own PR lands where nothing merges on.
           if (onto?.state === 'merged' && run.prClosedAt && onto.prClosedAt && run.prClosedAt > onto.prClosedAt) {
-            throw new Error(`${run.ticketId} merged into ${run.prBase} after ${onto.ticketId} had merged, so its code is on no branch to start from`);
+            // A merged PR's base never changes, so GitHub's answer beats a recorded base that went stale (PopDeal-aqr, ysz-harness-b45).
+            let base = await host.prState(project, run.prUrl!).then((s) => (s.base === project.baseBranch ? null : s.base), () => run!.prBase);
+            // GitHub never retargets a merged PR, so once that branch is landed on the base branch only the merge commit says its code got there.
+            if (base === run.prBase && (await host.landedOnBase(project, run.prUrl!).catch(() => false))) base = null;
+            if (base === run.prBase) throw new Error(`${run.ticketId} merged into ${run.prBase} after ${onto.ticketId} had merged, so its code is on no branch to start from; land ${run.prBase} onto ${project.baseBranch}, then mark this Ticket Ready again`);
+            store.updateRun(run.id, { prBase: base });
+            seen.delete(run.ticketId);
+            run = { ...run, prBase: base };
+            continue;
           }
           run = onto;
         }
