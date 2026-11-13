@@ -404,9 +404,9 @@ describe('imageExists', () => {
 });
 
 /**
- * sandcastle (patches/) against a fake `claude` that prints a line after the Run is aborted. Unpatched, that line restarts
- * the idle warnings in a fiber nobody stops: they append "Agent idle for N minutes" to the killed Run's log for good, and
- * their timers keep the process from exiting.
+ * sandcastle against a fake `claude` that prints a line after the Run is aborted. sandcastle 0.12.0 restarted the idle
+ * warnings in a fiber nobody stops: they appended "Agent idle for N minutes" to the killed Run's log for good, and
+ * their timers kept the process from exiting. 0.14.0 fixed it upstream; this pins that it stays fixed.
  */
 it('stops writing to the log of an aborted agent, even when the agent prints after the abort', async () => {
   const root = mkdtempSync(join(tmpdir(), 'abort-late-line-'));
